@@ -1,0 +1,69 @@
+"""FastAPI auth dependencies: current-user resolution and role/ownership gates.
+
+Every patient-data query in later tasks is expected to route through
+ensure_owner_or_staff, per the Task 4 brief.
+"""
+
+from typing import Annotated
+
+from fastapi import Depends, Request
+from jwt.exceptions import InvalidTokenError
+from sqlalchemy.orm import Session
+
+from app.auth.security import decode_token
+from app.db.session import get_db
+from app.exceptions import PermissionDeniedError
+from app.models import User
+
+
+def get_current_user(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+) -> User:
+    """Resolve the caller from the httpOnly access_token cookie.
+
+    Missing cookie, an unparseable/expired/mis-signed token, or a token
+    whose subject no longer maps to a user: all raise PermissionDeniedError
+    (403), never a distinct 401 — the app has no separate "unauthenticated"
+    error class, and the brief's tests expect 403 either way.
+    """
+    token = request.cookies.get("access_token")
+    if not token:
+        raise PermissionDeniedError("Not authenticated")
+
+    try:
+        payload = decode_token(token)
+    except InvalidTokenError as exc:
+        raise PermissionDeniedError("Not authenticated") from exc
+
+    user_id = payload.get("sub")
+    user = db.get(User, int(user_id)) if user_id is not None else None
+    if user is None:
+        raise PermissionDeniedError("Not authenticated")
+    return user
+
+
+def require_role(*roles: str):
+    """Build a dependency that only lets the given roles through."""
+
+    def _dependency(
+        user: Annotated[User, Depends(get_current_user)],
+    ) -> User:
+        if user.role not in roles:
+            raise PermissionDeniedError("Insufficient permissions")
+        return user
+
+    return _dependency
+
+
+def ensure_owner_or_staff(user: User, patient_id: int, db: Session) -> None:
+    """Raise PermissionDeniedError unless user is staff or owns patient_id.
+
+    db is accepted (unused here) to keep the signature stable for later
+    tasks that need to look up ownership through a join rather than a
+    direct patient_id column.
+    """
+    if user.role == "staff":
+        return
+    if user.id != patient_id:
+        raise PermissionDeniedError("Not allowed to access this resource")

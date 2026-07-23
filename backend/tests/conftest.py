@@ -1,0 +1,152 @@
+"""Shared fixtures: a session-scoped tmp sqlite file db wired into the app,
+plus client factories for a plain patient, a staff member, and a second
+patient's document (used by the ownership RBAC test).
+"""
+
+from __future__ import annotations
+
+import tempfile
+from collections.abc import Generator
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.auth.security import hash_password
+from app.db.base import Base
+from app.db.session import get_db
+from app.main import app
+from app.models import PatientDocument, User
+
+_TEST_PASSWORD = "s3cret-pw-123"  # noqa: S105 - fixture-only test credential
+
+
+@pytest.fixture(scope="session")
+def engine():
+    """One sqlite file for the whole test session, torn down at the end."""
+    tmp_dir = tempfile.mkdtemp(prefix="agentcare-test-")
+    db_path = Path(tmp_dir) / "test.db"
+    test_engine = create_engine(
+        f"sqlite:///{db_path}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(test_engine)
+    yield test_engine
+    test_engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def session_factory(engine):
+    return sessionmaker(bind=engine)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _override_get_db(session_factory):
+    """Point the app's get_db dependency at the tmp test db for every test."""
+
+    def _get_db_override() -> Generator[Session, None, None]:
+        db = session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _get_db_override
+    yield
+    app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture()
+def db_session(session_factory) -> Generator[Session, None, None]:
+    """A raw session for fixtures that need to seed rows directly."""
+    db = session_factory()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+@pytest.fixture()
+def client() -> Generator[TestClient, None, None]:
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _register(test_client: TestClient, *, email: str, name: str) -> None:
+    # Ignore the response: across tests sharing the session-scoped db, a
+    # second registration with the same email 409s on purpose, and the
+    # ensuing login still succeeds against the already-created account.
+    test_client.post(
+        "/api/auth/register",
+        json={
+            "name": name,
+            "email": email,
+            "password": _TEST_PASSWORD,
+            "dob": "1990-01-01",
+            "phone": "+49 170 0000000",
+            "preferred_language": "en",
+            "emergency_contact": "Jane Doe",
+        },
+    )
+
+
+@pytest.fixture()
+def patient_client(client: TestClient) -> TestClient:
+    """A logged-in patient (self-registered through the real endpoint)."""
+    _register(client, email="patient@example.com", name="Pat Patient")
+    login_resp = client.post(
+        "/api/auth/login",
+        json={"email": "patient@example.com", "password": _TEST_PASSWORD},
+    )
+    assert login_resp.status_code == 200, login_resp.text
+    return client
+
+
+@pytest.fixture()
+def staff_client(client: TestClient, db_session: Session) -> TestClient:
+    """A logged-in staff user, created directly in the db (no self-signup)."""
+    existing = db_session.query(User).filter_by(email="staff@example.com").first()
+    if existing is None:
+        staff = User(
+            email="staff@example.com",
+            password_hash=hash_password(_TEST_PASSWORD),
+            role="staff",
+            full_name="Sam Staff",
+        )
+        db_session.add(staff)
+        db_session.commit()
+
+    login_resp = client.post(
+        "/api/auth/login",
+        json={"email": "staff@example.com", "password": _TEST_PASSWORD},
+    )
+    assert login_resp.status_code == 200, login_resp.text
+    return client
+
+
+@pytest.fixture()
+def other_patient_doc(db_session: Session) -> PatientDocument:
+    """A second patient plus one document, owned by that second patient."""
+    other = db_session.query(User).filter_by(email="other-patient@example.com").first()
+    if other is None:
+        other = User(
+            email="other-patient@example.com",
+            password_hash=hash_password(_TEST_PASSWORD),
+            role="patient",
+            full_name="Other Patient",
+        )
+        db_session.add(other)
+        db_session.flush()
+
+    doc = PatientDocument(
+        patient_id=other.id,
+        filename="insurance-card.pdf",
+        document_type="insurance",
+        checksum="0" * 64,
+        storage_ref=f"local://other-patient/insurance-card-{other.id}.pdf",
+    )
+    db_session.add(doc)
+    db_session.commit()
+    db_session.refresh(doc)
+    return doc
