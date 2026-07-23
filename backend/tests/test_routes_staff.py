@@ -118,6 +118,45 @@ def test_create_department_doctor_and_generate_slots(staff_client):
     assert slots_resp.json()[0]["doctor_id"] == doctor_id
 
 
+def test_list_doctors_returns_created_doctor_and_filters_by_department(staff_client):
+    dept_resp = staff_client.post(
+        "/api/staff/departments", json={"name": "Task15-Oncology", "description": None}
+    )
+    assert dept_resp.status_code == 201, dept_resp.text
+    dept_id = dept_resp.json()["id"]
+
+    other_dept_resp = staff_client.post(
+        "/api/staff/departments", json={"name": "Task15-Urology", "description": None}
+    )
+    other_dept_id = other_dept_resp.json()["id"]
+
+    doctor_resp = staff_client.post(
+        "/api/staff/doctors", json={"department_id": dept_id, "name": "Dr. Task Fifteen"}
+    )
+    assert doctor_resp.status_code == 201, doctor_resp.text
+    doctor_id = doctor_resp.json()["id"]
+
+    other_doctor_resp = staff_client.post(
+        "/api/staff/doctors", json={"department_id": other_dept_id, "name": "Dr. Other Department"}
+    )
+    assert other_doctor_resp.status_code == 201
+
+    unfiltered = staff_client.get("/api/staff/doctors")
+    assert unfiltered.status_code == 200
+    unfiltered_ids = [row["id"] for row in unfiltered.json()]
+    assert doctor_id in unfiltered_ids
+    assert other_doctor_resp.json()["id"] in unfiltered_ids
+
+    filtered = staff_client.get(f"/api/staff/doctors?department_id={dept_id}")
+    assert filtered.status_code == 200
+    filtered_ids = [row["id"] for row in filtered.json()]
+    assert filtered_ids == [doctor_id]
+
+
+def test_list_doctors_denied_for_patient(patient_client):
+    assert patient_client.get("/api/staff/doctors").status_code == 403
+
+
 def test_create_department_conflict_on_duplicate_name(staff_client):
     payload = {"name": "Task12-Duplicate-Dept", "description": None}
     first = staff_client.post("/api/staff/departments", json=payload)

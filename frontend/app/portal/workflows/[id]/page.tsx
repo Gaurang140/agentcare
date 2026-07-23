@@ -1,18 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/status-badge";
 import { WorkflowTimeline } from "@/components/workflow-timeline";
-import { ApiError, getWorkflow } from "@/lib/api";
-import type { WorkflowEventPayload, WorkflowRunDetail } from "@/lib/types";
+import { useWorkflowDetail } from "@/hooks/use-workflow-detail";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "escalated"]);
-const POLL_MS = 3000;
 
 interface AppointmentSummary {
   id?: number;
@@ -34,77 +30,9 @@ export default function WorkflowDetailPage() {
   const router = useRouter();
   const workflowId = Number(params.id);
 
-  const [detail, setDetail] = useState<WorkflowRunDetail | null>(null);
-  const [events, setEvents] = useState<WorkflowEventPayload[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [live, setLive] = useState(true);
-  const [notFound, setNotFound] = useState(false);
-
-  useEffect(() => {
-    if (!Number.isFinite(workflowId)) return;
-
-    let cancelled = false;
-    let pollTimer: ReturnType<typeof setInterval> | null = null;
-    let source: EventSource | null = null;
-
-    async function refreshDetail() {
-      try {
-        const result = await getWorkflow(workflowId);
-        if (cancelled) return;
-        setDetail(result);
-        if (TERMINAL_STATUSES.has(result.status) && pollTimer) {
-          clearInterval(pollTimer);
-          pollTimer = null;
-        }
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof ApiError && err.status === 404) {
-          setNotFound(true);
-          return;
-        }
-        toast.error(err instanceof ApiError ? err.message : "Could not reach the server");
-      }
-    }
-
-    function startPolling() {
-      setLive(false);
-      if (pollTimer) return;
-      pollTimer = setInterval(refreshDetail, POLL_MS);
-    }
-
-    refreshDetail().finally(() => {
-      if (!cancelled) setLoading(false);
-    });
-
-    source = new EventSource(`/api/workflows/${workflowId}/events`);
-    source.onmessage = (evt) => {
-      try {
-        const payload = JSON.parse(evt.data) as WorkflowEventPayload;
-        setEvents((prev) => [...prev, payload]);
-      } catch {
-        // malformed SSE payload - skip this one line, keep the stream open
-      }
-    };
-    source.addEventListener("done", () => {
-      refreshDetail();
-      source?.close();
-    });
-    source.onerror = () => {
-      // The backend closes the stream itself on a terminal status (via its
-      // own "done" event) - a plain error here means the connection broke
-      // for some other reason (network hiccup, proxy timeout), so fall back
-      // to polling per the brief rather than trying to reconnect a stream
-      // that may never resume where it left off.
-      source?.close();
-      startPolling();
-    };
-
-    return () => {
-      cancelled = true;
-      source?.close();
-      if (pollTimer) clearInterval(pollTimer);
-    };
-  }, [workflowId]);
+  const { detail, events, loading, live, notFound } = useWorkflowDetail(
+    Number.isFinite(workflowId) ? workflowId : null,
+  );
 
   if (!Number.isFinite(workflowId)) {
     return <p className="text-sm text-muted-foreground">Invalid workflow id.</p>;

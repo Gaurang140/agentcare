@@ -30,7 +30,12 @@ from app.schemas.staff import (
     WorkflowRunSummary,
 )
 from app.tools.appointment_tools import generate_slots_for_doctor
-from app.tools.department_tools import create_department, create_doctor, set_doctor_active
+from app.tools.department_tools import (
+    create_department,
+    create_doctor,
+    list_doctors,
+    set_doctor_active,
+)
 from app.tools.escalation_tools import resolve_escalation
 from app.tools.followup_tools import send_due_reminders
 
@@ -139,6 +144,19 @@ def create_department_route(
 ) -> DepartmentOut:
     result = create_department(db, staff.id, payload.name, payload.description)
     return DepartmentOut(**result)
+
+
+@router.get("/doctors", response_model=list[DoctorOut])
+def list_doctors_route(
+    _staff: Annotated[User, Depends(require_role("staff"))],
+    db: Annotated[Session, Depends(get_db)],
+    department_id: int | None = None,
+) -> list[DoctorOut]:
+    # No route listed doctors before this (only create/toggle existed) -
+    # the catalog page's doctor list and the slot-generation form's doctor
+    # picker both need real data to select from, not a client-only cache
+    # of doctors created in the current session. Added alongside Task 15.
+    return [DoctorOut(**row) for row in list_doctors(db, department_id)]
 
 
 @router.post("/doctors", response_model=DoctorOut, status_code=201)

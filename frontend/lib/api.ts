@@ -225,6 +225,14 @@ export function staffCreateDepartment(payload: DepartmentCreate): Promise<Depart
   return apiFetch("/api/staff/departments", { method: "POST", body: JSON.stringify(payload) });
 }
 
+/** No route listed doctors before Task 15 (only create/toggle existed) - the
+ * catalog page's doctor list and the slot-generation form's doctor picker
+ * both need real data, so `GET /api/staff/doctors` was added alongside the
+ * frontend that needs it (see backend/app/api/routes_staff.py). */
+export function staffListDoctors(departmentId?: number): Promise<DoctorOut[]> {
+  return apiFetch(`/api/staff/doctors${query({ department_id: departmentId })}`);
+}
+
 export function staffCreateDoctor(payload: DoctorCreate): Promise<DoctorOut> {
   return apiFetch("/api/staff/doctors", { method: "POST", body: JSON.stringify(payload) });
 }
