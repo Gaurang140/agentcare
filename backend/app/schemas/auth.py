@@ -2,14 +2,14 @@
 
 from datetime import date
 
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 
 class RegisterRequest(BaseModel):
     """Patient self-registration payload: account + demographic profile."""
 
     name: str
-    email: str
+    email: EmailStr
     password: str
     dob: date | None = None
     phone: str | None = None
@@ -18,7 +18,7 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    email: str
+    email: EmailStr
     password: str
 
 

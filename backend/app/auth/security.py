@@ -1,8 +1,7 @@
 """Password hashing (pwdlib, Argon2id) and JWT helpers (PyJWT, HS256).
 
-passlib is dead for this project; pwdlib's PasswordHash.recommended() picks
-Argon2id, per the verified stack notes. algorithms=["HS256"] is hardcoded on
-decode, never taken from the token header.
+PasswordHash.recommended() picks Argon2id, per the verified stack notes.
+algorithms=["HS256"] is hardcoded on decode, never taken from the token header.
 """
 
 from datetime import datetime, timedelta, timezone

@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # LLM (OpenAI-compatible)
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_api_key: str = ""
-    llm_model: str = "llama-3.3-70b-versatile"
+    llm_model: str = "openai/gpt-oss-120b"
 
     # Database
     database_url: str = "sqlite:///./agentcare.db"
