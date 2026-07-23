@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "openai/gpt-oss-120b"
 
+    # LLM fallback endpoint (optional; e.g. a local LM Studio server). Used
+    # only when the primary client exhausts its retries.
+    llm_fallback_base_url: str = ""
+    llm_fallback_api_key: str = ""
+    llm_fallback_model: str = ""
+
     # Database
     database_url: str = "sqlite:///./agentcare.db"
 
