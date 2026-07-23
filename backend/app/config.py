@@ -25,6 +25,20 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./agentcare.db"
 
+    # LangGraph checkpointer: a raw sqlite3 file path (not a SQLAlchemy URL),
+    # kept separate from the app db to avoid file-locking conflicts between
+    # the two. Ignored when database_url is postgres (checkpoints then live
+    # in the same database).
+    checkpoint_db_path: str = "checkpoints.db"
+
+    # Langfuse tracing (optional, env-gated): entirely inert while both keys
+    # are empty (the default). Enabling it also requires `pip install
+    # langchain`, since langfuse.langchain.CallbackHandler imports it - not
+    # pinned in requirements.txt because the default path never needs it.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = ""
+
     # Auth
     jwt_secret: str = "change_me_generate_a_long_random_string"
     jwt_expire_minutes: int = 1440

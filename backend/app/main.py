@@ -18,6 +18,7 @@ from app.config import settings
 from app.db.session import get_db
 from app.exceptions import register_exception_handlers
 from app.logging_setup import configure_logging, get_logger
+from app.services import workflow_service
 
 logger = get_logger(__name__)
 
@@ -25,7 +26,12 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging()
+    # Builds and compiles the workflow graph once, opening its checkpointer
+    # for the app's lifetime; app.state.graph is the same singleton
+    # app.services.workflow_service uses internally, not a second instance.
+    app.state.graph = workflow_service.get_graph()
     yield
+    workflow_service.close_graph()
 
 
 app = FastAPI(title="AgentCare", lifespan=lifespan)
