@@ -1,11 +1,13 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useCurrentUser } from "@/hooks/use-current-user";
+import { cn } from "@/lib/utils";
 import { logout } from "@/lib/api";
 
 interface NavShellProps {
@@ -16,11 +18,21 @@ interface NavShellProps {
   children: React.ReactNode;
 }
 
+const PATIENT_LINKS = [
+  { href: "/portal", label: "Requests" },
+  { href: "/portal/appointments", label: "Appointments" },
+  { href: "/portal/documents", label: "Documents" },
+  { href: "/portal/reminders", label: "Reminders" },
+];
+
 /** Minimal shared header for the /portal and /staff sections: brand, the
- * signed-in user's name and role badge, and sign-out. Section-specific nav
- * links get added here as later tasks build out real portal/staff pages. */
+ * signed-in user's name and role badge, sign-out, and (patient only for
+ * now - the staff console's own nav is a later task's job) section links.
+ * These links are plain <Link>s to routes the backend itself gates by
+ * role; nothing here is an access check. */
 export function NavShell({ role, children }: NavShellProps) {
   const router = useRouter();
+  const pathname = usePathname();
   const { user } = useCurrentUser();
 
   async function handleLogout() {
@@ -37,12 +49,34 @@ export function NavShell({ role, children }: NavShellProps) {
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
-      <header className="flex items-center justify-between border-b px-6 py-3">
+      <header className="flex flex-col gap-3 border-b px-6 py-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-3">
           <span className="text-base font-semibold">AgentCare</span>
           <Badge variant="secondary" className="capitalize">
             {role === "staff" ? "Staff console" : "Patient portal"}
           </Badge>
+          {role === "patient" ? (
+            <nav className="flex items-center gap-1">
+              {PATIENT_LINKS.map((link) => {
+                const active =
+                  link.href === "/portal" ? pathname === "/portal" : pathname.startsWith(link.href);
+                return (
+                  <Link
+                    key={link.href}
+                    href={link.href}
+                    className={cn(
+                      "rounded-md px-2.5 py-1 text-sm transition-colors",
+                      active
+                        ? "bg-muted font-medium text-foreground"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )}
+                  >
+                    {link.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          ) : null}
         </div>
         <div className="flex items-center gap-3">
           {user ? <span className="text-sm text-muted-foreground">{user.name}</span> : null}

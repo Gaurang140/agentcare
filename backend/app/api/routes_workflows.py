@@ -22,6 +22,7 @@ from app.exceptions import NotFoundError, ValidationError
 from app.logging_setup import get_logger
 from app.models import Escalation, PatientDocument, User, WorkflowRun
 from app.schemas.document import DocumentMeta
+from app.schemas.staff import WorkflowRunSummary
 from app.schemas.workflow import CreateRequestResponse, ResumeResponse, WorkflowRunDetail
 from app.services import workflow_service
 from app.tools.audit_tools import write_audit
@@ -89,6 +90,38 @@ def create_request(
         background_tasks.add_task(run_workflow_background, workflow_run.id, document_ids)
 
     return CreateRequestResponse(workflow_id=workflow_run.id, status=workflow_run.status)
+
+
+def _to_workflow_summary(run: WorkflowRun) -> WorkflowRunSummary:
+    return WorkflowRunSummary(
+        id=run.id,
+        patient_id=run.patient_id,
+        status=run.status,
+        current_step=run.current_step,
+        request_text=run.request_text,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+    )
+
+
+@router.get("", response_model=list[WorkflowRunSummary])
+def list_workflows(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[WorkflowRunSummary]:
+    """Ownership-filtered list of the caller's own workflow runs, most
+    recent first - the patient portal's "my recent requests" list (Task 14
+    brief: no such patient-facing endpoint existed before this; staff keep
+    their own unfiltered queue at GET /api/staff/requests). Reuses
+    WorkflowRunSummary from app.schemas.staff rather than redeclaring an
+    identical schema - the shape is generic to any caller, not staff-specific."""
+    runs = (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.patient_id == current_user.id)
+        .order_by(WorkflowRun.created_at.desc())
+        .all()
+    )
+    return [_to_workflow_summary(run) for run in runs]
 
 
 def _serialize_escalation(escalation: Escalation | None) -> dict | None:

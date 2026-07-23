@@ -7,7 +7,7 @@ route-level tests.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -168,6 +168,63 @@ def test_upload_rejects_one_bad_file_even_with_a_good_one_alongside(patient_clie
 
     assert resp.status_code == 400
     assert db_session.query(PatientDocument).count() == before
+
+
+def test_list_workflows_is_ownership_filtered(patient_client, db_session, other_patient_doc):
+    """GET /api/workflows (the Task 14 patient-portal list) must return only
+    the caller's own runs, never another patient's, even though both rows
+    live in the same table."""
+    me = db_session.query(User).filter_by(email="patient@example.com").first()
+
+    mine = WorkflowRun(
+        user_id=me.id,
+        patient_id=me.id,
+        thread_id=f"wf-mine-{me.id}",
+        request_text="my own request",
+        status="completed",
+    )
+    theirs = WorkflowRun(
+        user_id=other_patient_doc.patient_id,
+        patient_id=other_patient_doc.patient_id,
+        thread_id=f"wf-theirs-{other_patient_doc.id}",
+        request_text="someone else's request",
+        status="completed",
+    )
+    db_session.add_all([mine, theirs])
+    db_session.commit()
+
+    resp = patient_client.get("/api/workflows")
+    assert resp.status_code == 200, resp.text
+    ids = {row["id"] for row in resp.json()}
+
+    assert mine.id in ids
+    assert theirs.id not in ids
+
+
+def test_list_workflows_orders_most_recent_first(patient_client, db_session):
+    """Explicit, minutes-apart created_at values, rather than two back-to-back
+    commits - sqlite's DateTime column only has second resolution, so two
+    rows created in the same test would otherwise tie on created_at and the
+    ORDER BY's tie-break order isn't something this test should depend on."""
+    me = db_session.query(User).filter_by(email="patient@example.com").first()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    first = WorkflowRun(
+        user_id=me.id, patient_id=me.id, thread_id=f"wf-first-{me.id}",
+        request_text="first request", status="completed", created_at=now - timedelta(minutes=5),
+    )
+    second = WorkflowRun(
+        user_id=me.id, patient_id=me.id, thread_id=f"wf-second-{me.id}",
+        request_text="second request", status="running", created_at=now,
+    )
+    db_session.add_all([first, second])
+    db_session.commit()
+
+    resp = patient_client.get("/api/workflows")
+    assert resp.status_code == 200, resp.text
+    ids = [row["id"] for row in resp.json()]
+
+    assert ids.index(second.id) < ids.index(first.id)
 
 
 def test_get_workflow_denied_for_non_owner_non_staff(

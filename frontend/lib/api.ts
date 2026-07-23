@@ -129,6 +129,13 @@ export function submitRequest(formData: FormData): Promise<CreateRequestResponse
   return apiFetch("/api/requests", { method: "POST", body: formData });
 }
 
+/** Ownership-filtered: always the caller's own runs, most recent first
+ * (added to routes_workflows.py alongside this task - no patient-facing
+ * list endpoint existed before). */
+export function listWorkflows(): Promise<WorkflowRunSummary[]> {
+  return apiFetch("/api/workflows");
+}
+
 export function getWorkflow(id: number): Promise<WorkflowRunDetail> {
   return apiFetch(`/api/workflows/${id}`);
 }
