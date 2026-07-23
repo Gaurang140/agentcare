@@ -19,6 +19,13 @@ _BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
+# The default DATABASE_URL is a cwd-relative sqlite path. Alembic and uvicorn
+# are documented to run from backend/, so chdir there before the engine is
+# created - every entry point then agrees on backend/agentcare.db.
+import os  # noqa: E402
+
+os.chdir(_BACKEND_DIR)
+
 from app.db.base import Base  # noqa: E402
 from app.db.seed import seed  # noqa: E402
 from app.db.session import SessionLocal, engine  # noqa: E402

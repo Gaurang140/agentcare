@@ -25,8 +25,8 @@ def get_current_user(
 
     Missing cookie, an unparseable/expired/mis-signed token, or a token
     whose subject no longer maps to a user: all raise PermissionDeniedError
-    (403), never a distinct 401 — the app has no separate "unauthenticated"
-    error class, and the brief's tests expect 403 either way.
+    (403), never a distinct 401. The app deliberately keeps a single
+    permission error class.
     """
     token = request.cookies.get("access_token")
     if not token:
