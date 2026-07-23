@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install dependencies
+        run: pip install -r requirements.txt
+
+      - name: ruff check
+        run: ruff check backend
+
+      - name: compile check
+        run: python -m compileall backend -q
+
+      - name: run tests
+        run: cd backend && pytest -q
