@@ -1,4 +1,4 @@
-"""Response schema for the document metadata stub (Task 12 extends this)."""
+"""Response schemas for document metadata and listing."""
 
 from datetime import datetime
 
@@ -11,3 +11,12 @@ class DocumentMeta(BaseModel):
     filename: str
     document_type: str
     created_at: datetime
+
+
+class DocumentListResponse(BaseModel):
+    """GET /documents: the patient's stored documents, plus - when
+    `department_id` was given - the present/missing badges from
+    `check_required_documents`."""
+
+    documents: list[DocumentMeta]
+    requirements: dict | None = None

@@ -11,6 +11,7 @@ from jwt.exceptions import InvalidTokenError
 from sqlalchemy.orm import Session
 
 from app.auth.security import decode_token
+from app.config import settings
 from app.db.session import get_db
 from app.exceptions import PermissionDeniedError
 from app.models import User
@@ -67,3 +68,25 @@ def ensure_owner_or_staff(user: User, patient_id: int, db: Session) -> None:
         return
     if user.id != patient_id:
         raise PermissionDeniedError("Not allowed to access this resource")
+
+
+def require_internal_or_staff(
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    """Dependency for cron-style internal endpoints (POST
+    /api/internal/reminders/run-due): an `X-Internal-Token` header equal to
+    settings.internal_task_token when that setting is non-empty (the
+    no-browser-session path for an actual cron caller), else fall back to
+    require_role("staff")'s cookie check - the default, since the setting
+    defaults to empty.
+    """
+    token = settings.internal_task_token
+    if token:
+        if request.headers.get("X-Internal-Token") != token:
+            raise PermissionDeniedError("Invalid internal token")
+        return
+
+    user = get_current_user(request, db)
+    if user.role != "staff":
+        raise PermissionDeniedError("Insufficient permissions")

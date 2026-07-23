@@ -71,3 +71,31 @@ def create_followup_task(
     scheduled_at = base_time + timedelta(days=days_after)
 
     return create_reminder(db, patient_id, appointment_id, "followup", scheduled_at)
+
+
+def send_due_reminders(db: Session) -> dict:
+    """Scheduler job1's body: every unsent Reminder whose scheduled_at has
+    passed becomes sent, each with its own "reminder.sent" AuditEvent. Also
+    the body POST /api/internal/reminders/run-due calls on demand."""
+    due = (
+        db.query(Reminder)
+        .filter(Reminder.sent.is_(False), Reminder.scheduled_at <= _naive_utcnow())
+        .all()
+    )
+
+    sent_ids: list[int] = []
+    for reminder in due:
+        reminder.sent = True
+        db.flush()
+        write_audit(
+            db,
+            None,
+            "reminder.sent",
+            "reminder",
+            reminder.id,
+            {"patient_id": reminder.patient_id, "reminder_type": reminder.reminder_type},
+        )
+        sent_ids.append(reminder.id)
+    db.commit()
+
+    return {"sent_count": len(sent_ids), "reminder_ids": sent_ids}

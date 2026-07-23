@@ -16,6 +16,7 @@ test calling these functions directly) shares the same graph/checkpointer.
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -173,14 +174,18 @@ def _invoke_graph(db: Session, workflow_run: WorkflowRun, graph_input: dict | No
         return None
 
 
-def start_workflow(
+def create_run(
     db: Session, user: User, request_text: str, document_ids: list[int] | None = None
 ) -> WorkflowRun:
-    """Screen the request first; only a request the screen allows ever
-    reaches the graph/LLM. Emergency and medical-refusal paths create their
-    WorkflowRun and (for emergency) Escalation directly, with zero LLM
-    calls - never invoking the graph at all."""
-    document_ids = document_ids or []
+    """Screen the request and create its WorkflowRun row - synchronously,
+    with zero LLM calls or graph invocation either way. An emergency or
+    medical-refusal request is already terminal on return (its own
+    escalation, if any, already created via `_screened_run`); a request the
+    screen allows comes back with status "running" and nothing executed
+    yet. Callers that want the graph to actually run call `execute_workflow`
+    next (only when status is still "running") - split out so an HTTP route
+    can hand that part to a background task instead of blocking the
+    request on it, per the Task 12 brief."""
     screen = screen_request(request_text)
 
     if screen.action == "escalate_emergency":
@@ -197,19 +202,50 @@ def start_workflow(
         db, user.id, "workflow.started", "workflow_run", workflow_run.id, {"request_text": request_text}
     )
     db.commit()
+    return workflow_run
+
+
+def execute_workflow(
+    db: Session, workflow_run_id: int, document_ids: list[int] | None = None
+) -> WorkflowRun | None:
+    """Invoke the graph for a WorkflowRun `create_run` already put in
+    status "running". Meant to be safe from a background task holding its
+    own fresh db session, never the request's: it only reads/writes rows
+    reachable through the `db` it was given. A no-op returning the run
+    unchanged if the id is missing or the run is no longer "running" (an
+    already-screened/terminal run, or a duplicate call after the graph
+    already finished it)."""
+    workflow_run = db.get(WorkflowRun, workflow_run_id)
+    if workflow_run is None or workflow_run.status != "running":
+        return workflow_run
 
     initial_state: AgentState = {
         "workflow_id": workflow_run.id,
-        "user_id": user.id,
-        "patient_id": user.id,
-        "request_text": request_text,
-        "uploaded_document_ids": document_ids,
+        "user_id": workflow_run.user_id,
+        "patient_id": workflow_run.patient_id,
+        "request_text": workflow_run.request_text,
+        "uploaded_document_ids": document_ids or [],
     }
 
     final_state = _invoke_graph(db, workflow_run, initial_state)
     if final_state is not None:
         _apply_final_state(workflow_run, final_state)
         db.commit()
+    return workflow_run
+
+
+def start_workflow(
+    db: Session, user: User, request_text: str, document_ids: list[int] | None = None
+) -> WorkflowRun:
+    """Synchronous convenience for tests and any non-HTTP caller: `create_run`
+    then `execute_workflow`, back to back in the same db session. The HTTP
+    route (Task 12) calls the two halves separately instead, running
+    `execute_workflow` in a FastAPI BackgroundTasks callback with its own
+    session so the request returns immediately after `create_run`."""
+    document_ids = document_ids or []
+    workflow_run = create_run(db, user, request_text, document_ids)
+    if workflow_run.status == "running":
+        execute_workflow(db, workflow_run.id, document_ids)
     return workflow_run
 
 
@@ -226,3 +262,40 @@ def resume_workflow(db: Session, workflow_run_id: int) -> WorkflowRun:
         _apply_final_state(workflow_run, final_state)
         db.commit()
     return workflow_run
+
+
+_STALL_THRESHOLD_MINUTES = 30
+
+
+def _naive_utcnow() -> datetime:
+    """Timezone-aware now(), stripped back to naive - matches the naive
+    (but UTC-convention) DateTime columns used throughout the schema."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def escalate_stalled_workflows(db: Session) -> dict:
+    """Scheduler job2's body: any WorkflowRun still "running" whose
+    updated_at hasn't moved in _STALL_THRESHOLD_MINUTES gets its own
+    agent_failure escalation and moves to status "escalated". A run only
+    stays "running" this long if whatever was supposed to execute it (a
+    background task, a crashed process) never got the chance to finish -
+    this is the safety net that keeps such a run from being silently stuck
+    forever."""
+    threshold = _naive_utcnow() - timedelta(minutes=_STALL_THRESHOLD_MINUTES)
+    stalled = (
+        db.query(WorkflowRun)
+        .filter(WorkflowRun.status == "running", WorkflowRun.updated_at <= threshold)
+        .all()
+    )
+
+    escalated_ids: list[int] = []
+    for run in stalled:
+        create_escalation(
+            db, run.id, reason="workflow stalled: no progress in 30 minutes", severity="agent_failure"
+        )
+        run.status = "escalated"
+        db.flush()
+        escalated_ids.append(run.id)
+    db.commit()
+
+    return {"escalated_count": len(escalated_ids), "workflow_run_ids": escalated_ids}

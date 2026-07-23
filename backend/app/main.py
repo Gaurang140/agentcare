@@ -8,16 +8,21 @@ from typing import Annotated
 import structlog
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.routes_auth import router as auth_router
 from app.api.routes_documents import router as documents_router
-from app.api.routes_staff import router as staff_router
+from app.api.routes_events import router as events_router
+from app.api.routes_patient import router as patient_router
+from app.api.routes_staff import internal_router, router as staff_router
+from app.api.routes_workflows import requests_router, router as workflows_router
 from app.config import settings
 from app.db.session import get_db
 from app.exceptions import register_exception_handlers
 from app.logging_setup import configure_logging, get_logger
+from app.scheduler import start_scheduler, stop_scheduler
 from app.services import workflow_service
 
 logger = get_logger(__name__)
@@ -30,7 +35,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # for the app's lifetime; app.state.graph is the same singleton
     # app.services.workflow_service uses internally, not a second instance.
     app.state.graph = workflow_service.get_graph()
+    # No-op under TESTING (see app/scheduler.py) - never double-starts.
+    app.state.scheduler = start_scheduler()
     yield
+    stop_scheduler()
     workflow_service.close_graph()
 
 
@@ -47,6 +55,8 @@ app.add_middleware(
 )
 
 register_exception_handlers(app)
+
+Instrumentator().instrument(app).expose(app)
 
 
 @app.middleware("http")
@@ -66,7 +76,12 @@ async def request_id_middleware(
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(staff_router, prefix="/api")
+app.include_router(internal_router, prefix="/api")
 app.include_router(documents_router, prefix="/api")
+app.include_router(requests_router, prefix="/api")
+app.include_router(workflows_router, prefix="/api")
+app.include_router(events_router, prefix="/api")
+app.include_router(patient_router, prefix="/api")
 
 
 @app.get("/api/health")

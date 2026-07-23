@@ -12,9 +12,16 @@ the first seeded patient, undisturbed by other test files' rows).
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
+
+# Must be set before `from app.main import app` below: app.main's lifespan
+# calls app.scheduler.start_scheduler(), which no-ops under TESTING so
+# pytest never spins up a real BackgroundScheduler (every `client` fixture
+# enters/exits the lifespan once per test).
+os.environ.setdefault("TESTING", "1")
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,7 +59,14 @@ def session_factory(engine):
 
 @pytest.fixture(scope="session", autouse=True)
 def _override_get_db(session_factory):
-    """Point the app's get_db dependency at the tmp test db for every test."""
+    """Point the app's get_db dependency at the tmp test db for every test -
+    and also app.db.session.SessionLocal itself, since Task 12's background
+    task and scheduler jobs open their own session directly through that
+    module attribute (looked up at call time, not bound at import time)
+    rather than through the get_db dependency. Without this, that code path
+    would silently write to the real dev db file instead of the test db.
+    """
+    import app.db.session as db_session_module
 
     def _get_db_override() -> Generator[Session, None, None]:
         db = session_factory()
@@ -62,7 +76,12 @@ def _override_get_db(session_factory):
             db.close()
 
     app.dependency_overrides[get_db] = _get_db_override
+    original_session_local = db_session_module.SessionLocal
+    db_session_module.SessionLocal = session_factory
+
     yield
+
+    db_session_module.SessionLocal = original_session_local
     app.dependency_overrides.pop(get_db, None)
 
 
@@ -112,9 +131,7 @@ def patient_client(client: TestClient) -> TestClient:
     return client
 
 
-@pytest.fixture()
-def staff_client(client: TestClient, db_session: Session) -> TestClient:
-    """A logged-in staff user, created directly in the db (no self-signup)."""
+def _ensure_staff_user(db_session: Session) -> None:
     existing = db_session.query(User).filter_by(email="staff@example.com").first()
     if existing is None:
         staff = User(
@@ -126,12 +143,41 @@ def staff_client(client: TestClient, db_session: Session) -> TestClient:
         db_session.add(staff)
         db_session.commit()
 
+
+@pytest.fixture()
+def staff_client(client: TestClient, db_session: Session) -> TestClient:
+    """A logged-in staff user, created directly in the db (no self-signup)."""
+    _ensure_staff_user(db_session)
+
     login_resp = client.post(
         "/api/auth/login",
         json={"email": "staff@example.com", "password": _TEST_PASSWORD},
     )
     assert login_resp.status_code == 200, login_resp.text
     return client
+
+
+@pytest.fixture()
+def independent_staff_client(db_session: Session) -> Generator[TestClient, None, None]:
+    """A second, independent logged-in-as-staff TestClient, for tests that
+    need a patient session and a staff session open at the same time.
+
+    `patient_client` and `staff_client` both wrap the same function-scoped
+    `client` fixture, so requesting both in one test resolves to the exact
+    same TestClient object (fixture caching within one test call) - whoever
+    logs in last silently wins the shared cookie jar, and the other
+    "session" is actually that same login. This fixture opens its own
+    TestClient instead, so both roles are genuinely independent.
+    """
+    _ensure_staff_user(db_session)
+
+    with TestClient(app) as staff_tc:
+        login_resp = staff_tc.post(
+            "/api/auth/login",
+            json={"email": "staff@example.com", "password": _TEST_PASSWORD},
+        )
+        assert login_resp.status_code == 200, login_resp.text
+        yield staff_tc
 
 
 @pytest.fixture()

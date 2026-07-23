@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     jwt_secret: str = "change_me_generate_a_long_random_string"
     jwt_expire_minutes: int = 1440
 
+    # Internal task token: when set, POST /api/internal/reminders/run-due
+    # accepts an X-Internal-Token header equal to this value instead of a
+    # staff cookie (for cron-style callers with no browser session). Empty
+    # (the default) means that route falls back to require_role("staff").
+    internal_task_token: str = ""
+
     # Storage: local | gcs
     storage_backend: str = "local"
     upload_dir: str = "./uploads"

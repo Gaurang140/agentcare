@@ -39,6 +39,14 @@ class SafetyBlockedError(AppError):
     code = "safety_blocked"
 
 
+class ValidationError(AppError):
+    """Bad client input that isn't a pydantic body-validation error, e.g. a
+    rejected file upload (wrong extension, over the size cap)."""
+
+    status_code = 400
+    code = "validation_error"
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Register handlers that translate exceptions into JSON responses.
 

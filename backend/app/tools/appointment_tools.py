@@ -8,7 +8,7 @@ ConflictError, never a lost-update race.
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -16,6 +16,10 @@ from sqlalchemy.orm import Session
 from app.exceptions import ConflictError, NotFoundError
 from app.models import Appointment, AppointmentSlot, Doctor
 from app.tools.audit_tools import write_audit
+
+_SLOT_START_HOUR = 9
+_SLOT_END_HOUR = 17
+_SLOT_MINUTES = 30
 
 
 def get_available_slots(
@@ -162,6 +166,71 @@ def cancel_appointment(db: Session, appointment_id: int) -> dict:
     )
     db.commit()
     return {"id": appt.id, "status": "cancelled"}
+
+
+def generate_slots_for_doctor(
+    db: Session, doctor_id: int, date_from: date, date_to: date
+) -> list[dict]:
+    """Weekday 09:00-17:00 30-minute slots for one doctor over [date_from,
+    date_to], skipping any (doctor_id, start_time) pair that already exists
+    (the unique constraint would otherwise raise) rather than duplicating
+    it - so calling this twice over an overlapping range is safe.
+    """
+    doctor = db.get(Doctor, doctor_id)
+    if doctor is None:
+        raise NotFoundError(f"Doctor {doctor_id} not found")
+
+    existing_starts = {
+        start
+        for (start,) in db.query(AppointmentSlot.start_time)
+        .filter(AppointmentSlot.doctor_id == doctor_id)
+        .all()
+    }
+
+    created: list[AppointmentSlot] = []
+    day = date_from
+    while day <= date_to:
+        if day.weekday() < 5:  # Monday=0 ... Sunday=6
+            day_start = datetime.combine(day, time(hour=_SLOT_START_HOUR))
+            day_end = datetime.combine(day, time(hour=_SLOT_END_HOUR))
+            step = timedelta(minutes=_SLOT_MINUTES)
+
+            cursor = day_start
+            while cursor + step <= day_end:
+                if cursor not in existing_starts:
+                    slot = AppointmentSlot(
+                        doctor_id=doctor_id,
+                        start_time=cursor,
+                        end_time=cursor + step,
+                        status="free",
+                    )
+                    db.add(slot)
+                    created.append(slot)
+                    existing_starts.add(cursor)
+                cursor += step
+        day += timedelta(days=1)
+
+    db.flush()
+    write_audit(
+        db,
+        None,
+        "slots.generated",
+        "doctor",
+        doctor_id,
+        {"count": len(created), "date_from": date_from.isoformat(), "date_to": date_to.isoformat()},
+    )
+    db.commit()
+
+    return [
+        {
+            "slot_id": slot.id,
+            "doctor_id": slot.doctor_id,
+            "doctor": doctor.name,
+            "start_time": slot.start_time.isoformat(),
+            "end_time": slot.end_time.isoformat(),
+        }
+        for slot in created
+    ]
 
 
 def list_patient_appointments(db: Session, patient_id: int) -> list[dict]:
