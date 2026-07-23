@@ -11,6 +11,7 @@ the first seeded patient, undisturbed by other test files' rows).
 
 from __future__ import annotations
 
+import json
 import tempfile
 from collections.abc import Generator
 from pathlib import Path
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.agents.llm import set_llm_client_for_tests
 from app.auth.security import hash_password
 from app.db.base import Base
 from app.db.seed import seed
@@ -181,3 +183,76 @@ def seeded(db: Session) -> dict[str, int]:
     the first department (id=1), matching the brief's test pseudocode.
     """
     return seed(db)
+
+
+# --- Fake LLM client, shared by every agents/*.run() test -------------------
+# Same shape as tests/test_llm.py's FakeClient (a scripted openai-shaped
+# chat.completions.create), reused here so the six agent-node test files
+# don't each redefine it. Lives in conftest rather than test_llm.py because
+# it's infrastructure the agent tests depend on, not part of what test_llm.py
+# itself is testing.
+
+
+class _FakeMessage:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content: str) -> None:
+        self.message = _FakeMessage(content)
+
+
+class _FakeResponse:
+    def __init__(self, content: str) -> None:
+        self.choices = [_FakeChoice(content)]
+
+
+class _FakeCompletions:
+    """Replays a scripted list of responses/exceptions, one per call."""
+
+    def __init__(self, script: list) -> None:
+        self._script = list(script)
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if not self._script:
+            raise AssertionError("fake LLM client called more times than scripted")
+        item = self._script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class _FakeChat:
+    def __init__(self, completions: _FakeCompletions) -> None:
+        self.completions = completions
+
+
+class FakeLLMClient:
+    """An openai.OpenAI-shaped client that replays a scripted response list."""
+
+    def __init__(self, script: list) -> None:
+        self.chat = _FakeChat(_FakeCompletions(script))
+
+
+@pytest.fixture()
+def fake_llm() -> Generator:
+    """Factory fixture: fake_llm([{...}, ValueError(...), {...}]) builds a
+    FakeLLMClient, injects it via set_llm_client_for_tests, and returns it so
+    the test can assert on `.chat.completions.calls`. Cleared after the test
+    regardless of outcome.
+    """
+
+    def _make(script_items: list) -> FakeLLMClient:
+        script = [
+            item if isinstance(item, Exception) else _FakeResponse(json.dumps(item))
+            for item in script_items
+        ]
+        client = FakeLLMClient(script)
+        set_llm_client_for_tests(client)
+        return client
+
+    yield _make
+    set_llm_client_for_tests(None)
