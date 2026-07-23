@@ -1,0 +1,61 @@
+%% AgentCare system architecture. Source of truth for docs/architecture.md.
+%% Restrained node style, no emoji. Regenerate the copy in architecture.md
+%% from this file when it changes.
+flowchart TD
+    browser["Browser"]
+
+    subgraph frontend["Next.js 16 App Router"]
+        proxy["proxy.ts cookie gate (UX only)"]
+        rewrites["next.config.ts rewrites /api/*"]
+    end
+
+    subgraph api["FastAPI app (app/main.py)"]
+        mw["CORS + request-id middleware"]
+        rbac["Auth + RBAC dependencies"]
+        routers["Routers under /api"]
+        metrics["/metrics"]
+        sse["SSE /workflows/id/events"]
+    end
+
+    subgraph service["workflow_service"]
+        screen["screen_request (deterministic pre-LLM safety)"]
+        run["create_run then execute_workflow"]
+    end
+
+    subgraph lg["LangGraph graph (compiled once)"]
+        coord["coordinator (decision only)"]
+        routing["routing"]
+        appt["appointment"]
+        doc["document"]
+        followup["followup"]
+        safety["safety_finalize"]
+        esc["escalate"]
+    end
+
+    tools["DB tools + audit writer"]
+    sql[("SQL: SQLite or Postgres")]
+    store["Storage adapter: local or GCS"]
+    ckpt[("Checkpointer: SqliteSaver or PostgresSaver")]
+    sched["APScheduler jobs (reminders, stall sweep)"]
+
+    browser --> proxy --> rewrites --> mw --> rbac --> routers --> run
+    run --> screen
+    screen -->|allowed| coord
+    screen -->|emergency or medical refusal| tools
+    coord --> routing --> coord
+    coord --> appt --> coord
+    coord --> doc --> coord
+    coord --> followup --> coord
+    coord --> safety --> tools
+    coord --> esc --> tools
+    routing --> tools
+    appt --> tools
+    doc --> tools
+    followup --> tools
+    tools --> sql
+    tools --> store
+    lg <--> ckpt
+    sched --> sql
+    routers --> metrics
+    sse --> sql
+    browser -. SSE stream .-> sse
