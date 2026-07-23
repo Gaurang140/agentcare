@@ -1,6 +1,12 @@
 """Shared fixtures: a session-scoped tmp sqlite file db wired into the app,
 plus client factories for a plain patient, a staff member, and a second
 patient's document (used by the ownership RBAC test).
+
+Also provides `db` and `seeded`: a fresh, function-scoped in-memory sqlite
+session for the tools-layer tests, isolated from the HTTP-level fixtures
+above and from each other (same reasoning as tests/test_seed.py's own
+throwaway engine - tools tests want predictable ids, e.g. patient_id=1 for
+the first seeded patient, undisturbed by other test files' rows).
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.auth.security import hash_password
 from app.db.base import Base
+from app.db.seed import seed
 from app.db.session import get_db
 from app.main import app
 from app.models import PatientDocument, User
@@ -150,3 +157,27 @@ def other_patient_doc(db_session: Session) -> PatientDocument:
     db_session.commit()
     db_session.refresh(doc)
     return doc
+
+
+@pytest.fixture()
+def db() -> Generator[Session, None, None]:
+    """A throwaway in-memory sqlite session, fresh per test (tools layer)."""
+    test_engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(test_engine)
+    session = Session(test_engine)
+    try:
+        yield session
+    finally:
+        session.close()
+        test_engine.dispose()
+
+
+@pytest.fixture()
+def seeded(db: Session) -> dict[str, int]:
+    """Populate `db` with the standard synthetic demo data (app.db.seed.seed).
+
+    In a fresh db this makes patient_id=1 the first seeded patient (Max
+    Mustermann), patient_id=2 the second (Erika Musterfrau), and Cardiology
+    the first department (id=1), matching the brief's test pseudocode.
+    """
+    return seed(db)
