@@ -1,0 +1,16 @@
+.env
+*.db
+*.sqlite3
+uploads/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+node_modules/
+.next/
+.terraform/
+*.tfstate
+*.tfstate.backup
+.DS_Store
+.superpowers/
