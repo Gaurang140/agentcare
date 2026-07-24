@@ -21,6 +21,12 @@ a specialist already opened (`state["escalation_id"]` set). The graph must
 never depend on the coordinator's own LLM call noticing either one: once a
 case is with a human, the run ends rather than working on past the handoff
 and overwriting the staff-review answer.
+
+The same applies to the ordering rules the coordinator prompt states
+(prompts.py). `_step_allowed` enforces them against the completed-step
+history instead of trusting the decision, and an out-of-order step routes to
+escalate: a coordinator that jumps straight to finalize gets a human, not a
+run marked completed that routed, booked and scheduled nothing.
 """
 
 from __future__ import annotations
@@ -138,18 +144,56 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     }
 
 
+def _ran(state: AgentState, step: str) -> bool:
+    return step in (state.get("completed_steps") or [])
+
+
+def _step_allowed(state: AgentState, step: str) -> bool:
+    """The COORDINATOR prompt's three ordering rules, enforced in code
+    (prompts.py: route_department before handle_appointment, handle_documents
+    when the request carries uploads, schedule_followup then finalize). The
+    argument is a coordinator plan word; the history it checks holds node
+    names, which is why the two vocabularies differ here.
+
+    History-based (has it run at least once), so crash-resume re-entry and
+    legitimate re-visits stay legal. A booking whose department came back
+    null (cancel, status, attach_documents) is legal too: the rule is that
+    routing ran, not that it resolved a department."""
+    if step in ("handle_appointment", "schedule_followup"):
+        return _ran(state, "routing")
+    if step == "finalize":
+        if not _ran(state, "followup"):
+            return False
+        if state.get("uploaded_document_ids") and not _ran(state, "document"):
+            return False
+        return True
+    return True
+
+
 def _route_from_coordinator(state: AgentState) -> str:
     """An error or an already-created escalation always wins, regardless of
     the coordinator's own plan entry - a defensive fallback that doesn't
-    depend on the LLM noticing either one itself. Otherwise follow the
-    latest plan entry; an empty or unrecognized plan also falls back to
-    escalate rather than crash the graph on a missing/bad decision."""
+    depend on the LLM noticing either one itself. Then the ordering guard:
+    a step the coordinator picked out of turn goes to a human instead of
+    running, so an LLM that jumps straight to finalize cannot produce a
+    "completed" run that did nothing. Otherwise follow the latest plan
+    entry; an empty or unrecognized plan also falls back to escalate rather
+    than crash the graph on a missing/bad decision."""
     if state.get("error") or state.get("escalation_id"):
         return "escalate"
     plan = state.get("plan") or []
     if not plan:
         return "escalate"
-    return _STEP_TO_NODE.get(plan[-1], "escalate")
+    step = plan[-1]
+    if not _step_allowed(state, step):
+        logger.warning(
+            "coordinator_step_out_of_order",
+            workflow_id=state.get("workflow_id"),
+            step=step,
+            completed_steps=state.get("completed_steps") or [],
+        )
+        return "escalate"
+    return _STEP_TO_NODE.get(step, "escalate")
 
 
 def build_graph(checkpointer) -> CompiledStateGraph:

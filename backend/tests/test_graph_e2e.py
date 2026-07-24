@@ -17,7 +17,15 @@ from sqlalchemy.orm import Session
 
 from app.agents.responses import staff_review_response
 from app.config import settings
-from app.models import Appointment, AuditEvent, Department, Escalation, Reminder, User
+from app.models import (
+    Appointment,
+    AuditEvent,
+    Department,
+    Escalation,
+    PatientDocument,
+    Reminder,
+    User,
+)
 from app.services import workflow_service
 from app.tools.appointment_tools import get_available_slots
 
@@ -228,6 +236,86 @@ def test_resume_after_completion_is_idempotent(db, seeded, fake_llm):
     assert db.query(Appointment).filter_by(patient_id=1, status="confirmed").count() == appt_count
     assert db.query(Reminder).count() == reminder_count
     assert len(client.chat.completions.calls) == len(script)
+
+
+def test_finalize_before_followup_escalates_instead_of_completing_empty(db, seeded, fake_llm):
+    """The coordinator's very first decision is "finalize". Its own prompt
+    forbids that (every workflow ends with schedule_followup then finalize),
+    but a prompt is not enforcement: without the transition guard the graph
+    would run the safety agent and mark the run completed while nothing was
+    routed, booked or scheduled. The guard sends an out-of-order finalize to
+    the escalate node instead, so a human sees the run.
+
+    The safety response stays in the script on purpose: it is what the
+    unguarded graph would consume, and leaving it queued proves the safety
+    node never ran rather than only that the script ran out."""
+    client = fake_llm(
+        [
+            {"next_step": "finalize", "reasoning": "coordinator skipped the whole workflow"},
+            {"safe": True, "violations": [], "rewritten": "All done."},
+        ]
+    )
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", []
+    )
+
+    assert run.status == "escalated"
+    assert [e.severity for e in db.query(Escalation).all()] == ["uncertainty"]
+    assert run.state["final_response"] == staff_review_response(db, run.patient_id)
+    assert db.query(Appointment).count() == 0
+    assert db.query(Reminder).count() == 0
+    assert db.query(AuditEvent).filter_by(action="agent.safety.completed").count() == 0
+    assert len(client.chat.completions.calls) == 1
+
+
+def test_finalize_with_unhandled_uploads_escalates(db, seeded, fake_llm):
+    """The request carries an upload, so the coordinator prompt's second
+    ordering rule applies: handle_documents must run. This coordinator goes
+    routing -> appointment -> followup -> finalize and never handles the
+    document. The guard blocks that finalize, so the run ends with a staff
+    handoff rather than a "completed" answer that quietly ignored the file
+    the patient sent."""
+    doc = PatientDocument(
+        patient_id=1,
+        filename="referral.pdf",
+        document_type="other",
+        checksum="chk-referral",
+        storage_ref="local://1/referral.pdf",
+        extracted_text="referral letter",
+    )
+    db.add(doc)
+    db.commit()
+    db.refresh(doc)
+
+    dept_id = _cardiology_id(db)
+    slot_id = _first_free_slot_id(db, dept_id)
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {"intent": "book", "department": "Cardiology", "confidence": 0.95, "reason": "routing"},
+            {"next_step": "handle_appointment", "reasoning": "department resolved"},
+            {"slot_id": slot_id, "reason": "earliest match"},
+            {"next_step": "schedule_followup", "reasoning": "skips the upload"},
+            {
+                "reminders": [{"type": "appointment", "days_before_appointment": 1}],
+                "followup_days_after": 14,
+            },
+            {"next_step": "finalize", "reasoning": "coordinator forgot the document"},
+            {"safe": True, "violations": [], "rewritten": "Your appointment is confirmed."},
+        ]
+    )
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", [doc.id]
+    )
+
+    assert run.status == "escalated"
+    assert [e.severity for e in db.query(Escalation).all()] == ["uncertainty"]
+    assert run.state.get("documents_result") is None
+    assert db.query(AuditEvent).filter_by(action="agent.document.completed").count() == 0
+    assert db.query(AuditEvent).filter_by(action="agent.safety.completed").count() == 0
+    assert len(client.chat.completions.calls) == 7
 
 
 def test_resume_unknown_workflow_run_raises_not_found(db, seeded, fake_llm):

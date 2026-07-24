@@ -206,7 +206,14 @@ def _invoke_graph(db: Session, workflow_run: WorkflowRun, graph_input: dict | No
     caught here, logged, and turned into a failed WorkflowRun with its own
     agent_failure escalation."""
     graph = get_graph()
-    config: dict[str, Any] = {"configurable": {"thread_id": workflow_run.thread_id, "db": db}}
+    config: dict[str, Any] = {
+        "configurable": {"thread_id": workflow_run.thread_id, "db": db},
+        # Operational cap on the coordinator loop. LangGraph's own default is
+        # far higher (10007); a real run takes about 7 supersteps, so a graph
+        # that keeps bouncing back to the coordinator is a bug and should stop
+        # early rather than burn LLM calls until the default trips.
+        "recursion_limit": 50,
+    }
 
     try:
         with _observability(config, workflow_run.id):
