@@ -360,7 +360,7 @@ diagram is [docs/architecture.mmd](docs/architecture.mmd).
 cd backend && ../.venv/bin/python -m pytest -q
 ```
 
-230 tests pass. They cover the agents (each with an injected fake model, no
+242 tests pass. They cover the agents (each with an injected fake model, no
 network and no keys), the tools and deterministic safety guardrails (including
 the prompt-injection guard and the PII redaction boundary), procedural agent
 rules and the bilingual safety response, the data model, RBAC on staff and

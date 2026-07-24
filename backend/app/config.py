@@ -39,8 +39,8 @@ class Settings(BaseSettings):
 
     # Langfuse tracing (optional, env-gated): entirely inert while both keys
     # are empty (the default). Enabling it also requires `pip install
-    # langchain`, since langfuse.langchain.CallbackHandler imports it - not
-    # pinned in requirements.txt because the default path never needs it.
+    # langchain==1.3.14`, since langfuse.langchain.CallbackHandler imports it
+    # - not in requirements.txt because the default path never needs it.
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = ""
