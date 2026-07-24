@@ -15,6 +15,11 @@ if TYPE_CHECKING:
 # Partial-index predicate: only live bookings that came from a workflow run
 # take part in the one-booking-per-run rule. Cancelled rows drop out of the
 # index, so the same run can rebook after a cancellation.
+#
+# The same predicate is written out again in alembic revision 8524b9522086
+# (rework appointment slot linkage), which is what actually creates the index
+# on a real database. Changing it here means changing it there too, in a new
+# revision: a migrated database keeps whatever the migration said.
 _ONE_CONFIRMED_PER_RUN = "workflow_run_id IS NOT NULL AND status = 'confirmed'"
 
 

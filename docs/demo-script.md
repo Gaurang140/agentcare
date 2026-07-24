@@ -93,10 +93,14 @@ judge should notice.
 
 ## Optional B-roll: kill and resume
 
-If there is room for a bonus shot, submit a booking request, run
-`docker compose restart backend` mid-run, then call the resume endpoint. The run
-picks up from its last checkpoint with no duplicate work. Steps are in the
-README under "Kill-and-resume demo".
+If there is room for a bonus shot, submit a booking request and watch the
+timeline. Run `docker compose restart backend` while the appointment step or the
+reminder step is the one showing, then call the resume endpoint. Those are the
+two steps worth killing during: each writes real rows before LangGraph
+checkpoints it, so the resumed run re-executes a step whose work is already
+done. Each one checks for that work first, so the run still finishes with one
+appointment and one set of reminders. Steps are in the README under
+"Kill-and-resume demo".
 
 ## Optional beat: the German showcase (10 seconds)
 

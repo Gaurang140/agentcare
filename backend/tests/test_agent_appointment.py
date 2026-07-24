@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from app.agents import appointment
 from app.exceptions import ConflictError
-from app.models import AppointmentSlot, Department, Escalation
+from app.models import Appointment, AppointmentSlot, AuditEvent, Department, Escalation
 from app.tools.appointment_tools import book_appointment
 
 
@@ -51,6 +51,39 @@ def test_book_picks_valid_slot_and_confirms(db, seeded, fake_llm):
     assert result["completed_steps"] == ["appointment"]
 
 
+def test_re_running_the_node_reuses_the_booking_instead_of_booking_twice(db, seeded, fake_llm):
+    """A node commits its rows before LangGraph writes the checkpoint that
+    records it ran, so a process killed in that window re-executes the whole
+    node on resume. The second pass must return the appointment this run
+    already booked, not book a second one against a different slot - and it
+    must not ask the LLM for another slot to do it.
+
+    The second scripted pick is what an un-guarded node would consume: it
+    stays queued to prove the node stopped before slot selection rather than
+    that the script ran out.
+    """
+    dept_id = _cardiology_id(db)
+    slots = _free_slots(db, limit=2)
+    client = fake_llm(
+        [
+            {"slot_id": slots[0].id, "reason": "first pass"},
+            {"slot_id": slots[1].id, "reason": "the re-planned second pass"},
+        ]
+    )
+    state = _state(department_id=dept_id)
+
+    first = appointment.run(state, db)
+    second = appointment.run(state, db)
+
+    assert second["appointment"] == first["appointment"]
+    assert second["completed_steps"] == ["appointment"]
+    assert db.query(Appointment).count() == 1
+    db.refresh(slots[1])
+    assert slots[1].status == "free"
+    assert db.query(AuditEvent).filter_by(action="appointment.reused_existing").count() == 1
+    assert len(client.chat.completions.calls) == 1
+
+
 def test_invented_slot_id_retries_once_then_escalates(db, seeded, fake_llm):
     dept_id = _cardiology_id(db)
     client = fake_llm(
@@ -83,11 +116,11 @@ def test_conflict_retries_with_refreshed_slots_then_books(db, seeded, fake_llm, 
     real_book = appointment.book_appointment
     calls = {"n": 0}
 
-    def _flaky_book(db_, patient_id, slot_id, reason):
+    def _flaky_book(db_, patient_id, slot_id, reason, workflow_run_id=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConflictError("slot taken by someone else")
-        return real_book(db_, patient_id, slot_id, reason)
+        return real_book(db_, patient_id, slot_id, reason, workflow_run_id)
 
     monkeypatch.setattr(appointment, "book_appointment", _flaky_book)
 
@@ -107,7 +140,7 @@ def test_repeated_conflict_escalates_agent_failure(db, seeded, fake_llm, monkeyp
         ]
     )
 
-    def _always_conflict(db_, patient_id, slot_id, reason):
+    def _always_conflict(db_, patient_id, slot_id, reason, workflow_run_id=None):
         raise ConflictError("always taken")
 
     monkeypatch.setattr(appointment, "book_appointment", _always_conflict)

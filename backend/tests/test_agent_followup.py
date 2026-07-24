@@ -48,6 +48,43 @@ def test_creates_reminder_and_followup_task_rows(db, seeded, fake_llm):
     assert result["completed_steps"] == ["followup"]
 
 
+def test_re_running_the_node_keeps_the_reminder_batch_it_already_wrote(db, seeded, fake_llm):
+    """Same crash window as the appointment node: the reminder rows are
+    committed before LangGraph checkpoints the node, so a resumed run
+    re-executes it. The second pass must leave the batch alone.
+
+    Deduping on the plan's content or times cannot work, which the second
+    scripted plan shows: the same request re-planned comes back with
+    different types and different days, so every row would look new. The
+    node skips the creation block on the appointment it already has
+    reminders for instead, and never asks for that second plan at all.
+    """
+    state = _booked_state(db)
+    client = fake_llm(
+        [
+            {
+                "reminders": [{"type": "appointment_reminder", "days_before_appointment": 1}],
+                "followup_days_after": 14,
+            },
+            {
+                "reminders": [{"type": "prepare_documents", "days_before_appointment": 5}],
+                "followup_days_after": 21,
+            },
+        ]
+    )
+
+    first = followup.run(state, db)
+    created = db.query(Reminder).count()
+    assert created == 2
+
+    second = followup.run(state, db)
+
+    assert db.query(Reminder).count() == created
+    assert second["completed_steps"] == ["followup"]
+    assert [r["id"] for r in second["reminders"]] == [r["id"] for r in first["reminders"]]
+    assert len(client.chat.completions.calls) == 1
+
+
 def test_caps_reminder_count_and_clamps_days_before_appointment(db, seeded, fake_llm):
     """An LLM that returns a long reminder list with out-of-range days must
     not be able to flood the schedule, put a reminder after the appointment

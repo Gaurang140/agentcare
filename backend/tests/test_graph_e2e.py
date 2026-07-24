@@ -17,6 +17,7 @@ import pytest
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
+from app.agents import followup
 from app.agents.responses import staff_decision_response
 from app.api.routes_workflows import _patient_state
 from app.config import settings
@@ -287,6 +288,59 @@ def test_resume_after_completion_is_idempotent(db, seeded, fake_llm):
     assert resumed.status == "completed"
     assert db.query(Appointment).filter_by(patient_id=1, status="confirmed").count() == appt_count
     assert db.query(Reminder).count() == reminder_count
+    assert len(client.chat.completions.calls) == len(script)
+
+
+def test_crash_between_a_node_commit_and_its_checkpoint_does_not_duplicate_work(
+    db, seeded, fake_llm, monkeypatch
+):
+    """The crash-resume case that actually re-executes a node, unlike the
+    test above it.
+
+    Every specialist commits its rows before LangGraph writes the checkpoint
+    that records the node ran, so a process killed in that window resumes
+    with the work done but unrecorded, and re-runs the node from its first
+    line. The followup node stands in for the kill here: it does its real
+    work, commits the reminder batch, and then raises once, exactly as a
+    process death between the two would look to the resumed run.
+
+    The resumed node has to find that batch and skip the creation block. The
+    9-response script proves it without counting rows twice: the run needs
+    all 9 calls to finish, and a re-planning followup node would take the
+    coordinator's finalize response as its reminder plan and derail the run.
+    """
+    dept_id = _cardiology_id(db)
+    slot_id = _first_free_slot_id(db, dept_id)
+    script = _full_booking_script(slot_id)
+    client = fake_llm(script)
+
+    real_run = followup.run
+    passes = {"n": 0}
+
+    def _commit_then_crash(state, session):
+        result = real_run(state, session)
+        passes["n"] += 1
+        if passes["n"] == 1:
+            raise RuntimeError("process killed after the reminders were committed")
+        return result
+
+    monkeypatch.setattr(followup, "run", _commit_then_crash)
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", []
+    )
+
+    assert run.status == "failed"
+    reminders_before_resume = db.query(Reminder).count()
+    assert reminders_before_resume > 0
+    assert db.query(Appointment).filter_by(patient_id=1, status="confirmed").count() == 1
+
+    resumed = workflow_service.resume_workflow(db, run.id)
+
+    assert resumed.status == "completed"
+    assert passes["n"] == 2, "the resumed run must actually re-execute the killed node"
+    assert db.query(Reminder).count() == reminders_before_resume
+    assert db.query(Appointment).filter_by(patient_id=1, status="confirmed").count() == 1
     assert len(client.chat.completions.calls) == len(script)
 
 

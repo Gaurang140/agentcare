@@ -17,8 +17,9 @@ from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
+from app.models import Reminder
 from app.tools.audit_tools import write_audit
-from app.tools.followup_tools import create_followup_task, create_reminder
+from app.tools.followup_tools import create_followup_task, create_reminder, reminder_summary
 
 logger = get_logger(__name__)
 
@@ -63,6 +64,21 @@ def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
     db.commit()
 
 
+def _reminders_already_scheduled(db: Session, appointment_id: int) -> list[dict]:
+    """The batch this node has already written for the appointment.
+
+    Each reminder is committed as it is created, before LangGraph writes the
+    checkpoint saying this node ran, so a process that dies in that window
+    resumes into a node whose rows exist but whose run was never recorded.
+    The whole appointment is the key. A per-reminder key cannot work: the
+    resumed node re-plans from scratch, and the LLM's second plan names
+    different types and different times for the same appointment, so every
+    row it produced would look new.
+    """
+    rows = db.query(Reminder).filter_by(appointment_id=appointment_id).order_by(Reminder.id).all()
+    return [reminder_summary(row) for row in rows]
+
+
 def run(state: AgentState, db: Session) -> dict:
     """No-op without a confirmed appointment; otherwise schedule reminders
     from the LLM's plan plus the deterministic post-visit follow-up task."""
@@ -75,6 +91,16 @@ def run(state: AgentState, db: Session) -> dict:
     try:
         patient_id = state["patient_id"]
         appointment_id = appointment["id"]
+
+        existing = _reminders_already_scheduled(db, appointment_id)
+        if existing:
+            # Re-run after a crash-resume: the batch is already in the
+            # database, so the whole creation block below is skipped rather
+            # than deduplicated row by row.
+            update = {"reminders": existing, "completed_steps": ["followup"]}
+            _exit_audit(db, workflow_id, {"reminder_count": len(existing), "reused": True})
+            return update
+
         missing = (state.get("documents_result") or {}).get("missing", [])
 
         system = build_system_prompt(db, "followup", FOLLOWUP)

@@ -7,9 +7,11 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import ConflictError
-from app.models import AppointmentSlot, Department, Doctor
+from app.models import Appointment, AppointmentSlot, Department, Doctor
 from app.tools.appointment_tools import (
     book_appointment,
     cancel_appointment,
@@ -125,6 +127,75 @@ def test_cancelled_slot_can_be_rebooked(db, seeded):
 
     assert second["status"] == "confirmed"
     assert second["id"] != first["id"]
+    # The slot is claimed again, and the cancellation stays on the record as
+    # its own row rather than being overwritten by the new booking.
+    db.refresh(slot)
+    assert slot.status == "booked"
+    assert db.get(Appointment, first["id"]).status == "cancelled"
+
+
+def test_one_run_cannot_hold_two_confirmed_bookings(db, seeded):
+    slot = _free_slot(db)
+    book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup", workflow_run_id=7)
+
+    other = (
+        db.query(AppointmentSlot)
+        .filter(AppointmentSlot.status == "free", AppointmentSlot.id != slot.id)
+        .first()
+    )
+    with pytest.raises(ConflictError):
+        book_appointment(db, patient_id=1, slot_id=other.id, reason="again", workflow_run_id=7)
+
+    db.refresh(other)
+    assert other.status == "free"
+
+
+def test_rescheduling_into_a_second_confirmed_booking_for_one_run_conflicts(db, seeded):
+    """Cancelled rows fall outside the one-booking-per-run index, so a run
+    that cancelled and rebooked can reach the index through the back door:
+    rescheduling the cancelled appointment sets it confirmed again, which
+    would give the run two live bookings. That has to come back as a
+    conflict, not as a raw IntegrityError out of the flush.
+    """
+    first_slot = _free_slot(db)
+    first = book_appointment(
+        db, patient_id=1, slot_id=first_slot.id, reason="checkup", workflow_run_id=7
+    )
+    cancel_appointment(db, appointment_id=first["id"])
+
+    free_slots = (
+        db.query(AppointmentSlot)
+        .filter(AppointmentSlot.status == "free", AppointmentSlot.id != first_slot.id)
+        .order_by(AppointmentSlot.id)
+        .limit(2)
+        .all()
+    )
+    assert len(free_slots) == 2
+    book_appointment(
+        db, patient_id=1, slot_id=free_slots[0].id, reason="rebooked", workflow_run_id=7
+    )
+
+    with pytest.raises(ConflictError):
+        reschedule_appointment(db, appointment_id=first["id"], new_slot_id=free_slots[1].id)
+
+    db.refresh(free_slots[1])
+    assert free_slots[1].status == "free"
+
+
+def test_an_unrelated_integrity_error_is_not_reported_as_a_slot_conflict(db, seeded):
+    """A ConflictError tells the appointment agent to pick another slot and
+    try again. Only the one-booking-per-run index means that; anything else
+    the flush can raise (here a foreign key that does not resolve) is a bug
+    and must surface as itself rather than send the agent round a retry loop
+    that cannot help.
+    """
+    db.execute(text("PRAGMA foreign_keys=ON"))
+    slot = _free_slot(db)
+
+    with pytest.raises(IntegrityError):
+        book_appointment(
+            db, patient_id=1, slot_id=slot.id, reason="checkup", workflow_run_id=999_999
+        )
 
 
 def test_get_available_slots_filters_by_department_and_date_range(db, seeded):

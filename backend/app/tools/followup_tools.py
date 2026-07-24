@@ -18,6 +18,18 @@ def _naive_utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def reminder_summary(reminder: Reminder) -> dict:
+    """The dict shape every reminder path hands back to the agents."""
+    return {
+        "id": reminder.id,
+        "patient_id": reminder.patient_id,
+        "appointment_id": reminder.appointment_id,
+        "reminder_type": reminder.reminder_type,
+        "scheduled_at": reminder.scheduled_at.isoformat(),
+        "sent": reminder.sent,
+    }
+
+
 def create_reminder(
     db: Session,
     patient_id: int,
@@ -49,14 +61,7 @@ def create_reminder(
     )
     db.commit()
 
-    return {
-        "id": reminder.id,
-        "patient_id": reminder.patient_id,
-        "appointment_id": reminder.appointment_id,
-        "reminder_type": reminder.reminder_type,
-        "scheduled_at": reminder.scheduled_at.isoformat(),
-        "sent": reminder.sent,
-    }
+    return reminder_summary(reminder)
 
 
 def create_followup_task(

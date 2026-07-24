@@ -21,6 +21,7 @@ from app.logging_setup import get_logger
 from app.models import Appointment
 from app.safety.pii import redact_for_llm
 from app.tools.appointment_tools import (
+    appointment_summary,
     book_appointment,
     cancel_appointment,
     get_available_slots,
@@ -97,11 +98,38 @@ def _escalate_agent_failure(
 
 
 def _book_or_reschedule(
-    db: Session, intent: str, patient_id: int, slot_id: int, request_text: str, existing_id: int | None
+    db: Session,
+    intent: str,
+    patient_id: int,
+    slot_id: int,
+    request_text: str,
+    existing_id: int | None,
+    workflow_id: int | None,
 ) -> dict:
     if intent == "book":
-        return book_appointment(db, patient_id, slot_id, reason=request_text)
+        return book_appointment(
+            db, patient_id, slot_id, reason=request_text, workflow_run_id=workflow_id
+        )
     return reschedule_appointment(db, existing_id, slot_id)
+
+
+def _booking_this_run_already_made(db: Session, workflow_id: int | None) -> Appointment | None:
+    """The confirmed appointment this run booked, if it already booked one.
+
+    A node commits its rows before LangGraph writes the checkpoint saying it
+    ran, so a process that dies in that window resumes into a node whose work
+    is done but unrecorded, and re-executes it from the top. Booking again
+    there would give the patient a second appointment against a different
+    slot.
+
+    The partial unique index this query reads (models/appointment.py) is the
+    backstop that makes the second booking impossible. Finding the first one
+    and handing it back is what keeps the resumed run going instead of
+    failing on a conflict it has no way to resolve.
+    """
+    if workflow_id is None:
+        return None
+    return db.query(Appointment).filter_by(workflow_run_id=workflow_id, status="confirmed").first()
 
 
 def _handle_cancel(db: Session, workflow_id: int | None, patient_id: int) -> dict:
@@ -118,6 +146,26 @@ def _handle_book_or_reschedule(
     db: Session, workflow_id: int | None, state: AgentState, intent: str
 ) -> dict:
     patient_id = state["patient_id"]
+
+    already_booked = _booking_this_run_already_made(db, workflow_id)
+    if already_booked is not None:
+        result = appointment_summary(already_booked)
+        write_audit(
+            db,
+            None,
+            "appointment.reused_existing",
+            "appointment",
+            already_booked.id,
+            {"workflow_run_id": workflow_id},
+        )
+        update = {"appointment": result, "completed_steps": ["appointment"]}
+        _exit_audit(
+            db,
+            workflow_id,
+            {"action": intent, "appointment_id": result["id"], "reused": True},
+        )
+        return update
+
     department_id = state.get("department_id")
     if department_id is None:
         raise NotFoundError("no department resolved for appointment scheduling")
@@ -158,7 +206,9 @@ def _handle_book_or_reschedule(
         )
 
     try:
-        result = _book_or_reschedule(db, intent, patient_id, slot_id, request_text, existing_id)
+        result = _book_or_reschedule(
+            db, intent, patient_id, slot_id, request_text, existing_id, workflow_id
+        )
     except ConflictError:
         slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
         slot_id = _pick_valid_slot(system, llm_request_text, slots)
@@ -167,7 +217,9 @@ def _handle_book_or_reschedule(
                 db, workflow_id, patient_id, "no valid slot left after a booking conflict"
             )
         try:
-            result = _book_or_reschedule(db, intent, patient_id, slot_id, request_text, existing_id)
+            result = _book_or_reschedule(
+                db, intent, patient_id, slot_id, request_text, existing_id, workflow_id
+            )
         except ConflictError:
             return _escalate_agent_failure(
                 db, workflow_id, patient_id, "repeated booking conflict on the same request"

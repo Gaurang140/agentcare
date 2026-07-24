@@ -22,6 +22,36 @@ _SLOT_START_HOUR = 9
 _SLOT_END_HOUR = 17
 _SLOT_MINUTES = 30
 
+# How each backend names the one-confirmed-booking-per-run index in the
+# IntegrityError it raises. Postgres quotes the index name; sqlite names the
+# indexed column instead ("UNIQUE constraint failed: appointments.workflow_run_id"),
+# so both spellings have to be recognized. Anything else the flush can raise -
+# a foreign key that does not resolve, some future constraint - is a bug and
+# stays an IntegrityError rather than becoming a retryable slot conflict.
+_RUN_INDEX_MARKERS = ("uq_appointments_workflow_run", "appointments.workflow_run_id")
+
+
+def _is_one_booking_per_run_violation(exc: IntegrityError) -> bool:
+    message = str(exc.orig)
+    return any(marker in message for marker in _RUN_INDEX_MARKERS)
+
+
+def appointment_summary(appt: Appointment, slot: AppointmentSlot | None = None) -> dict:
+    """The dict shape every appointment path hands back to the agents.
+
+    `slot` is given explicitly by callers that have just moved the booking:
+    the appointment's own `slot` relationship can still hold the row it was
+    loaded with, while the caller already has the one it just claimed.
+    """
+    slot = slot if slot is not None else appt.slot
+    return {
+        "id": appt.id,
+        "doctor": slot.doctor.name,
+        "department": slot.doctor.department.name,
+        "start_time": slot.start_time.isoformat(),
+        "status": appt.status,
+    }
+
 
 def get_available_slots(
     db: Session,
@@ -99,10 +129,11 @@ def book_appointment(
     try:
         db.flush()
     except IntegrityError as exc:
-        # The one-confirmed-booking-per-run index fired. Roll back so the
-        # slot claim above is released rather than left held by a booking
-        # that never happened.
+        # Roll back either way, so the slot claim above is released rather
+        # than left held by a booking that never happened.
         db.rollback()
+        if not _is_one_booking_per_run_violation(exc):
+            raise
         raise ConflictError("This request already has a confirmed appointment") from exc
     write_audit(
         db,
@@ -113,13 +144,7 @@ def book_appointment(
         {"slot_id": slot_id, "patient_id": patient_id},
     )
     db.commit()
-    return {
-        "id": appt.id,
-        "doctor": slot.doctor.name,
-        "department": slot.doctor.department.name,
-        "start_time": slot.start_time.isoformat(),
-        "status": "confirmed",
-    }
+    return appointment_summary(appt, slot)
 
 
 def reschedule_appointment(db: Session, appointment_id: int, new_slot_id: int) -> dict:
@@ -150,7 +175,18 @@ def reschedule_appointment(db: Session, appointment_id: int, new_slot_id: int) -
     appt.slot_id = new_slot_id
     appt.doctor_id = new_slot.doctor_id
     appt.status = "confirmed"
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # Same index and the same rollback as book_appointment: the claim on
+        # the new slot is released rather than left held by a reschedule that
+        # never happened. A cancelled appointment sits outside the index, so
+        # confirming one again is how a reschedule reaches it - the run would
+        # end up holding two live bookings.
+        db.rollback()
+        if not _is_one_booking_per_run_violation(exc):
+            raise
+        raise ConflictError("This request already has a confirmed appointment") from exc
 
     write_audit(
         db,
@@ -161,13 +197,7 @@ def reschedule_appointment(db: Session, appointment_id: int, new_slot_id: int) -
         {"old_slot_id": old_slot_id, "new_slot_id": new_slot_id},
     )
     db.commit()
-    return {
-        "id": appt.id,
-        "doctor": new_slot.doctor.name,
-        "department": new_slot.doctor.department.name,
-        "start_time": new_slot.start_time.isoformat(),
-        "status": "confirmed",
-    }
+    return appointment_summary(appt, new_slot)
 
 
 def cancel_appointment(db: Session, appointment_id: int) -> dict:
