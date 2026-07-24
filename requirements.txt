@@ -15,6 +15,14 @@ PyJWT==2.13.0
 pwdlib[argon2]==0.3.0
 python-multipart==0.0.32
 pypdf==6.14.2
+presidio-analyzer==2.2.364
+presidio-anonymizer==2.2.364
+spacy==3.8.14
+# spaCy models as direct wheel URLs, so `pip install -r requirements.txt` is
+# deterministic and the Docker image needs no `spacy download` step. Small
+# models only (backend/app/safety/pii.py loads both, English and German).
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+de_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/de_core_news_sm-3.8.0/de_core_news_sm-3.8.0-py3-none-any.whl
 httpx==0.28.1
 email-validator==2.3.0
 apscheduler==3.11.3
