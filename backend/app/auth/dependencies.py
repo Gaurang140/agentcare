@@ -4,6 +4,7 @@ Every patient-data query in later tasks is expected to route through
 ensure_owner_or_staff, per the Task 4 brief.
 """
 
+import hmac
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -83,7 +84,10 @@ def require_internal_or_staff(
     """
     token = settings.internal_task_token
     if token:
-        if request.headers.get("X-Internal-Token") != token:
+        supplied = request.headers.get("X-Internal-Token", "")
+        # compare_digest: constant-time comparison, no timing oracle on the
+        # shared token.
+        if not hmac.compare_digest(supplied, token):
             raise PermissionDeniedError("Invalid internal token")
         return
 

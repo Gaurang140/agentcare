@@ -64,6 +64,7 @@ SANITIZED_SENTENCE = "For medical questions, please speak with your care team."
 EMERGENCY_KEYWORDS = [
     "chest pain",
     "brustschmerz",
+    "brustschmerzen",  # extension: DE plural, the natural patient phrasing
     "heart attack",
     "herzinfarkt",
     "stroke",
@@ -78,6 +79,7 @@ EMERGENCY_KEYWORDS = [
     "selbstmord",
     "severe bleeding",
     "starke blutung",
+    "starke blutungen",  # extension: DE plural form
     "overdose",
     "überdosis",
     "cardiac arrest",  # extension: distinct clinical event from "heart attack"

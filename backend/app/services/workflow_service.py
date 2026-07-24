@@ -23,6 +23,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.agents.graph import build_graph, open_checkpointer
+from app.agents.responses import emergency_response, medical_refusal_response
 from app.agents.state import AgentState
 from app.config import settings
 from app.exceptions import NotFoundError
@@ -139,10 +140,17 @@ def _screened_run(
     db: Session, user: User, request_text: str, screen: ScreenResult, *, status: str, action: str
 ) -> WorkflowRun:
     """Pre-graph screening path (emergency or medical refusal): no graph, no
-    LLM call, per screen_request's own judgment alone."""
+    LLM call, per screen_request's own judgment alone. The patient-facing
+    response is localized (agents/responses.py); the escalation reason below
+    stays English because it is staff-facing."""
+    if screen.action == "escalate_emergency":
+        final_response = emergency_response(db, user.id)
+    else:
+        final_response = medical_refusal_response(db, user.id)
+
     workflow_run = _new_workflow_run(db, user, request_text, status)
     workflow_run.current_step = "safety_screen"
-    workflow_run.state = {"final_response": screen.reason, "safety_flags": screen.matched}
+    workflow_run.state = {"final_response": final_response, "safety_flags": screen.matched}
 
     if screen.action == "escalate_emergency":
         create_escalation(db, workflow_run.id, reason=screen.reason, severity="emergency")

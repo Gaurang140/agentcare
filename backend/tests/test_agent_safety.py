@@ -16,9 +16,9 @@ from app.tools.followup_tools import create_reminder
 
 
 def _set_language(db, patient_id: int, language: str) -> None:
-    """Both seeded demo patients default to preferred_language="de"
-    (app/db/seed.py) - tests that want to pin the English deterministic
-    path set it explicitly instead of relying on that incidentally."""
+    """Seeded Max (patient 1) prefers "en", Erika (patient 2) "de"
+    (app/db/seed.py) - tests pin the language they exercise explicitly
+    instead of relying on the seed incidentally."""
     profile = db.query(PatientProfile).filter_by(user_id=patient_id).first()
     profile.preferred_language = language
     db.flush()
@@ -118,12 +118,13 @@ def test_draft_reflects_live_db_status_not_stale_state_dict(db, seeded, fake_llm
 
 
 # --- Language preference (PatientProfile.preferred_language) ----------------
-# Both seeded demo patients default to "de" (app/db/seed.py), so patient_id=1
-# already exercises the German path with no override needed.
+# Seeded Max (patient 1) prefers "en"; the German-path tests pin "de" via
+# _set_language so they don't depend on which seed account they run as.
 
 
 def test_safety_prompt_carries_german_language_instruction_for_llm_path(db, seeded, fake_llm):
     state = _booked_state(db)
+    _set_language(db, 1, "de")
     client = fake_llm(
         [{"safe": True, "violations": [], "rewritten": "Ihr Termin ist bestätigt."}]
     )
@@ -151,9 +152,9 @@ def test_deterministic_fallback_uses_german_template_for_preferred_language_de(
     db, seeded, fake_llm
 ):
     """The MOSAIC fallback path (LLM down) must not silently answer in
-    English for a German-preferring patient - patient_id=1 is "de" by
-    default in app/db/seed.py."""
+    English for a German-preferring patient."""
     state = _booked_state(db)
+    _set_language(db, 1, "de")
     fake_llm([RuntimeError("llm down")])
 
     result = safety.run(state, db)

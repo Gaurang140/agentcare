@@ -181,7 +181,9 @@ def seed(db: Session) -> dict[str, int]:
         PatientProfile(
             user_id=patient.id,
             date_of_birth=date(1990, 5, 14),
-            preferred_language="de",
+            # English so the README's demo walkthrough (written in English)
+            # gets English responses; Erika below is the German showcase.
+            preferred_language="en",
         )
     )
 
