@@ -3,8 +3,9 @@
 Each decision below is written as a short ADR: Context, Decision, Why (with verified versions,
 dates and costs) and Revisit-when. Every version and price was verified on 2026-07-23. Each ADR
 is tagged with an honest status: **Implemented now** means the code is in this repo and runs;
-**Designed for scale** means the decision is recorded for the GCP or container path that is not
-built yet (there is no `infra/`, `Dockerfile` or `docker-compose.yml` in the repo).
+**Designed for scale** means the decision is recorded for the GCP path that is not built yet
+(there is no `infra/` directory in the repo). The local Docker Compose stack, by contrast, is
+implemented now (`docker-compose.yml`, `backend/Dockerfile`, `frontend/Dockerfile`).
 
 Free-tier-first is the governing rule. Anything with a real monthly floor goes in a documented
 scale path, not the hackathon build.
@@ -259,14 +260,14 @@ cap and 90-day retention), or data sovereignty forces the self-hosted GKE path.
 
 ## ADR-10: Prometheus and Grafana, local compose
 
-**Status:** `/metrics` implemented now. The compose dashboard stack is designed.
+**Status:** `/metrics` and the Prometheus plus Grafana compose stack implemented now.
 
 **Context.** A live metrics dashboard is a strong, low-effort signal, but a GKE cluster for it is
 not justified in a 3-day window.
 
 **Decision.** Instrument FastAPI with `prometheus-fastapi-instrumentator` 8.0.2, which is installed
 and wired in `app/main.py` as `Instrumentator().instrument(app).expose(app)`, exposing `/metrics`.
-The local dashboard is a designed Docker Compose stack of Prometheus v3.13.1 (an LTS supported
+The local dashboard is an implemented Docker Compose stack of Prometheus v3.13.1 (an LTS supported
 through 2027-07-31) and Grafana 13.1.1. Google Managed Service for Prometheus (GMP) is the
 documented GKE path.
 

@@ -163,17 +163,23 @@ transaction as the change it records.
 
 ## Deployment views
 
-Honest status: the application code is real and runs today. The container and GCP paths below
-are the decided design. There is no `Dockerfile`, no `docker-compose.yml` and no `infra/`
-directory in the repo yet, and the GCS SDK is not installed (`GCSStorage` imports it lazily and
-raises a clear `AppError` if selected without it).
+Honest status: the application code and the local container stack are real and run today. The repo
+has a `backend/Dockerfile`, a `frontend/Dockerfile` and a `docker-compose.yml` at its root. The GCP
+path below is the decided design, not built: there is no `infra/` directory yet, and the GCS SDK is
+not installed (`GCSStorage` imports it lazily and raises a clear `AppError` if selected without it).
 
 - Local (implemented now). SQLite at `agentcare.db`, a separate LangGraph checkpoint file at
   `checkpoints.db`, uploads under `./uploads`, `uvicorn app.main:app` and `next dev`. No keys
   needed beyond an LLM endpoint. This is the default from `.env.example`.
-- Docker Compose with Postgres (designed). `DATABASE_URL` switches SQLAlchemy and the checkpointer
-  to Postgres over `psycopg[binary]`; checkpoints then live in the same database and
-  `PostgresSaver.setup()` runs once. The frontend builds with `output: "standalone"`.
+- Docker Compose with Postgres (implemented now). `docker compose up --build` starts five services:
+  `postgres:16-alpine` with a health check, the FastAPI backend, the standalone Next.js frontend,
+  Prometheus and Grafana. The backend container entrypoint runs `alembic upgrade head` and the
+  idempotent seed before `uvicorn`, so the database is ready as soon as the container reports
+  healthy. `DATABASE_URL` switches SQLAlchemy and the checkpointer to Postgres over
+  `psycopg[binary]`, so checkpoints live in the same database and `PostgresSaver.setup()` runs once.
+  The frontend builds with `output: "standalone"`. Prometheus scrapes the backend `/metrics`
+  endpoint every 15 seconds, and Grafana loads a provisioned AgentCare dashboard. Ports: frontend
+  3000, backend 8000, Prometheus 9090, Grafana 3001 (`admin` / `admin`).
 - GCP (designed). FastAPI and the standalone Next.js build on Cloud Run, Postgres on Neon free
   tier for the live demo (Cloud SQL on the enterprise path), documents in a GCS bucket with
   uniform bucket-level access, secrets in Secret Manager, keyless CI through Workload Identity
