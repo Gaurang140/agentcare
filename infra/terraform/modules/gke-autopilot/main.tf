@@ -1,0 +1,27 @@
+# GKE Autopilot, not Standard: no node pools to size or patch, Google
+# manages the nodes and bills per pod resource request instead of per VM.
+#
+# Cost note: the Autopilot control-plane fee is covered by the per-billing-
+# account Google Cloud free-tier credit for one zonal or regional cluster;
+# pods are still billed per vCPU/memory/storage request regardless of that
+# credit. Keep this the only cluster in the project to stay inside it.
+resource "google_container_cluster" "this" {
+  project  = var.project_id
+  name     = var.cluster_name
+  location = var.region
+
+  enable_autopilot = true
+
+  release_channel {
+    channel = "REGULAR"
+  }
+
+  workload_identity_config {
+    workload_pool = "${var.project_id}.svc.id.goog"
+  }
+
+  # Hackathon/demo cluster: allow `tofu destroy` to actually tear it down.
+  # Flip to true before this cluster ever holds anything that must survive
+  # an accidental destroy.
+  deletion_protection = false
+}
