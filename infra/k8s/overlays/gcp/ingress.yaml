@@ -1,0 +1,48 @@
+# Optional. A GCE external Application Load Balancer costs roughly 18 USD/mo
+# once provisioned (forwarding rule + the LB itself), on top of the two
+# small Deployments. For a demo, skip this file's resources entirely and use
+# either `kubectl port-forward svc/frontend 3000:3000` (zero cost, see
+# infra/k8s/README.md) or `kubectl patch svc frontend -p
+# '{"spec":{"type":"LoadBalancer"}}'` for a quick public IP without a domain
+# or TLS cert.
+#
+# /api/* routes straight to the backend Service so SSE traffic hits the
+# BackendConfig's long timeout (backendconfig.yaml) directly, instead of
+# passing through the frontend's Next.js rewrite proxy. Everything else goes
+# to the frontend.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: agentcare
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    # Domain placeholder - set to a real domain you control before this
+    # Ingress can issue a certificate; ManagedCertificate provisioning fails
+    # silently (stays "Provisioning") against a domain with no matching DNS.
+    networking.gke.io/managed-certificates: "agentcare-cert"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: agentcare-cert
+spec:
+  domains:
+    - "agentcare.example.com" # REPLACE_ME with a real domain before applying

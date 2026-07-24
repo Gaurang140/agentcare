@@ -8,7 +8,9 @@ why each piece was chosen. Nothing in this repo has applied any of it: there are
 credentials in this environment and none were created to write it.
 
 The Kubernetes manifests this section hands off to (Deployments, Services, Ingress) are a
-kustomize overlay under `infra/k8s/`, a separate piece of work from this Terraform layer.
+kustomize base plus a `gcp` overlay under `infra/k8s/` (see `infra/k8s/README.md`), and the
+apply step itself runs from `.github/workflows/deploy.yml` on a manual `workflow_dispatch` -
+both committed, but that first real deploy still needs a GCP project with billing enabled.
 
 ## Prerequisites
 
@@ -104,7 +106,7 @@ is provisioned by this Terraform layer.
 gcloud container clusters get-credentials \
   "$(tofu -chdir=infra/terraform output -raw gke_cluster_name)" \
   --region "$(tofu -chdir=infra/terraform output -raw gke_cluster_location)"
-kubectl apply -k infra/k8s/overlays/prod
+kubectl apply -k infra/k8s/overlays/gcp
 ```
 
 ## Teardown

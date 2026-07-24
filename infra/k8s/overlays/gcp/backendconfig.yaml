@@ -1,0 +1,13 @@
+# SSE (backend/app/api/routes_events.py: GET /api/workflows/{id}/events) is a
+# long-lived streaming response. Google Cloud's external Application Load
+# Balancer (the one a GCE Ingress provisions) defaults to a 30s backend
+# timeout and will cut the connection mid-stream without this. Attached to
+# the backend Service via the cloud.google.com/backend-config annotation
+# (see kustomization.yaml's patch), which only takes effect for traffic
+# routed through the GCE Ingress below, not for in-cluster Service calls.
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: backend-backendconfig
+spec:
+  timeoutSec: 3600

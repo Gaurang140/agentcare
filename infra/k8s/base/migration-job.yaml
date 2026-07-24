@@ -1,0 +1,50 @@
+# Runs the backend image's own entrypoint (backend/docker-entrypoint.sh:
+# `alembic upgrade head` then the idempotent seed script) instead of
+# reimplementing either step here. The entrypoint always migrates and seeds
+# before its final `exec "$@"`, so the args below only need to be a command
+# that exits 0 without starting uvicorn.
+#
+# Job specs are immutable after creation, so a second `kubectl apply -k` with
+# the same job name fails once this Job exists (whether it succeeded or is
+# still running). CI's deploy.yml deletes it (`--ignore-not-found`) before
+# every apply; ttlSecondsAfterFinished below also cleans it up on its own
+# after a completed run, but does not help a still-running Job blocking a
+# fresh deploy.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backend-migrate
+  labels:
+    app: backend-migrate
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: backend-migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        readOnlyRootFilesystem: false
+      containers:
+        - name: migrate
+          image: agentcare-backend:latest
+          args: ["python", "-c", "print('migrate+seed done')"]
+          envFrom:
+            - configMapRef:
+                name: agentcare-config
+            - secretRef:
+                name: agentcare-secrets
+          resources:
+            # GKE Autopilot requires an explicit request/limit on every
+            # container; sized the same as the backend Deployment since this
+            # runs the same alembic/seed work against the same database.
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

@@ -21,7 +21,9 @@ backend/app/
   services/  # workflow_service (start/resume), storage adapter (local | gcs)
   api/       # routers; RBAC enforced here, never in the frontend
 frontend/    # Next.js 16 App Router, Tailwind v4, shadcn; proxy.ts (not middleware.ts)
-infra/       # terraform (OpenTofu-compatible HCL) + k8s kustomize showcase
+infra/       # terraform (OpenTofu-compatible HCL, GCP resources) + k8s/
+             #   (kustomize base + gcp overlay); deploy pipeline is
+             #   .github/workflows/deploy.yml (manual dispatch only)
 scripts/     # seed_demo.py and helpers
 ```
 

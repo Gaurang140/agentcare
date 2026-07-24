@@ -372,11 +372,17 @@ account.
   Postgres, the FastAPI backend, the standalone Next.js frontend, Prometheus and
   Grafana. `DATABASE_URL` switches SQLAlchemy and the LangGraph checkpointer to
   Postgres, so checkpoints live in the same database.
-- **GCP Cloud Run and Terraform (designed).** FastAPI and the Next.js build on
-  Cloud Run, Postgres on Neon for the demo, documents in a GCS bucket, secrets
-  in Secret Manager and keyless CI through Workload Identity Federation. This
-  path is recorded as a decision, not built. The reasoning and verified costs
-  are in [docs/decisions.md](docs/decisions.md).
+- **GKE Autopilot, Terraform and kustomize (committed, not yet deployed).**
+  `infra/terraform/` provisions Artifact Registry, IAM and Workload Identity
+  Federation, a GKE Autopilot cluster and an optional Cloud SQL instance;
+  `infra/k8s/` is the kustomize base plus a `gcp` overlay (autoscaling,
+  GCE ingress, the SSE timeout BackendConfig); `.github/workflows/deploy.yml`
+  builds, pushes and applies both on a manual `workflow_dispatch`. Every piece
+  validates on its own (`tofu validate`, `kubectl kustomize`, `actionlint`),
+  but none of it has run against a real GCP project - that first `tofu apply`
+  is still gated on a project with billing enabled. Full walkthrough,
+  reasoning and verified costs: [docs/deployment-gcp.md](docs/deployment-gcp.md)
+  and [docs/decisions.md](docs/decisions.md).
 
 ## Credits
 

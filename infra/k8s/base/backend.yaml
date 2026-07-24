@@ -1,0 +1,86 @@
+# FastAPI + LangGraph backend. Image name only (no tag) here on purpose: the
+# gcp overlay's kustomization.yaml images transform matches on this name and
+# rewrites both name and tag at deploy time (see overlays/gcp/kustomization.yaml).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        # Scraped by the docker-compose Prometheus locally and by Google
+        # Managed Service for Prometheus on GKE; prometheus-fastapi-instrumentator
+        # exposes /metrics in backend/app/main.py.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        # Matches the `appuser` (uid 1000) created in backend/Dockerfile.
+        runAsNonRoot: true
+        runAsUser: 1000
+        # NOT read-only: docker-entrypoint.sh writes the SQLite app db and
+        # checkpoints.db next to the app, and local-mode file uploads land
+        # under ./uploads inside the container. Demo mode only - a
+        # Postgres + GCS deployment (DATABASE_URL non-sqlite, STORAGE_BACKEND=gcs)
+        # could tighten this to true, but the default env here still points
+        # at sqlite/local storage until GCS_BUCKET and a Postgres DATABASE_URL
+        # are set in the Secret.
+        readOnlyRootFilesystem: false
+      containers:
+        - name: backend
+          image: agentcare-backend:latest
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: agentcare-config
+            - secretRef:
+                name: agentcare-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  labels:
+    app: backend
+spec:
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
