@@ -158,6 +158,18 @@ def build_graph(checkpointer) -> CompiledStateGraph:
     return graph.compile(checkpointer=checkpointer)
 
 
+def _psycopg_conninfo(database_url: str) -> str:
+    """PostgresSaver.from_conn_string() hands the string straight to
+    psycopg.Connection.connect(), whose libpq conninfo parser only
+    understands plain `postgresql://` - not SQLAlchemy's `dialect+driver`
+    syntax (e.g. `postgresql+psycopg://`, what settings.database_url is in
+    docker-compose so the app engine also picks psycopg). Strip the driver
+    suffix so both engines can share one DATABASE_URL."""
+    scheme, sep, rest = database_url.partition("://")
+    driver = scheme.split("+", 1)[0]
+    return f"{driver}{sep}{rest}"
+
+
 @contextlib.contextmanager
 def open_checkpointer() -> Iterator[SqliteSaver | PostgresSaver]:
     """Open the LangGraph checkpointer selected by settings.database_url's
@@ -173,6 +185,7 @@ def open_checkpointer() -> Iterator[SqliteSaver | PostgresSaver]:
         with SqliteSaver.from_conn_string(settings.checkpoint_db_path) as checkpointer:
             yield checkpointer
     else:
-        with PostgresSaver.from_conn_string(settings.database_url) as checkpointer:
+        conninfo = _psycopg_conninfo(settings.database_url)
+        with PostgresSaver.from_conn_string(conninfo) as checkpointer:
             checkpointer.setup()
             yield checkpointer

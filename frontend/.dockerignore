@@ -1,0 +1,9 @@
+# Build context here is frontend/ (docker-compose.yml build.context), so
+# this is the .dockerignore that actually applies to that build - the root
+# one only covers a context of ".".
+node_modules/
+.next/
+.git
+.env
+.env.local
+npm-debug.log*

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.git
+.venv/
+venv/
+node_modules/
+.next/
+uploads/
+*.db
+.superpowers/
+.pytest_cache/
+.env
