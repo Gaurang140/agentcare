@@ -31,8 +31,9 @@ so the work the patient asked for still happens; a rejection, or any run
 whose agent had already failed, ends on a deterministic template instead.
 
 The same applies to the ordering rules the coordinator prompt states
-(prompts.py). `_step_allowed` enforces them against the completed-step
-history instead of trusting the decision, and an out-of-order step routes to
+(prompts.py), plus one it does not: a booking whose department never
+resolved. `_step_allowed` enforces them against the completed-step history
+instead of trusting the decision, and an out-of-order step routes to
 escalate: a coordinator that jumps straight to finalize gets a human, not a
 run marked completed that routed, booked and scheduled nothing.
 """
@@ -221,15 +222,30 @@ def _ran(state: AgentState, step: str) -> bool:
 def _step_allowed(state: AgentState, step: str) -> bool:
     """The COORDINATOR prompt's three ordering rules, enforced in code
     (prompts.py: route_department before handle_appointment, handle_documents
-    when the request carries uploads, schedule_followup then finalize). The
-    argument is a coordinator plan word; the history it checks holds node
-    names, which is why the two vocabularies differ here.
+    when the request carries uploads, schedule_followup then finalize), plus
+    one the prompt does not state (the department rule below). The argument
+    is a coordinator plan word; the history it checks holds node names, which
+    is why the two vocabularies differ here.
 
     History-based (has it run at least once), so crash-resume re-entry and
-    legitimate re-visits stay legal. A booking whose department came back
-    null (cancel, status, attach_documents) is legal too: the rule is that
-    routing ran, not that it resolved a department."""
-    if step in ("handle_appointment", "schedule_followup"):
+    legitimate re-visits stay legal. Routing having run is the rule, not
+    routing having resolved a department: an intent that needs no department
+    (cancel, status, attach_documents) is served with a null one.
+
+    Booking and rescheduling are the exception, and the one rule here the
+    prompt does not state: they have nothing to look slots up against
+    without a department, and the appointment node raises on that. Routing
+    hands such a request to staff itself, so the state only reaches here on
+    a run staff approved out of the escalate node - which is exactly where a
+    coordinator sees a completed routing step and picks handle_appointment
+    off a state that still has no department. Blocking it sends the run back
+    to the human instead of through a node that cannot serve it."""
+    if step == "handle_appointment":
+        if not _ran(state, "routing"):
+            return False
+        needs_department = state.get("intent") in ("book", "reschedule")
+        return not (needs_department and state.get("department_id") is None)
+    if step == "schedule_followup":
         return _ran(state, "routing")
     if step == "finalize":
         if not _ran(state, "followup"):

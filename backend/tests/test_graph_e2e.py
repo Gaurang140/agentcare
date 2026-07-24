@@ -197,8 +197,9 @@ def test_node_failure_escalates_and_marks_run_failed(db, seeded, fake_llm):
 
 
 def test_specialist_escalation_stops_the_run_at_the_escalate_node(db, seeded, fake_llm):
-    """Routing escalates on low confidence and the coordinator's next
-    decision ignores it ("finalize"). The graph must not take that decision:
+    """Routing escalates on an intent outside the supported administrative
+    ones ("other") and the coordinator's next decision ignores it
+    ("finalize"). The graph must not take that decision:
     an escalation_id on the state routes straight to the escalate node, so
     the safety agent never runs and the escalate node reuses the row routing
     already opened instead of filing a second one for the same run. The
@@ -507,6 +508,47 @@ def test_staff_approval_resumes_the_run_and_books_the_appointment(db, seeded, fa
     assert note not in (resumed.state["final_response"] or "")
     assert note not in json.dumps(_patient_state(resumed.state))
     assert len(client.chat.completions.calls) == 12
+
+
+def test_approved_run_cannot_book_an_appointment_without_a_department(db, seeded, fake_llm):
+    """The one state a resumed run can be in that no ordering rule covered:
+    routing has run, so `handle_appointment` looks legal, but routing gave up
+    before it resolved a department - it escalated on a booking request with
+    no department, which is what put the run in front of staff in the first
+    place. Approval clears the block and the coordinator picks
+    `handle_appointment` off a state whose department_id is still None.
+
+    The appointment node has nothing to book against there, so the guard has
+    to stop the step rather than let the node fail into an agent_failure
+    escalation: the case goes back to the same human, still an uncertainty,
+    and no half-run booking attempt sits in the audit trail between them.
+    """
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {"intent": "book", "department": None, "confidence": 0.95, "reason": "no department"},
+            {"next_step": "handle_appointment", "reasoning": "coordinator missed the escalation"},
+            # The decision after the approval, off a state that still has no
+            # department: the one this test is about.
+            {"next_step": "handle_appointment", "reasoning": "routing ran, so this looks legal"},
+        ]
+    )
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I want to book something next week", []
+    )
+    assert run.status == "waiting_approval"
+    assert run.state.get("intent") == "book"
+    assert run.state.get("department_id") is None
+
+    resumed = _staff_decision(db, run, approved=True, note="please book this one")
+
+    assert resumed.status == "waiting_approval"
+    assert db.query(AuditEvent).filter_by(action="agent.appointment.completed").count() == 0
+    assert db.query(Appointment).count() == 0
+    # Back to a human as the same kind of case, not as a failed agent.
+    assert [e.severity for e in db.query(Escalation).all()] == ["uncertainty", "uncertainty"]
+    assert len(client.chat.completions.calls) == 4
 
 
 def test_staff_rejection_closes_the_run_with_the_template(db, seeded, fake_llm):

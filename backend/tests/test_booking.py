@@ -11,7 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import ConflictError
-from app.models import Appointment, AppointmentSlot, Department, Doctor
+from app.models import Appointment, AppointmentSlot, Department, Doctor, WorkflowRun
 from app.tools.appointment_tools import (
     book_appointment,
     cancel_appointment,
@@ -37,6 +37,27 @@ def _free_slot(db) -> AppointmentSlot:
     )
     assert slot is not None
     return slot
+
+
+def _workflow_run_id(db, patient_id: int = 1) -> int:
+    """A real workflow_runs row for the one-booking-per-run tests to hang
+    their appointments off. Sqlite runs with foreign keys off, so a made-up
+    id works here and only breaks on Postgres, where the same tests run
+    against a live FK - the row is cheap, so the tests carry one. Foreign
+    keys go on for the rest of the connection too, so this stays true on
+    sqlite rather than only on the deployment database."""
+    db.execute(text("PRAGMA foreign_keys=ON"))
+    run = WorkflowRun(
+        user_id=patient_id,
+        patient_id=patient_id,
+        thread_id="",
+        request_text="x",
+        status="completed",
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run.id
 
 
 def _cardiology_id(db) -> int:
@@ -136,7 +157,8 @@ def test_cancelled_slot_can_be_rebooked(db, seeded):
 
 def test_one_run_cannot_hold_two_confirmed_bookings(db, seeded):
     slot = _free_slot(db)
-    book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup", workflow_run_id=7)
+    run_id = _workflow_run_id(db)
+    book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup", workflow_run_id=run_id)
 
     other = (
         db.query(AppointmentSlot)
@@ -144,7 +166,7 @@ def test_one_run_cannot_hold_two_confirmed_bookings(db, seeded):
         .first()
     )
     with pytest.raises(ConflictError):
-        book_appointment(db, patient_id=1, slot_id=other.id, reason="again", workflow_run_id=7)
+        book_appointment(db, patient_id=1, slot_id=other.id, reason="again", workflow_run_id=run_id)
 
     db.refresh(other)
     assert other.status == "free"
@@ -158,8 +180,9 @@ def test_rescheduling_into_a_second_confirmed_booking_for_one_run_conflicts(db, 
     conflict, not as a raw IntegrityError out of the flush.
     """
     first_slot = _free_slot(db)
+    run_id = _workflow_run_id(db)
     first = book_appointment(
-        db, patient_id=1, slot_id=first_slot.id, reason="checkup", workflow_run_id=7
+        db, patient_id=1, slot_id=first_slot.id, reason="checkup", workflow_run_id=run_id
     )
     cancel_appointment(db, appointment_id=first["id"])
 
@@ -172,7 +195,7 @@ def test_rescheduling_into_a_second_confirmed_booking_for_one_run_conflicts(db, 
     )
     assert len(free_slots) == 2
     book_appointment(
-        db, patient_id=1, slot_id=free_slots[0].id, reason="rebooked", workflow_run_id=7
+        db, patient_id=1, slot_id=free_slots[0].id, reason="rebooked", workflow_run_id=run_id
     )
 
     with pytest.raises(ConflictError):
