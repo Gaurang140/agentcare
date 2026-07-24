@@ -94,15 +94,25 @@ def _observability(config: dict[str, Any], workflow_id: int):
     settings.langfuse_public_key/secret_key are set; a no-op otherwise.
     langfuse.langchain (which additionally requires `langchain`, not pinned
     in requirements.txt) is only imported on the keys-set path, so the
-    default/CI path never touches it."""
+    default/CI path never touches it.
+
+    Tracing is optional infrastructure, so a missing `langchain` install
+    downgrades the run to untraced instead of failing it: the import is
+    attempted before anything else on this path, and its failure leaves both
+    the Langfuse client and the callback out of the invocation."""
     if not (settings.langfuse_public_key and settings.langfuse_secret_key):
         yield
         return
 
-    _ensure_langfuse_client()
-    from langfuse import propagate_attributes
-    from langfuse.langchain import CallbackHandler
+    try:
+        from langfuse import propagate_attributes
+        from langfuse.langchain import CallbackHandler
+    except ImportError as exc:
+        logger.warning("langfuse_disabled_missing_dependency", error=str(exc))
+        yield
+        return
 
+    _ensure_langfuse_client()
     config.setdefault("callbacks", []).append(CallbackHandler())
     with propagate_attributes(metadata={"workflow_id": workflow_id}):
         yield

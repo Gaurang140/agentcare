@@ -438,6 +438,13 @@ account.
 | `LOG_LEVEL` | structlog level. Default `INFO`. |
 | `FRONTEND_ORIGIN` | Allowed CORS origin. Default `http://localhost:3000`. |
 
+Langfuse tracing needs one package more than `requirements.txt` pins. The
+handler in `langfuse.langchain` imports `langchain`, which the backend does
+not use anywhere else, so install it explicitly when you want traces:
+`pip install langchain==1.3.14`. With both keys set and that package missing,
+the workflow still runs to completion untraced and logs one
+`langfuse_disabled_missing_dependency` warning.
+
 ## Deployment
 
 - **Docker Compose (implemented).** `docker compose up --build` brings up
