@@ -67,6 +67,9 @@ Python 3.12 and Node 22. Backend commands run from `backend/`; the seed runs
 from the repo root.
 
 ```bash
+# 0. create the virtualenv (Python 3.12)
+python3 -m venv .venv
+
 # 1. install backend dependencies into the venv
 .venv/bin/pip install -r requirements.txt
 
