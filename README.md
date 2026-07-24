@@ -170,6 +170,18 @@ home) and watch what happens.
    injection guard (`backend/app/safety/injection_guard.py`) catches the
    phrase before any model call and opens a `safety` escalation.
 
+5. **PII in a request (redacted before it reaches the model)**
+
+   ```
+   Book me a cardiology appointment, my email is jane.doe@example.com and my number is 0176 12345678.
+   ```
+
+   Expect: booking still succeeds as normal. In the audit trail, look for a
+   `safety.pii_redacted` event: the text that actually reached the model had
+   the email and phone number swapped for `[REDACTED_EMAIL]` /
+   `[REDACTED_PHONE]` tokens (`backend/app/safety/pii.py`), and the audit row
+   itself carries only the category counts, never the raw values.
+
 ## Kill-and-resume demo
 
 LangGraph checkpoints every super-step, so a run survives a backend restart and
@@ -293,11 +305,12 @@ diagram is [docs/architecture.mmd](docs/architecture.mmd).
 cd backend && ../.venv/bin/python -m pytest -q
 ```
 
-161 tests pass. They cover the agents (each with an injected fake model, no
+182 tests pass. They cover the agents (each with an injected fake model, no
 network and no keys), the tools and deterministic safety guardrails (including
-the prompt-injection guard), the data model, RBAC on staff and patient-data
-routes, the SSE timeline, the scheduler jobs and a full fake-LLM end-to-end
-graph run in `test_graph_e2e.py`. Linting is `ruff check backend`.
+the prompt-injection guard and the PII redaction boundary), the data model,
+RBAC on staff and patient-data routes, the SSE timeline, the scheduler jobs
+and a full fake-LLM end-to-end graph run in `test_graph_e2e.py`. Linting is
+`ruff check backend`.
 
 ## Project structure
 
@@ -306,7 +319,7 @@ agentcare/
   backend/            FastAPI + LangGraph service
     app/              config, models, auth, safety, tools, agents, services, api
     alembic/          migration environment and versions
-    tests/            161 pytest tests (unit, RBAC, fake-LLM end-to-end)
+    tests/            182 pytest tests (unit, RBAC, fake-LLM end-to-end)
     Dockerfile
   frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
     app/              login, register, patient portal, staff portal

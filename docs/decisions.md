@@ -352,3 +352,40 @@ and **Security Command Center**.
 **Revisit when.** The app carries real (non-synthetic) patient data on a public endpoint (then
 Cloud Armor and Binary Authorization move up), or it gains a Cloud Identity organization (then
 VPC-SC and org-wide SCC become available).
+
+---
+
+## ADR-13: PII boundary redaction (regex now, Presidio/DLP API as scale path)
+
+**Status:** Implemented now (regex redaction). Cloud DLP documented as the scale path, not built.
+
+**Context.** Patient-submitted text (`request_text`, a document's `extracted_text`) reaches an
+LLM provider through `chat_json` calls in the routing, coordinator and document agent nodes. The
+database must keep the original for the audit trail and the patient-facing record, but the copy
+that leaves the process toward Groq (or any configured LLM endpoint) should not carry raw
+identifiers a patient happens to type inline (an email, a phone number, an IBAN).
+
+**Decision.** `backend/app/safety/pii.py::PIIRedactor` / `redact_for_llm`: five hand-written regex
+families (email, phone, IBAN, German health insurance number and date-of-birth-like dates), each
+replaced with a fixed `[REDACTED_...]` token, applied only at the three call sites that embed
+patient-submitted text directly in a prompt. Everything stored in the database and everything
+shown back to the patient stays the original, unredacted text.
+
+**Why.** `chat_json` already runs inline on the request path, so the redaction pass needs to add
+no meaningful latency: a plain regex sweep needs no new dependency or network call, and it runs in
+well under a millisecond, deterministically every time. A regex pass cannot catch every real-world PII
+shape (free-text addresses, names in isolation, non-German phone formats outside the three
+patterns covered), so it is a boundary control, not a claim of complete coverage; the deliberately
+conservative date-of-birth rule (a birth-context word redacts any year, a bare date only redacts
+inside 1900-2015) is documented in `docs/security.md`'s PII boundary subsection, including its one
+accepted false-positive case. Microsoft Presidio (open source, spaCy-based NER plus pattern
+recognizers) is the natural upgrade once free-text PII detection is worth the extra model weight
+and latency on a 16 GB-class box. On GCP, **Cloud DLP** (Sensitive Data Protection) is the native
+managed alternative: it ships hundreds of built-in `infoType` detectors covering financial and
+health identifiers, and its `deidentify` templates do exactly this redact-before-send job as a
+hosted API call. A GCP-first deployment would reach for that before standing up its own Presidio
+service.
+
+**Revisit when.** The text volume or PII shapes going to the LLM grow past what a fixed regex list
+credibly covers (free-text patient narratives, non-German name/address formats), or the app
+deploys on GCP and wants a managed detector instead of maintaining its own pattern list.

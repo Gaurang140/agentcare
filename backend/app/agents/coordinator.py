@@ -15,6 +15,7 @@ from app.agents.prompts import COORDINATOR
 from app.agents.llm import chat_json
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
+from app.safety.pii import redact_for_llm
 from app.tools.audit_tools import write_audit
 
 logger = get_logger(__name__)
@@ -32,9 +33,9 @@ class CoordinatorOutput(BaseModel):
     reasoning: str
 
 
-def _user_prompt(state: AgentState) -> str:
+def _user_prompt(state: AgentState, request_text: str) -> str:
     return (
-        f"Patient request: {state.get('request_text', '')}\n"
+        f"Patient request: {request_text}\n"
         f"Intent: {state.get('intent')}\n"
         f"Department: {state.get('department_name')}\n"
         f"Has appointment: {bool(state.get('appointment'))}\n"
@@ -50,11 +51,29 @@ def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
     db.commit()
 
 
+def _redact_request_text(db: Session, workflow_id: int | None, request_text: str) -> str:
+    """Redact `request_text` before it is embedded in the coordinator prompt;
+    write one "safety.pii_redacted" audit row (counts only, no raw PII) when
+    anything was found."""
+    redacted, counts = redact_for_llm(request_text)
+    if counts:
+        write_audit(
+            db,
+            None,
+            "safety.pii_redacted",
+            "workflow_run",
+            workflow_id,
+            {"node": "coordinator", "counts": counts},
+        )
+    return redacted
+
+
 def run(state: AgentState, db: Session) -> dict:
     """Decide the next step; append it to the running plan."""
     workflow_id = state.get("workflow_id")
     try:
-        result = chat_json(COORDINATOR, _user_prompt(state), CoordinatorOutput)
+        request_text = _redact_request_text(db, workflow_id, state.get("request_text", ""))
+        result = chat_json(COORDINATOR, _user_prompt(state, request_text), CoordinatorOutput)
         plan = [*(state.get("plan") or []), result.next_step]
         update = {"plan": plan, "completed_steps": ["coordinator"]}
         _exit_audit(db, workflow_id, {"next_step": result.next_step})

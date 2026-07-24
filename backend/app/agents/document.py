@@ -12,6 +12,13 @@ the prompt-injection guard (Task F1) before it goes into the classification
 prompt. A poisoned document is left typed "other" and its own audit event is
 written, but it never kills the run - the rest of the uploaded documents
 still get classified and the workflow continues.
+
+Whatever survives the injection guard is then redacted (Task F2,
+`safety/pii.py::redact_for_llm`) before it reaches the classification
+prompt, since extracted text is still patient-submitted content on its way
+to the LLM provider. Counts are summed across every document processed in
+one `run()` call and reported in a single "safety.pii_redacted" audit row,
+not one row per document.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import PatientDocument
 from app.safety.injection_guard import screen_injection
+from app.safety.pii import redact_for_llm
 from app.tools.audit_tools import write_audit
 from app.tools.document_tools import check_required_documents
 
@@ -42,13 +50,32 @@ class DocumentOutput(BaseModel):
     confidence: float
 
 
-def _classification_prompt(doc: PatientDocument) -> str:
-    return f"Filename: {doc.filename}\nExtracted text (may be empty): {doc.extracted_text or ''}"
+def _classification_prompt(filename: str, extracted_text: str) -> str:
+    return f"Filename: {filename}\nExtracted text (may be empty): {extracted_text}"
 
 
 def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
     write_audit(db, None, "agent.document.completed", "workflow_run", workflow_id, summary)
     db.commit()
+
+
+def _merge_counts(total: dict[str, int], counts: dict[str, int]) -> None:
+    for category, count in counts.items():
+        total[category] = total.get(category, 0) + count
+
+
+def _audit_pii_redacted(db: Session, workflow_id: int | None, counts: dict[str, int]) -> None:
+    """One audit row per `run()` call, aggregating counts across every
+    document processed - never one row per document."""
+    if counts:
+        write_audit(
+            db,
+            None,
+            "safety.pii_redacted",
+            "workflow_run",
+            workflow_id,
+            {"node": "document", "counts": counts},
+        )
 
 
 def run(state: AgentState, db: Session) -> dict:
@@ -59,6 +86,7 @@ def run(state: AgentState, db: Session) -> dict:
         doc_ids = state.get("uploaded_document_ids") or []
 
         classified: list[dict] = []
+        pii_counts: dict[str, int] = {}
         for doc_id in doc_ids:
             doc = db.get(PatientDocument, doc_id)
             if doc is None or doc.document_type != _UNKNOWN_TYPE:
@@ -78,12 +106,17 @@ def run(state: AgentState, db: Session) -> dict:
                 )
                 continue
 
-            result = chat_json(DOCUMENT, _classification_prompt(doc), DocumentOutput)
+            redacted_text, counts = redact_for_llm(doc.extracted_text or "")
+            _merge_counts(pii_counts, counts)
+            result = chat_json(
+                DOCUMENT, _classification_prompt(doc.filename, redacted_text), DocumentOutput
+            )
             doc.document_type = result.document_type
             db.flush()
             classified.append(
                 {"id": doc.id, "document_type": result.document_type, "confidence": result.confidence}
             )
+        _audit_pii_redacted(db, workflow_id, pii_counts)
         db.commit()
 
         department_id = state.get("department_id")

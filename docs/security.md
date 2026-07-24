@@ -47,6 +47,32 @@ and falls back to layer 1, never blocks on its own. A blocked request escalates 
 a blocked document is left typed `other` and the run continues. Model Armor is the
 GCP-native scale path for layer 2, documented but not built here.
 
+## PII boundary
+
+`backend/app/safety/pii.py::PIIRedactor` / `redact_for_llm`. The rule: the database
+always keeps what a patient actually typed or uploaded (`WorkflowRun.request_text`,
+`PatientDocument.extracted_text`) unredacted. Redaction applies only to the copy of
+that text on its way into an LLM prompt, never to what is stored and never to what
+the patient is shown back.
+
+Five regex categories, each replaced with its own `[REDACTED_...]` token: email,
+phone (international `+49...`, German national `0...` and a generic 3-3-4
+fallback), IBAN (`DE`-specific and a generic international pattern), German health
+insurance number (one letter plus 9 digits) and date-of-birth-like dates. The date
+rule is deliberately two-part: a date next to a birth-context word ("born", "geb",
+"dob") redacts at any year, while a bare, unlabelled date only redacts inside a
+1900-2015 year window, so an ordinary "book me for 15.08.2026" appointment ask
+survives untouched.
+
+Wired at the three points a chat_json call embeds patient-submitted text directly:
+`agents/routing.py` and `agents/coordinator.py` (`request_text`), and
+`agents/document.py` (a document's `extracted_text`, after the injection guard has
+already cleared it). Each call writes one `safety.pii_redacted` audit row per node
+invocation when anything was found, carrying only the category counts, never the
+raw values. `agents/safety.py` composes its LLM-bound draft from freshly queried
+database rows, not from patient-submitted text, so it never calls `redact_for_llm`
+and the `final_response` shown to the patient is never redacted either way.
+
 ## RBAC
 
 Access control is backend-only truth (`backend/app/auth/dependencies.py`).
@@ -105,7 +131,8 @@ enforce.
   Identity Federation (see `docs/decisions.md`, ADR-12).
 - PII posture: seed data is obviously synthetic, the app carries no real patient data and the
   administrative-only boundary means the system never records or emits clinical judgments about a
-  person. The redacting logger and the single-identity `patient_id = users.id` design keep the
+  person. The redacting logger, the "PII boundary" subsection below (redaction before any text
+  reaches the LLM provider) and the single-identity `patient_id = users.id` design keep the
   personal surface small and auditable.
 
 ## Audit trail

@@ -15,6 +15,7 @@ from app.agents.prompts import ROUTING
 from app.agents.llm import chat_json
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
+from app.safety.pii import redact_for_llm
 from app.tools.audit_tools import write_audit
 from app.tools.department_tools import find_department, list_departments
 from app.tools.escalation_tools import create_escalation
@@ -36,10 +37,10 @@ class RoutingOutput(BaseModel):
     reason: str
 
 
-def _user_prompt(state: AgentState, departments: list[dict]) -> str:
+def _user_prompt(request_text: str, departments: list[dict]) -> str:
     names = ", ".join(d["name"] for d in departments)
     return (
-        f"Patient request: {state.get('request_text', '')}\n"
+        f"Patient request: {request_text}\n"
         f"Available departments (choose exactly one of these, or null): {names}"
     )
 
@@ -47,6 +48,23 @@ def _user_prompt(state: AgentState, departments: list[dict]) -> str:
 def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
     write_audit(db, None, "agent.routing.completed", "workflow_run", workflow_id, summary)
     db.commit()
+
+
+def _redact_request_text(db: Session, workflow_id: int | None, request_text: str) -> str:
+    """Redact `request_text` before it is embedded in the routing prompt;
+    write one "safety.pii_redacted" audit row (counts only, no raw PII) when
+    anything was found."""
+    redacted, counts = redact_for_llm(request_text)
+    if counts:
+        write_audit(
+            db,
+            None,
+            "safety.pii_redacted",
+            "workflow_run",
+            workflow_id,
+            {"node": "routing", "counts": counts},
+        )
+    return redacted
 
 
 def _escalate_uncertain(
@@ -72,7 +90,8 @@ def run(state: AgentState, db: Session) -> dict:
     workflow_id = state.get("workflow_id")
     try:
         departments = list_departments(db)
-        result = chat_json(ROUTING, _user_prompt(state, departments), RoutingOutput)
+        request_text = _redact_request_text(db, workflow_id, state.get("request_text", ""))
+        result = chat_json(ROUTING, _user_prompt(request_text, departments), RoutingOutput)
 
         if result.confidence < _CONFIDENCE_THRESHOLD or not result.department:
             return _escalate_uncertain(
