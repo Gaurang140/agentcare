@@ -15,6 +15,7 @@ from datetime import date, timedelta
 import pytest
 from sqlalchemy.orm import Session
 
+from app.agents.responses import staff_review_response
 from app.config import settings
 from app.models import Appointment, AuditEvent, Department, Escalation, Reminder, User
 from app.services import workflow_service
@@ -141,6 +142,62 @@ def test_node_failure_escalates_and_marks_run_failed(db, seeded, fake_llm):
     assert run.status == "failed"
     assert db.query(Escalation).filter_by(severity="agent_failure").count() == 1
     assert len(client.chat.completions.calls) == 3
+
+
+def test_specialist_escalation_ends_the_run(db, seeded, fake_llm):
+    """Routing escalates on low confidence and the coordinator's next
+    decision ignores it ("finalize"). The graph must not take that decision:
+    an escalation_id on the state routes straight to the escalate node, so
+    the safety agent never runs, the staff-review answer the escalating
+    specialist wrote survives, and the escalate node reuses the row routing
+    already opened instead of filing a second one for the same run."""
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {"intent": "other", "department": None, "confidence": 0.4, "reason": "ambiguous"},
+            {"next_step": "finalize", "reasoning": "coordinator missed the escalation"},
+        ]
+    )
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "something about an appointment, maybe", []
+    )
+
+    assert run.status == "escalated"
+    assert db.query(Escalation).count() == 1
+    assert run.state["final_response"] == staff_review_response(db, run.patient_id)
+    assert db.query(AuditEvent).filter_by(action="agent.safety.completed").count() == 0
+    assert len(client.chat.completions.calls) == 3
+
+
+def test_appointment_escalation_is_not_filed_twice(db, seeded, fake_llm):
+    """The appointment agent gives up after two invented slot ids and files
+    its own agent_failure escalation without setting state["error"]. The run
+    ends there (status escalated, not failed), nothing is booked, and the
+    escalate node reuses that row - so the staff queue shows one escalation
+    for the run, still carrying the severity the appointment agent chose."""
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {"intent": "book", "department": "Cardiology", "confidence": 0.95, "reason": "routing"},
+            {"next_step": "handle_appointment", "reasoning": "department resolved"},
+            {"slot_id": 999_999, "reason": "invented id"},
+            {"slot_id": 999_998, "reason": "invented again"},
+            {"next_step": "handle_documents", "reasoning": "coordinator missed the escalation"},
+        ]
+    )
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", []
+    )
+
+    assert run.status == "escalated"
+    assert db.query(Appointment).count() == 0
+    escalations = db.query(Escalation).all()
+    assert [e.severity for e in escalations] == ["agent_failure"]
+    audit = db.query(AuditEvent).filter_by(action="agent.escalate.completed").one()
+    assert audit.metadata_json == {"severity": "agent_failure"}
+    assert len(client.chat.completions.calls) == 6
 
 
 def test_resume_after_completion_is_idempotent(db, seeded, fake_llm):

@@ -12,12 +12,15 @@ checkpointed), one session per `graph.invoke()` call, supplied by
 
 Routing: the coordinator never picks a node directly - it appends one of six
 plan words to `state["plan"]` (see `agents/coordinator.py`), and
-`_route_from_coordinator` maps the latest plan entry to a graph node. Any
-node's unrecovered failure (`state["error"]` set - every specialist's own
-`run()` already catches its exceptions and reports them this way rather than
-raising) overrides that mapping and forces `escalate` directly, regardless of
-what the coordinator last decided: the graph must never depend on the
-coordinator's own LLM call correctly noticing an error to stay safe.
+`_route_from_coordinator` maps the latest plan entry to a graph node. Two
+things override that mapping and force `escalate` directly, regardless of
+what the coordinator last decided: a node's unrecovered failure
+(`state["error"]` set - every specialist's own `run()` already catches its
+exceptions and reports them this way rather than raising), and an escalation
+a specialist already opened (`state["escalation_id"]` set). The graph must
+never depend on the coordinator's own LLM call noticing either one: once a
+case is with a human, the run ends rather than working on past the handoff
+and overwriting the staff-review answer.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from app.agents.responses import staff_review_response
 from app.agents.state import AgentState
 from app.config import settings
 from app.logging_setup import get_logger
+from app.models import Escalation
 from app.tools.audit_tools import write_audit
 from app.tools.escalation_tools import create_escalation
 
@@ -83,35 +87,64 @@ def _safety_finalize_node(state: AgentState, config: RunnableConfig) -> dict:
 
 
 def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
-    """Terminal node for either a coordinator-chosen escalate or a
-    specialist's unrecovered error. severity is agent_failure when the
-    state carries an error, uncertainty when the coordinator escalated a
-    clean state (contradictory or out-of-scope request, per its prompt)."""
+    """Terminal node for a coordinator-chosen escalate, a specialist's own
+    escalation, or a specialist's unrecovered error.
+
+    A specialist that already opened an escalation for this run (routing on
+    low confidence, appointment on an unrecoverable booking failure) hands
+    its id over on the state, and a run whose escalation row exists without
+    that id is found by workflow_run_id: either way the row is reused, so
+    one run never files two escalations for the same handoff. Only a run
+    with no escalation yet gets a new one, with severity agent_failure when
+    the state carries an error and uncertainty when the coordinator
+    escalated a clean state (contradictory or out-of-scope request, per its
+    prompt).
+    """
     db = _db(config)
     workflow_id = state.get("workflow_id")
     error = state.get("error")
     severity = "agent_failure" if error else "uncertainty"
-    reason = error or "coordinator escalated: contradictory or out-of-scope request"
 
-    escalation = create_escalation(db, workflow_id, reason=reason, severity=severity)
+    escalation_id = state.get("escalation_id")
+    if escalation_id is None:
+        existing = (
+            db.query(Escalation)
+            .filter_by(workflow_run_id=workflow_id)
+            .order_by(Escalation.id.desc())
+            .first()
+        )
+        if existing is not None:
+            escalation_id = existing.id
+        else:
+            reason = error or "coordinator escalated: contradictory or out-of-scope request"
+            escalation = create_escalation(db, workflow_id, reason=reason, severity=severity)
+            escalation_id = escalation["id"]
+
+    # Audit the severity actually on the row: on a reuse that is the
+    # escalating specialist's own severity (appointment files agent_failure
+    # without setting state["error"]), not what this node would have picked.
+    row = db.get(Escalation, escalation_id)
+    if row is not None:
+        severity = row.severity
+
     write_audit(
         db, None, "agent.escalate.completed", "workflow_run", workflow_id, {"severity": severity}
     )
     db.commit()
     return {
-        "escalation_id": escalation["id"],
+        "escalation_id": escalation_id,
         "final_response": staff_review_response(db, state.get("patient_id")),
         "completed_steps": ["escalate"],
     }
 
 
 def _route_from_coordinator(state: AgentState) -> str:
-    """An error on the state always wins, regardless of the coordinator's
-    own plan entry - a defensive fallback that doesn't depend on the LLM
-    noticing the error itself. Otherwise follow the latest plan entry; an
-    empty or unrecognized plan also falls back to escalate rather than
-    crash the graph on a missing/bad decision."""
-    if state.get("error"):
+    """An error or an already-created escalation always wins, regardless of
+    the coordinator's own plan entry - a defensive fallback that doesn't
+    depend on the LLM noticing either one itself. Otherwise follow the
+    latest plan entry; an empty or unrecognized plan also falls back to
+    escalate rather than crash the graph on a missing/bad decision."""
+    if state.get("error") or state.get("escalation_id"):
         return "escalate"
     plan = state.get("plan") or []
     if not plan:
