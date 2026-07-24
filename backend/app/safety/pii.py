@@ -150,6 +150,7 @@ def redact_for_llm(text: str) -> tuple[str, dict[str, int]]:
     """Redact `text` before it is embedded in a prompt bound for the LLM
     provider. The one call every agent node uses - see the module docstring
     for the boundary this function draws and which nodes call it
-    (`agents/routing.py`, `agents/coordinator.py`, `agents/document.py`).
+    (`agents/routing.py`, `agents/coordinator.py`, `agents/appointment.py`,
+    `agents/document.py`).
     """
     return _redactor.redact(text)

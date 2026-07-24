@@ -14,10 +14,12 @@ from sqlalchemy.orm import Session
 from app.agents.prompts import APPOINTMENT
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
+from app.agents.responses import staff_review_response
 from app.agents.state import AgentState
 from app.exceptions import ConflictError, NotFoundError
 from app.logging_setup import get_logger
 from app.models import Appointment
+from app.safety.pii import redact_for_llm
 from app.tools.appointment_tools import (
     book_appointment,
     cancel_appointment,
@@ -31,7 +33,6 @@ logger = get_logger(__name__)
 
 _SLOT_WINDOW_DAYS = 14
 _SLOT_PICK_ATTEMPTS = 2
-_ESCALATION_RESPONSE = "a staff member will review your request"
 
 
 class AppointmentOutput(BaseModel):
@@ -42,17 +43,19 @@ class AppointmentOutput(BaseModel):
     reason: str
 
 
-def _slot_prompt(state: AgentState, slots: list[dict]) -> str:
+def _slot_prompt(llm_request_text: str, slots: list[dict]) -> str:
+    """`llm_request_text` must already be PII-redacted (see
+    _handle_book_or_reschedule) - this string goes to the LLM provider."""
     if not slots:
         listing = "(no slots available)"
     else:
         listing = "\n".join(
             f"slot_id={s['slot_id']} doctor={s['doctor']} start={s['start_time']}" for s in slots
         )
-    return f"Patient timing preference: {state.get('request_text', '')}\nAvailable slots:\n{listing}"
+    return f"Patient timing preference: {llm_request_text}\nAvailable slots:\n{listing}"
 
 
-def _pick_valid_slot(system: str, state: AgentState, slots: list[dict]) -> int | None:
+def _pick_valid_slot(system: str, llm_request_text: str, slots: list[dict]) -> int | None:
     """Ask the LLM for a slot id, validated against the real list. Retries
     once on an invented id, per the brief; never trusts an id it didn't hand
     the LLM in the first place. `system` is built once per run() call (see
@@ -60,7 +63,7 @@ def _pick_valid_slot(system: str, state: AgentState, slots: list[dict]) -> int |
     lookup doesn't repeat per attempt."""
     valid_ids = {s["slot_id"] for s in slots}
     for _ in range(_SLOT_PICK_ATTEMPTS):
-        picked = chat_json(system, _slot_prompt(state, slots), AppointmentOutput)
+        picked = chat_json(system, _slot_prompt(llm_request_text, slots), AppointmentOutput)
         if picked.slot_id in valid_ids:
             return picked.slot_id
     return None
@@ -80,11 +83,13 @@ def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
     db.commit()
 
 
-def _escalate_agent_failure(db: Session, workflow_id: int | None, reason: str) -> dict:
+def _escalate_agent_failure(
+    db: Session, workflow_id: int | None, patient_id: int | None, reason: str
+) -> dict:
     escalation = create_escalation(db, workflow_id, reason=reason, severity="agent_failure")
     update = {
         "escalation_id": escalation["id"],
-        "final_response": _ESCALATION_RESPONSE,
+        "final_response": staff_review_response(db, patient_id),
         "completed_steps": ["appointment"],
     }
     _exit_audit(db, workflow_id, {"escalated": True, "reason": reason})
@@ -126,29 +131,46 @@ def _handle_book_or_reschedule(
 
     system = build_system_prompt(db, "appointment", APPOINTMENT)
 
-    today = date.today()
-    slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
-    slot_id = _pick_valid_slot(system, state, slots)
-    if slot_id is None:
-        return _escalate_agent_failure(
-            db, workflow_id, "appointment agent could not select a valid slot from the list"
+    # The raw request_text stays in the DB (appointment reason below); only
+    # the copy embedded in the LLM prompt is redacted, same boundary as the
+    # routing/coordinator/document nodes.
+    request_text = state.get("request_text", "")
+    llm_request_text, pii_counts = redact_for_llm(request_text)
+    if pii_counts:
+        write_audit(
+            db,
+            None,
+            "safety.pii_redacted",
+            "workflow_run",
+            workflow_id,
+            {"node": "appointment", "counts": pii_counts},
         )
 
-    request_text = state.get("request_text", "")
+    today = date.today()
+    slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
+    slot_id = _pick_valid_slot(system, llm_request_text, slots)
+    if slot_id is None:
+        return _escalate_agent_failure(
+            db,
+            workflow_id,
+            patient_id,
+            "appointment agent could not select a valid slot from the list",
+        )
+
     try:
         result = _book_or_reschedule(db, intent, patient_id, slot_id, request_text, existing_id)
     except ConflictError:
         slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
-        slot_id = _pick_valid_slot(system, state, slots)
+        slot_id = _pick_valid_slot(system, llm_request_text, slots)
         if slot_id is None:
             return _escalate_agent_failure(
-                db, workflow_id, "no valid slot left after a booking conflict"
+                db, workflow_id, patient_id, "no valid slot left after a booking conflict"
             )
         try:
             result = _book_or_reschedule(db, intent, patient_id, slot_id, request_text, existing_id)
         except ConflictError:
             return _escalate_agent_failure(
-                db, workflow_id, "repeated booking conflict on the same request"
+                db, workflow_id, patient_id, "repeated booking conflict on the same request"
             )
 
     update = {"appointment": result, "completed_steps": ["appointment"]}

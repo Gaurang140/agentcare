@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.agents.prompts import ROUTING
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
+from app.agents.responses import staff_review_response
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.safety.pii import redact_for_llm
@@ -24,7 +25,6 @@ from app.tools.escalation_tools import create_escalation
 logger = get_logger(__name__)
 
 _CONFIDENCE_THRESHOLD = 0.7
-_ESCALATION_RESPONSE = "a staff member will review your request"
 
 
 class RoutingOutput(BaseModel):
@@ -69,7 +69,12 @@ def _redact_request_text(db: Session, workflow_id: int | None, request_text: str
 
 
 def _escalate_uncertain(
-    db: Session, workflow_id: int | None, intent: str, confidence: float, reason: str
+    db: Session,
+    workflow_id: int | None,
+    patient_id: int | None,
+    intent: str,
+    confidence: float,
+    reason: str,
 ) -> dict:
     escalation = create_escalation(db, workflow_id, reason=reason, severity="uncertainty")
     update = {
@@ -78,7 +83,7 @@ def _escalate_uncertain(
         "department_name": None,
         "routing_confidence": confidence,
         "escalation_id": escalation["id"],
-        "final_response": _ESCALATION_RESPONSE,
+        "final_response": staff_review_response(db, patient_id),
         "completed_steps": ["routing"],
     }
     _exit_audit(db, workflow_id, {"escalated": True, "confidence": confidence})
@@ -97,7 +102,7 @@ def run(state: AgentState, db: Session) -> dict:
 
         if result.confidence < _CONFIDENCE_THRESHOLD or not result.department:
             return _escalate_uncertain(
-                db, workflow_id, result.intent, result.confidence, result.reason
+                db, workflow_id, state.get("patient_id"), result.intent, result.confidence, result.reason
             )
 
         department = find_department(db, result.department)
@@ -108,6 +113,7 @@ def run(state: AgentState, db: Session) -> dict:
             return _escalate_uncertain(
                 db,
                 workflow_id,
+                state.get("patient_id"),
                 result.intent,
                 result.confidence,
                 f"unresolvable department: {result.department}",

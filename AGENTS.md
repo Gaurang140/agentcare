@@ -1,8 +1,8 @@
-# AGENTS.md — rules for AI coding agents working in this repo
+# AGENTS.md: rules for AI coding agents working in this repo
 
 AgentCare is an agentic hospital-administration system: FastAPI + LangGraph backend
 (six coordinated agents), Next.js 16 frontend, persistent SQL, deployed to GCP.
-It handles administration only — registration, department routing, appointment
+It handles administration only: registration, department routing, appointment
 booking, document coordination, reminders, follow-up. It never diagnoses,
 prescribes, or doses. Keep that boundary in every line you write, including
 prompts, tests, seeds and docs.
@@ -51,9 +51,9 @@ scripts/     # seed_demo.py and helpers
    `.env.example` documents keys). Never commit `.env`, `*.db`, `uploads/`, real
    PII, or credentials. Seed data stays obviously synthetic.
 8. **Dependencies are pinned** in the root `requirements.txt` (also the file CI
-   scanners read — it must keep naming `openai` and `langgraph`). Verify current
+   scanners read: it must keep naming `openai` and `langgraph`). Verify current
    APIs against official docs before using anything you are unsure about; several
-   ecosystems changed recently (passlib is dead → pwdlib; Next.js middleware.ts →
+   APIs changed recently (passlib is dead → pwdlib; Next.js middleware.ts →
    proxy.ts; Groq model lineup).
 
 ## Commands
@@ -75,7 +75,7 @@ docker compose up --build
 
 - TDD for behavior changes: failing test first, then implement, then green.
 - LLM-dependent tests inject a fake client via
-  `app.agents.llm.set_llm_client_for_tests(...)` — no network, no keys in tests.
+  `app.agents.llm.set_llm_client_for_tests(...)`: no network, no keys in tests.
 - Run the focused test while iterating; run the FULL suite + ruff + compileall
   before every commit.
 

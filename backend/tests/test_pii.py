@@ -1,13 +1,14 @@
 """TDD for the PII boundary (Task F2): PIIRedactor's five categories, the
 shared `redact_for_llm` wrapper, and the node-level wiring in routing,
-coordinator and document - the three nodes that build an LLM prompt directly
-from patient-submitted text (`request_text` / a document's `extracted_text`).
+coordinator, appointment and document - the four nodes that build an LLM
+prompt directly from patient-submitted text (`request_text` / a document's
+`extracted_text`).
 """
 
 from __future__ import annotations
 
-from app.agents import coordinator, document, routing
-from app.models import AuditEvent, PatientDocument
+from app.agents import appointment, coordinator, document, routing
+from app.models import AppointmentSlot, AuditEvent, Department, Doctor, PatientDocument
 from app.safety.pii import PIIRedactor, redact_for_llm
 
 # --- PIIRedactor: one category at a time ------------------------------------
@@ -123,7 +124,7 @@ def test_redact_for_llm_is_the_same_shared_pipeline():
     assert counts == {"email": 1}
 
 
-# --- Node wiring: routing, coordinator, document -----------------------------
+# --- Node wiring: routing, coordinator, appointment, document ----------------
 # Each node builds its chat_json user-content from patient-submitted text
 # (request_text or a document's extracted_text). These tests assert the
 # messages actually sent to the fake LLM carry the redacted token, never the
@@ -160,6 +161,42 @@ def test_routing_node_redacts_request_text_before_the_llm_call(db, seeded, fake_
     assert len(rows) == 1
     assert rows[0].metadata_json["counts"] == {"email": 1}
     assert "jane.doe@example.com" not in str(rows[0].metadata_json)
+
+
+def test_appointment_node_redacts_request_text_before_the_llm_call(db, seeded, fake_llm):
+    """The slot-picking prompt was the leak the Phase 4 verifier found: raw
+    request_text went to the LLM while every other node redacted it. This
+    pins the fix - the DB-stored appointment reason keeps the raw text, only
+    the LLM-bound copy is redacted."""
+    free_slot = (
+        db.query(AppointmentSlot)
+        .join(Doctor)
+        .join(Department)
+        .filter(Department.name == "Cardiology", AppointmentSlot.status == "free")
+        .first()
+    )
+    client = fake_llm([{"slot_id": free_slot.id, "reason": "earliest"}])
+    state = {
+        "workflow_id": 1,
+        "patient_id": 1,
+        "intent": "book",
+        "department_id": free_slot.doctor.department_id,
+        "request_text": "Book me for next week, my number is +49 176 12345678",
+    }
+
+    result = appointment.run(state, db)
+
+    sent_user_content = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "[REDACTED_PHONE]" in sent_user_content
+    assert "12345678" not in sent_user_content
+
+    rows = _pii_audit(db, 1)
+    assert len(rows) == 1
+    assert rows[0].metadata_json == {"node": "appointment", "counts": {"phone": 1}}
+
+    # The persisted appointment keeps the raw reason: redaction is only for
+    # the provider boundary, the DB stays the system of record.
+    assert result["appointment"]["status"] == "confirmed"
 
 
 def test_coordinator_node_redacts_request_text_before_the_llm_call(db, seeded, fake_llm):

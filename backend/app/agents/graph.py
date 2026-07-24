@@ -33,6 +33,7 @@ from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy.orm import Session
 
 from app.agents import appointment, coordinator, document, followup, routing, safety
+from app.agents.responses import staff_review_response
 from app.agents.state import AgentState
 from app.config import settings
 from app.logging_setup import get_logger
@@ -40,8 +41,6 @@ from app.tools.audit_tools import write_audit
 from app.tools.escalation_tools import create_escalation
 
 logger = get_logger(__name__)
-
-_ESCALATION_RESPONSE = "a staff member will review your request"
 
 # CoordinatorOutput.next_step (agents/coordinator.py) -> the graph node that
 # handles it. Keys are exactly the six values in that Literal.
@@ -101,7 +100,7 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     db.commit()
     return {
         "escalation_id": escalation["id"],
-        "final_response": _ESCALATION_RESPONSE,
+        "final_response": staff_review_response(db, state.get("patient_id")),
         "completed_steps": ["escalate"],
     }
 

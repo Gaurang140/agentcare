@@ -42,7 +42,9 @@ def test_low_confidence_escalates_instead_of_routing(db, seeded, fake_llm):
 
     assert result["department_id"] is None
     assert result["escalation_id"] is not None
-    assert result["final_response"] == "a staff member will review your request"
+    # Patient 1's preferred_language is "de": the no-LLM escalation template
+    # answers in German (agents/responses.py).
+    assert "Praxisteam" in result["final_response"]
     escalation = db.get(Escalation, result["escalation_id"])
     assert escalation.severity == "uncertainty"
     assert escalation.workflow_run_id == 1
