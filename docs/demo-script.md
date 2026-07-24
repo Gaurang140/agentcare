@@ -88,3 +88,10 @@ If there is room for a bonus shot, submit a booking request, run
 `docker compose restart backend` mid-run, then call the resume endpoint. The run
 picks up from its last checkpoint with no duplicate work. Steps are in the
 README under "Kill-and-resume demo".
+
+## Optional beat: the German showcase (10 seconds)
+
+Log out, log in as erika@agentcare-demo.com (demo1234), submit "Ich habe
+starke Brustschmerzen". Say: "Responses follow each patient's language
+preference. Erika gets the emergency guidance in German, instantly and with
+zero model calls." Cut on the German 112 response.

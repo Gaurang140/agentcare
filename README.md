@@ -51,6 +51,7 @@ Open http://localhost:3000 and log in.
 | Role | Email | Password |
 |---|---|---|
 | Patient | `patient@agentcare-demo.com` | `demo1234` |
+| Patient (German) | `erika@agentcare-demo.com` | `demo1234` |
 | Staff | `staff@agentcare-demo.com` | `demo1234` |
 
 The compose stack also starts:
@@ -181,6 +182,21 @@ home) and watch what happens.
    the email and phone number swapped for `[REDACTED_EMAIL]` /
    `[REDACTED_PHONE]` tokens (`backend/app/safety/pii.py`), and the audit row
    itself carries only the category counts, never the raw values.
+
+6. **German showcase (bilingual responses)**
+
+   Log in as the German-preference patient (`erika@agentcare-demo.com`) and
+   submit:
+
+   ```
+   Ich habe starke Brustschmerzen
+   ```
+
+   Expect: the emergency response arrives in German ("Bitte rufen Sie jetzt
+   die 112 an"), because responses follow each patient's
+   `preferred_language`. The same request from the English demo patient
+   answers in English. Escalations and confirmations are localized the same
+   way (`backend/app/agents/responses.py`).
 
 ## Kill-and-resume demo
 
