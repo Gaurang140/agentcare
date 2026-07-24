@@ -37,16 +37,13 @@ def _cardiology_slot(db_session) -> int:
     """A free Cardiology slot that has never had any Appointment (confirmed
     or cancelled) against it.
 
-    Appointment.slot_id is unique, but cancel_appointment/reschedule_
-    appointment only flip AppointmentSlot.status back to "free" - they
-    never remove the old Appointment row. So a slot this whole shared-db
-    test session has ever cancelled or rescheduled away from still shows up
-    as "free" via get_available_slots, yet a fresh book_appointment against
-    it raises a raw sqlite3.IntegrityError instead of the tool's own
-    ConflictError (a real, pre-existing gap in Task 3/7's model - see the
-    Task 12 report). Filtering those out here keeps this file's tests
-    independent of test_routes_patient.py's cancel/reschedule tests
-    (test order is otherwise incidental) without touching that model.
+    Rebooking a cancelled slot works now that Appointment.slot_id is no
+    longer unique (covered by test_booking.py's
+    test_cancelled_slot_can_be_rebooked), so this is no longer a workaround
+    for a model bug. It stays because these tests assert on the appointment
+    rows a workflow produces: picking a slot with no history keeps those
+    assertions independent of whatever test_routes_patient.py's
+    cancel/reschedule tests did to the shared session db first.
     """
     seed(db_session)
     dept = db_session.query(Department).filter_by(name="Cardiology").first()

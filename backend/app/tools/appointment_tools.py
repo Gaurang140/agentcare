@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.exceptions import ConflictError, NotFoundError
@@ -58,8 +59,19 @@ def get_available_slots(
     ]
 
 
-def book_appointment(db: Session, patient_id: int, slot_id: int, reason: str) -> dict:
-    """Atomically claim a free slot and create the confirmed appointment against it."""
+def book_appointment(
+    db: Session,
+    patient_id: int,
+    slot_id: int,
+    reason: str,
+    workflow_run_id: int | None = None,
+) -> dict:
+    """Atomically claim a free slot and create the confirmed appointment against it.
+
+    Passing workflow_run_id ties the booking to the run that produced it.
+    A partial unique index lets a run hold only one confirmed appointment,
+    so a replayed or retried run cannot book the patient twice.
+    """
     claimed = db.execute(
         update(AppointmentSlot)
         .where(AppointmentSlot.id == slot_id, AppointmentSlot.status == "free")
@@ -75,9 +87,17 @@ def book_appointment(db: Session, patient_id: int, slot_id: int, reason: str) ->
         slot_id=slot_id,
         status="confirmed",
         reason=reason,
+        workflow_run_id=workflow_run_id,
     )
     db.add(appt)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # The one-confirmed-booking-per-run index fired. Roll back so the
+        # slot claim above is released rather than left held by a booking
+        # that never happened.
+        db.rollback()
+        raise ConflictError("This request already has a confirmed appointment") from exc
     write_audit(
         db,
         None,

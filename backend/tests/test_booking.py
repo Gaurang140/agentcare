@@ -115,6 +115,17 @@ def test_cancel_frees_slot(db, seeded):
     assert result == {"id": booking["id"], "status": "cancelled"}
 
 
+def test_cancelled_slot_can_be_rebooked(db, seeded):
+    slot = _free_slot(db)
+    first = book_appointment(db, patient_id=2, slot_id=slot.id, reason="checkup")
+    cancel_appointment(db, appointment_id=first["id"])
+
+    second = book_appointment(db, patient_id=2, slot_id=slot.id, reason="checkup again")
+
+    assert second["status"] == "confirmed"
+    assert second["id"] != first["id"]
+
+
 def test_get_available_slots_filters_by_department_and_date_range(db, seeded):
     cardiology_id = _cardiology_id(db)
     today = date.today()

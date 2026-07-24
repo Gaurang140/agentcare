@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -11,6 +11,11 @@ from app.db.base import Base
 if TYPE_CHECKING:
     from app.models.catalog import Doctor
     from app.models.user import User
+
+# Partial-index predicate: only live bookings that came from a workflow run
+# take part in the one-booking-per-run rule. Cancelled rows drop out of the
+# index, so the same run can rebook after a cancellation.
+_ONE_CONFIRMED_PER_RUN = "workflow_run_id IS NOT NULL AND status = 'confirmed'"
 
 
 class AppointmentSlot(Base):
@@ -27,18 +32,38 @@ class AppointmentSlot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     doctor: Mapped["Doctor"] = relationship(back_populates="slots")
-    appointment: Mapped["Appointment | None"] = relationship(back_populates="slot", uselist=False)
+    # One row per booking the slot has ever carried, cancellations included:
+    # freeing a slot leaves its old Appointment behind as history, so a slot
+    # that has been cancelled can be booked again.
+    appointments: Mapped[list["Appointment"]] = relationship(back_populates="slot")
 
 
 class Appointment(Base):
     """A patient's booking against one AppointmentSlot. status: pending|confirmed|cancelled|completed."""
 
     __tablename__ = "appointments"
+    __table_args__ = (
+        Index(
+            "uq_appointments_workflow_run",
+            "workflow_run_id",
+            unique=True,
+            sqlite_where=text(_ONE_CONFIRMED_PER_RUN),
+            postgresql_where=text(_ONE_CONFIRMED_PER_RUN),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     patient_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     doctor_id: Mapped[int] = mapped_column(ForeignKey("doctors.id"), nullable=False)
-    slot_id: Mapped[int] = mapped_column(ForeignKey("appointment_slots.id"), unique=True, nullable=False)
+    # Not unique: the live claim on a slot is AppointmentSlot.status, held by
+    # the conditional UPDATE in book_appointment. A unique slot_id would also
+    # bar rebooking a slot whose earlier appointment was cancelled.
+    slot_id: Mapped[int] = mapped_column(
+        ForeignKey("appointment_slots.id"), nullable=False, index=True
+    )
+    workflow_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("workflow_runs.id"), nullable=True
+    )
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -46,6 +71,6 @@ class Appointment(Base):
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
-    slot: Mapped["AppointmentSlot"] = relationship(back_populates="appointment")
+    slot: Mapped["AppointmentSlot"] = relationship(back_populates="appointments")
     doctor: Mapped["Doctor"] = relationship()
     patient: Mapped["User"] = relationship()
