@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.prompts import APPOINTMENT
 from app.agents.llm import chat_json
+from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.exceptions import ConflictError, NotFoundError
 from app.logging_setup import get_logger
@@ -51,13 +52,15 @@ def _slot_prompt(state: AgentState, slots: list[dict]) -> str:
     return f"Patient timing preference: {state.get('request_text', '')}\nAvailable slots:\n{listing}"
 
 
-def _pick_valid_slot(state: AgentState, slots: list[dict]) -> int | None:
+def _pick_valid_slot(system: str, state: AgentState, slots: list[dict]) -> int | None:
     """Ask the LLM for a slot id, validated against the real list. Retries
     once on an invented id, per the brief; never trusts an id it didn't hand
-    the LLM in the first place."""
+    the LLM in the first place. `system` is built once per run() call (see
+    _handle_book_or_reschedule) and reused across every retry so a rules
+    lookup doesn't repeat per attempt."""
     valid_ids = {s["slot_id"] for s in slots}
     for _ in range(_SLOT_PICK_ATTEMPTS):
-        picked = chat_json(APPOINTMENT, _slot_prompt(state, slots), AppointmentOutput)
+        picked = chat_json(system, _slot_prompt(state, slots), AppointmentOutput)
         if picked.slot_id in valid_ids:
             return picked.slot_id
     return None
@@ -121,9 +124,11 @@ def _handle_book_or_reschedule(
             raise NotFoundError("no active appointment to reschedule")
         existing_id = existing.id
 
+    system = build_system_prompt(db, "appointment", APPOINTMENT)
+
     today = date.today()
     slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
-    slot_id = _pick_valid_slot(state, slots)
+    slot_id = _pick_valid_slot(system, state, slots)
     if slot_id is None:
         return _escalate_agent_failure(
             db, workflow_id, "appointment agent could not select a valid slot from the list"
@@ -134,7 +139,7 @@ def _handle_book_or_reschedule(
         result = _book_or_reschedule(db, intent, patient_id, slot_id, request_text, existing_id)
     except ConflictError:
         slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
-        slot_id = _pick_valid_slot(state, slots)
+        slot_id = _pick_valid_slot(system, state, slots)
         if slot_id is None:
             return _escalate_agent_failure(
                 db, workflow_id, "no valid slot left after a booking conflict"

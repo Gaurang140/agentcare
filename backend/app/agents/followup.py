@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.prompts import FOLLOWUP
 from app.agents.llm import chat_json
+from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.tools.audit_tools import write_audit
@@ -62,7 +63,8 @@ def run(state: AgentState, db: Session) -> dict:
         appointment_id = appointment["id"]
         missing = (state.get("documents_result") or {}).get("missing", [])
 
-        plan = chat_json(FOLLOWUP, _plan_prompt(appointment, missing), FollowupOutput)
+        system = build_system_prompt(db, "followup", FOLLOWUP)
+        plan = chat_json(system, _plan_prompt(appointment, missing), FollowupOutput)
         start_time = datetime.fromisoformat(appointment["start_time"])
 
         created: list[dict] = []

@@ -1,8 +1,8 @@
-"""Staff-only routes: the request/escalation queues, the audit trail, and
-minimal catalog admin (departments/doctors/slots). Everything here requires
-require_role("staff") except the internal reminders trigger, which accepts
-either an internal token or a staff cookie (see
-`app.auth.dependencies.require_internal_or_staff`).
+"""Staff-only routes: the request/escalation queues, the audit trail,
+minimal catalog admin (departments/doctors/slots), and the procedural
+agent-rules CRUD. Everything here requires require_role("staff") except the
+internal reminders trigger, which accepts either an internal token or a
+staff cookie (see `app.auth.dependencies.require_internal_or_staff`).
 """
 
 from __future__ import annotations
@@ -18,6 +18,9 @@ from app.exceptions import NotFoundError
 from app.models import AuditEvent, Escalation, User, WorkflowRun
 from app.schemas.appointment import DepartmentOut, SlotOut
 from app.schemas.staff import (
+    AgentRuleCreate,
+    AgentRuleOut,
+    AgentRuleUpdate,
     AuditEventOut,
     DepartmentCreate,
     DoctorCreate,
@@ -29,6 +32,7 @@ from app.schemas.staff import (
     SlotGenerateRequest,
     WorkflowRunSummary,
 )
+from app.tools.agent_rule_tools import create_rule, list_rules, set_rule_active
 from app.tools.appointment_tools import generate_slots_for_doctor
 from app.tools.department_tools import (
     create_department,
@@ -188,6 +192,36 @@ def generate_slots_route(
 ) -> list[SlotOut]:
     rows = generate_slots_for_doctor(db, payload.doctor_id, payload.date_from, payload.date_to)
     return [SlotOut(**row) for row in rows]
+
+
+@router.get("/agent-rules", response_model=list[AgentRuleOut])
+def list_agent_rules_route(
+    _staff: Annotated[User, Depends(require_role("staff"))],
+    db: Annotated[Session, Depends(get_db)],
+    agent_name: str | None = None,
+) -> list[AgentRuleOut]:
+    return [AgentRuleOut(**row) for row in list_rules(db, agent_name)]
+
+
+@router.post("/agent-rules", response_model=AgentRuleOut, status_code=201)
+def create_agent_rule_route(
+    payload: AgentRuleCreate,
+    staff: Annotated[User, Depends(require_role("staff"))],
+    db: Annotated[Session, Depends(get_db)],
+) -> AgentRuleOut:
+    result = create_rule(db, staff.id, payload.agent_name, payload.rule_text)
+    return AgentRuleOut(**result)
+
+
+@router.patch("/agent-rules/{rule_id}", response_model=AgentRuleOut)
+def update_agent_rule_route(
+    rule_id: int,
+    payload: AgentRuleUpdate,
+    staff: Annotated[User, Depends(require_role("staff"))],
+    db: Annotated[Session, Depends(get_db)],
+) -> AgentRuleOut:
+    result = set_rule_active(db, staff.id, rule_id, payload.active)
+    return AgentRuleOut(**result)
 
 
 @internal_router.post("/reminders/run-due", response_model=ReminderRunResponse)

@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.prompts import DOCUMENT
 from app.agents.llm import chat_json
+from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import PatientDocument
@@ -84,6 +85,7 @@ def run(state: AgentState, db: Session) -> dict:
     try:
         patient_id = state["patient_id"]
         doc_ids = state.get("uploaded_document_ids") or []
+        system = build_system_prompt(db, "document", DOCUMENT)
 
         classified: list[dict] = []
         pii_counts: dict[str, int] = {}
@@ -109,7 +111,7 @@ def run(state: AgentState, db: Session) -> dict:
             redacted_text, counts = redact_for_llm(doc.extracted_text or "")
             _merge_counts(pii_counts, counts)
             result = chat_json(
-                DOCUMENT, _classification_prompt(doc.filename, redacted_text), DocumentOutput
+                system, _classification_prompt(doc.filename, redacted_text), DocumentOutput
             )
             doc.document_type = result.document_type
             db.flush()

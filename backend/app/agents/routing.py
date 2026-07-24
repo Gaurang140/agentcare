@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.prompts import ROUTING
 from app.agents.llm import chat_json
+from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.safety.pii import redact_for_llm
@@ -91,7 +92,8 @@ def run(state: AgentState, db: Session) -> dict:
     try:
         departments = list_departments(db)
         request_text = _redact_request_text(db, workflow_id, state.get("request_text", ""))
-        result = chat_json(ROUTING, _user_prompt(request_text, departments), RoutingOutput)
+        system = build_system_prompt(db, "routing", ROUTING)
+        result = chat_json(system, _user_prompt(request_text, departments), RoutingOutput)
 
         if result.confidence < _CONFIDENCE_THRESHOLD or not result.department:
             return _escalate_uncertain(

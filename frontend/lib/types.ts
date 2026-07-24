@@ -153,6 +153,24 @@ export interface ReminderRunResponse {
   reminder_ids: number[];
 }
 
+export interface AgentRuleOut {
+  id: number;
+  agent_name: string;
+  rule_text: string;
+  source: string; // "seed" | "staff"
+  active: boolean;
+  created_at: string;
+}
+
+export interface AgentRuleCreate {
+  agent_name: string;
+  rule_text: string;
+}
+
+export interface AgentRuleUpdate {
+  active: boolean;
+}
+
 // ---- schemas/workflow.py ----
 
 /** POST /requests replies immediately, before the graph has run. */

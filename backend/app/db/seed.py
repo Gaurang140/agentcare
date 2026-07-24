@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.security import hash_password
 from app.models import (
+    AgentRule,
     AppointmentSlot,
     Department,
     Doctor,
@@ -49,6 +50,36 @@ _SLOT_END_HOUR = 17
 _SLOT_MINUTES = 30
 _WEEKDAY_COUNT = 14
 
+# Default procedural memory (app/agents/memory.py): agent name -> its
+# starter operating rules. Purely administrative, matching the boundary the
+# base prompts in app/agents/prompts.py already hold to.
+_AGENT_RULES: dict[str, list[str]] = {
+    "routing": [
+        "When a request mentions an existing appointment, prefer reschedule intent over book.",
+        "Treat a request that only asks about status, with no new booking action, as intent status rather than book.",
+    ],
+    "appointment": [
+        "Prefer the earliest slot inside the patient's stated time window; never propose slots in the past.",
+        "If no slot fits the patient's stated window, pick the earliest slot overall rather than escalating immediately.",
+    ],
+    "document": [
+        "When document type is ambiguous, classify as other rather than guessing.",
+        "Never classify a document as insurance_card unless the extracted text or filename clearly indicates an insurance document.",
+    ],
+    "followup": [
+        "Never schedule a reminder after the appointment time.",
+        "Always include one reminder for each missing required document type.",
+    ],
+    "safety": [
+        "When unsure whether wording is medical advice, escalate instead of answering.",
+        "Never state a specific appointment time that was not confirmed by a real slot booking.",
+    ],
+    "coordinator": [
+        "Escalate rather than loop: if the same step has run twice without progress, choose escalate.",
+        "Run route_department before handle_appointment for every new booking request.",
+    ],
+}
+
 
 def _next_weekdays(start: date, count: int) -> list[date]:
     """The next `count` Mon-Fri dates starting from (and including) `start`."""
@@ -82,17 +113,34 @@ def _counts(db: Session) -> dict[str, int]:
         "slots": db.query(AppointmentSlot).count(),
         "required_documents": db.query(RequiredDocument).count(),
         "users": db.query(User).count(),
+        "agent_rules": db.query(AgentRule).count(),
     }
+
+
+def _seed_agent_rules(db: Session) -> None:
+    """Insert the default per-agent operating rules if none exist yet.
+
+    Idempotent independently of the department/doctor/slot check below, so
+    a db already seeded before this feature shipped still gets its default
+    rules the next time seed() runs.
+    """
+    if db.query(AgentRule).first() is not None:
+        return
+    for agent_name, rule_texts in _AGENT_RULES.items():
+        for rule_text in rule_texts:
+            db.add(AgentRule(agent_name=agent_name, rule_text=rule_text, source="seed"))
+    db.commit()
 
 
 def seed(db: Session) -> dict[str, int]:
     """Insert synthetic demo data if the db is empty, else no-op.
 
-    Returns row counts for departments, doctors, slots, required_documents
-    and users - either the counts just inserted, or (on a repeat call) the
-    counts already present.
+    Returns row counts for departments, doctors, slots, required_documents,
+    users and agent_rules - either the counts just inserted, or (on a
+    repeat call) the counts already present.
     """
     if db.query(Department).first() is not None:
+        _seed_agent_rules(db)
         return _counts(db)
 
     weekdays = _next_weekdays(date.today(), _WEEKDAY_COUNT)
@@ -156,4 +204,5 @@ def seed(db: Session) -> dict[str, int]:
     db.add(staff)
 
     db.commit()
+    _seed_agent_rules(db)
     return _counts(db)

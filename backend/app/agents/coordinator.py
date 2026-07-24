@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.agents.prompts import COORDINATOR
 from app.agents.llm import chat_json
+from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.safety.pii import redact_for_llm
@@ -73,7 +74,8 @@ def run(state: AgentState, db: Session) -> dict:
     workflow_id = state.get("workflow_id")
     try:
         request_text = _redact_request_text(db, workflow_id, state.get("request_text", ""))
-        result = chat_json(COORDINATOR, _user_prompt(state, request_text), CoordinatorOutput)
+        system = build_system_prompt(db, "coordinator", COORDINATOR)
+        result = chat_json(system, _user_prompt(state, request_text), CoordinatorOutput)
         plan = [*(state.get("plan") or []), result.next_step]
         update = {"plan": plan, "completed_steps": ["coordinator"]}
         _exit_audit(db, workflow_id, {"next_step": result.next_step})

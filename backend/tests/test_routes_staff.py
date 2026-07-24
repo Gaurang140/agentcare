@@ -8,7 +8,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from app.config import settings
-from app.models import AuditEvent, Escalation, User
+from app.db.seed import seed
+from app.models import AgentRule, AuditEvent, Escalation, User
 
 
 def test_staff_requests_denied_for_patient(patient_client):
@@ -184,6 +185,73 @@ def test_catalog_admin_routes_denied_for_patient(patient_client):
         ).status_code
         == 403
     )
+
+
+def test_create_list_and_toggle_agent_rule(staff_client, db_session):
+    create_resp = staff_client.post(
+        "/api/staff/agent-rules",
+        json={"agent_name": "routing", "rule_text": "Task F3 test rule for routing"},
+    )
+    assert create_resp.status_code == 201, create_resp.text
+    body = create_resp.json()
+    assert body["agent_name"] == "routing"
+    assert body["source"] == "staff"
+    assert body["active"] is True
+    rule_id = body["id"]
+
+    list_resp = staff_client.get("/api/staff/agent-rules?agent_name=routing")
+    assert list_resp.status_code == 200
+    ids = [row["id"] for row in list_resp.json()]
+    assert rule_id in ids
+    assert all(row["agent_name"] == "routing" for row in list_resp.json())
+
+    toggle_resp = staff_client.patch(f"/api/staff/agent-rules/{rule_id}", json={"active": False})
+    assert toggle_resp.status_code == 200
+    assert toggle_resp.json()["active"] is False
+
+    audit = (
+        db_session.query(AuditEvent)
+        .filter_by(action="agent_rule.updated", entity_type="agent_rule", entity_id=rule_id)
+        .first()
+    )
+    assert audit is not None
+
+    created_audit = (
+        db_session.query(AuditEvent)
+        .filter_by(action="agent_rule.created", entity_type="agent_rule", entity_id=rule_id)
+        .first()
+    )
+    assert created_audit is not None
+
+
+def test_create_agent_rule_rejects_unknown_agent_name(staff_client):
+    resp = staff_client.post(
+        "/api/staff/agent-rules",
+        json={"agent_name": "not-a-real-agent", "rule_text": "x"},
+    )
+    assert resp.status_code == 400
+
+
+def test_agent_rules_denied_for_patient(patient_client):
+    assert patient_client.get("/api/staff/agent-rules").status_code == 403
+    assert (
+        patient_client.post(
+            "/api/staff/agent-rules", json={"agent_name": "routing", "rule_text": "x"}
+        ).status_code
+        == 403
+    )
+    assert patient_client.patch("/api/staff/agent-rules/1", json={"active": True}).status_code == 403
+
+
+def test_list_agent_rules_includes_seed_rules(staff_client, db_session):
+    seed(db_session)  # idempotent - guarantees the default rules exist regardless of test order
+    seed_row = db_session.query(AgentRule).filter_by(source="seed").first()
+    assert seed_row is not None
+
+    resp = staff_client.get("/api/staff/agent-rules")
+    assert resp.status_code == 200
+    sources = {row["source"] for row in resp.json()}
+    assert "seed" in sources
 
 
 def test_internal_reminders_run_due_requires_staff_when_no_token(patient_client, monkeypatch):

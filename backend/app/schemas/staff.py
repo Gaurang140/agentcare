@@ -1,5 +1,6 @@
 """Request/response schemas for staff-only routes: requests, escalations,
-audit, and the minimal catalog admin (departments/doctors/slots) CRUD.
+audit, the minimal catalog admin (departments/doctors/slots) CRUD, and the
+procedural agent-rules CRUD.
 """
 
 from datetime import date, datetime
@@ -73,3 +74,21 @@ class SlotGenerateRequest(BaseModel):
 class ReminderRunResponse(BaseModel):
     sent_count: int
     reminder_ids: list[int]
+
+
+class AgentRuleOut(BaseModel):
+    id: int
+    agent_name: str
+    rule_text: str
+    source: str  # "seed" | "staff"
+    active: bool
+    created_at: datetime
+
+
+class AgentRuleCreate(BaseModel):
+    agent_name: str
+    rule_text: str
+
+
+class AgentRuleUpdate(BaseModel):
+    active: bool

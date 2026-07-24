@@ -389,3 +389,44 @@ service.
 **Revisit when.** The text volume or PII shapes going to the LLM grow past what a fixed regex list
 credibly covers (free-text patient narratives, non-German name/address formats), or the app
 deploys on GCP and wants a managed detector instead of maintaining its own pattern list.
+
+---
+
+## ADR-14: Procedural memory in SQL (LangMem evaluated and rejected)
+
+**Status:** Implemented now. `backend/app/models/agent_rule.py`, `backend/app/agents/memory.py`.
+
+**Context.** Staff want to tune an agent's behavior (routing preferences, an appointment-picking
+rule, a safety escalation threshold) without a code change or a redeploy. That is procedural
+memory: standing operating rules an agent reads on every call, distinct from the episodic
+preference memory ADR-08 already ruled on (`patient_profiles.preferred_language`, a low-cardinality
+column, not a rule an agent's reasoning has to incorporate).
+
+**Decision.** One table, `agent_rules(id, agent_name, rule_text, source, active, created_at)`.
+`app/agents/memory.py::get_rules` reads the active rows for one agent, ordered by id;
+`format_rules` renders them as a bulleted block; `build_system_prompt` appends that block to the
+agent's base prompt (`app/agents/prompts.py`) at call time, fresh on every request - no cache, no
+process restart needed for a staff edit to take effect. Staff manage rules through
+`POST/GET /api/staff/agent-rules` and `PATCH .../{id}` (toggle `active`, never delete, so history
+and any audit trail referencing a rule stay intact).
+
+**Why.** ADR-08 already rejected LangMem for preference storage: its last release is 0.0.30
+(2025-10-27), about 9 months stale with no feature work since, and it manages memory through
+nondeterministic LLM-judged consolidation rather than a plain read. Procedural rules are an even
+worse fit for that: a rule an agent must reliably follow needs a deterministic, auditable read, not
+an LLM's summary of what it remembers. The MOSAIC-style pattern already used in this codebase for
+safety (`agents/safety.py`: compose deterministically, let the LLM improve it, never depend on the
+LLM for the parts that must not silently fail) generalizes cleanly here: rules live as plain rows
+in the same Postgres/SQLite the rest of the app already uses, read with an indexed `WHERE
+agent_name = ? AND active` query, and appended to a prompt string - no new service, no embedding
+index, no vector store for what is fundamentally a short, staff-curated bullet list per agent.
+Making rules staff-editable through a normal CRUD route (RBAC-gated, audited, same shape as the
+existing department/doctor admin) turns this into human-in-the-loop behavior tuning: a staff member
+who notices the appointment agent proposing evening slots outside a patient's stated window adds a
+rule and the very next request picks it up, without an engineer touching prompts.py or shipping a
+new container image.
+
+**Revisit when.** Rules need to do more than a static bullet list can express (per-patient
+conditions, rule conflict resolution, versioned rollout to a subset of traffic) - at that point
+LangGraph's own `PostgresStore` or a rules engine is the right next step, evaluated on its current
+state at that time rather than assumed now.

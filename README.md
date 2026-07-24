@@ -232,6 +232,11 @@ escalation for a human and ends the run. All structured model output goes
 through one entry point, `app/agents/llm.py::chat_json`. Full detail is in
 [docs/architecture.md](docs/architecture.md).
 
+- **Staff-tunable agent rules and bilingual responses.** Each agent reads its own staff-editable
+  operating rules from the database on every call (`app/agents/memory.py`, managed at
+  `/api/staff/agent-rules`) and the safety agent replies in the patient's saved language
+  preference, English or German, even when the LLM is unreachable.
+
 ## Architecture
 
 ```mermaid
@@ -305,12 +310,12 @@ diagram is [docs/architecture.mmd](docs/architecture.mmd).
 cd backend && ../.venv/bin/python -m pytest -q
 ```
 
-182 tests pass. They cover the agents (each with an injected fake model, no
+198 tests pass. They cover the agents (each with an injected fake model, no
 network and no keys), the tools and deterministic safety guardrails (including
-the prompt-injection guard and the PII redaction boundary), the data model,
-RBAC on staff and patient-data routes, the SSE timeline, the scheduler jobs
-and a full fake-LLM end-to-end graph run in `test_graph_e2e.py`. Linting is
-`ruff check backend`.
+the prompt-injection guard and the PII redaction boundary), procedural agent
+rules and the bilingual safety response, the data model, RBAC on staff and
+patient-data routes, the SSE timeline, the scheduler jobs and a full fake-LLM
+end-to-end graph run in `test_graph_e2e.py`. Linting is `ruff check backend`.
 
 ## Project structure
 
@@ -319,7 +324,7 @@ agentcare/
   backend/            FastAPI + LangGraph service
     app/              config, models, auth, safety, tools, agents, services, api
     alembic/          migration environment and versions
-    tests/            182 pytest tests (unit, RBAC, fake-LLM end-to-end)
+    tests/            198 pytest tests (unit, RBAC, fake-LLM end-to-end)
     Dockerfile
   frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
     app/              login, register, patient portal, staff portal

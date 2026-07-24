@@ -19,13 +19,28 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import {
   ApiError,
   listDepartments,
+  staffCreateAgentRule,
   staffCreateDepartment,
   staffCreateDoctor,
   staffGenerateSlots,
+  staffListAgentRules,
   staffListDoctors,
+  staffSetAgentRuleActive,
   staffSetDoctorActive,
 } from "@/lib/api";
-import type { DepartmentOut, DoctorOut, SlotOut } from "@/lib/types";
+import type { AgentRuleOut, DepartmentOut, DoctorOut, SlotOut } from "@/lib/types";
+
+// Mirrors app/models/agent_rule.py::AGENT_NAMES - the six agents that read
+// procedural rules. Kept here rather than fetched, since it never changes
+// without a backend code change (and a migration) anyway.
+const AGENT_NAMES = [
+  "coordinator",
+  "routing",
+  "appointment",
+  "document",
+  "followup",
+  "safety",
+] as const;
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);
@@ -58,6 +73,14 @@ export default function StaffCatalogPage() {
   const [generating, setGenerating] = useState(false);
   const [generatedSlots, setGeneratedSlots] = useState<SlotOut[] | null>(null);
 
+  const [rules, setRules] = useState<AgentRuleOut[]>([]);
+  const [rulesLoading, setRulesLoading] = useState(true);
+  const [ruleAgentFilter, setRuleAgentFilter] = useState<string>("all");
+  const [newRuleAgent, setNewRuleAgent] = useState<string>("");
+  const [newRuleText, setNewRuleText] = useState("");
+  const [creatingRule, setCreatingRule] = useState(false);
+  const [togglingRuleId, setTogglingRuleId] = useState<number | null>(null);
+
   // Neither loader resets its *Loading flag back to true: both start true
   // via useState already (the first paint), and every later call - the
   // mount effect below, plus every create/toggle handler - is a silent
@@ -81,12 +104,24 @@ export default function StaffCatalogPage() {
       .finally(() => setDoctorsLoading(false));
   }
 
+  function loadRules() {
+    staffListAgentRules()
+      .then(setRules)
+      .catch((err: unknown) => {
+        toast.error(err instanceof ApiError ? err.message : "Could not load agent rules");
+      })
+      .finally(() => setRulesLoading(false));
+  }
+
   useEffect(() => {
     loadDepartments();
     loadDoctors();
+    loadRules();
   }, []);
 
   const departmentName = (id: number) => departments.find((d) => d.id === id)?.name ?? `#${id}`;
+  const visibleRules =
+    ruleAgentFilter === "all" ? rules : rules.filter((r) => r.agent_name === ruleAgentFilter);
 
   async function handleCreateDepartment(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -151,6 +186,35 @@ export default function StaffCatalogPage() {
       toast.error(err instanceof ApiError ? err.message : "Could not reach the server");
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function handleCreateRule(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!newRuleAgent || !newRuleText.trim()) return;
+    setCreatingRule(true);
+    try {
+      await staffCreateAgentRule({ agent_name: newRuleAgent, rule_text: newRuleText.trim() });
+      toast.success("Rule added");
+      setNewRuleText("");
+      loadRules();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not reach the server");
+    } finally {
+      setCreatingRule(false);
+    }
+  }
+
+  async function handleToggleRule(rule: AgentRuleOut) {
+    setTogglingRuleId(rule.id);
+    try {
+      await staffSetAgentRuleActive(rule.id, !rule.active);
+      toast.success(rule.active ? "Rule deactivated" : "Rule activated");
+      loadRules();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Could not reach the server");
+    } finally {
+      setTogglingRuleId(null);
     }
   }
 
@@ -383,6 +447,118 @@ export default function StaffCatalogPage() {
               </div>
             )
           ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Agent rules</CardTitle>
+          <CardDescription>
+            Procedural memory: extra operating rules injected into an agent&apos;s system prompt on
+            every call. Seed rules ship with the app; staff-added rules take effect on the very
+            next request, no redeploy.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5 sm:w-56">
+            <Label htmlFor="rule-filter">Filter by agent</Label>
+            <Select value={ruleAgentFilter} onValueChange={setRuleAgentFilter}>
+              <SelectTrigger id="rule-filter">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All agents</SelectItem>
+                {AGENT_NAMES.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {rulesLoading ? (
+            <p className="text-sm text-muted-foreground">Loading...</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Agent</TableHead>
+                  <TableHead>Rule</TableHead>
+                  <TableHead>Source</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {visibleRules.map((rule) => (
+                  <TableRow key={rule.id}>
+                    <TableCell className="font-mono text-xs">{rule.agent_name}</TableCell>
+                    <TableCell className="max-w-md">{rule.rule_text}</TableCell>
+                    <TableCell>
+                      <Badge variant="outline">{rule.source}</Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant="outline"
+                        className={
+                          rule.active
+                            ? "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                            : "border-transparent bg-muted text-muted-foreground"
+                        }
+                      >
+                        {rule.active ? "Active" : "Inactive"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={togglingRuleId === rule.id}
+                        onClick={() => handleToggleRule(rule)}
+                      >
+                        {togglingRuleId === rule.id
+                          ? "Saving..."
+                          : rule.active
+                            ? "Deactivate"
+                            : "Activate"}
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+
+          <form onSubmit={handleCreateRule} className="flex flex-wrap items-end gap-2 border-t pt-4">
+            <div className="flex flex-col gap-1.5">
+              <Label htmlFor="new-rule-agent">Agent</Label>
+              <Select value={newRuleAgent} onValueChange={setNewRuleAgent}>
+                <SelectTrigger id="new-rule-agent" className="w-48">
+                  <SelectValue placeholder="Choose agent" />
+                </SelectTrigger>
+                <SelectContent>
+                  {AGENT_NAMES.map((name) => (
+                    <SelectItem key={name} value={name}>
+                      {name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex flex-1 min-w-64 flex-col gap-1.5">
+              <Label htmlFor="new-rule-text">New rule</Label>
+              <Input
+                id="new-rule-text"
+                value={newRuleText}
+                onChange={(e) => setNewRuleText(e.target.value)}
+                placeholder="e.g. Always confirm the department name back to the patient."
+              />
+            </div>
+            <Button type="submit" disabled={creatingRule || !newRuleAgent || !newRuleText.trim()}>
+              {creatingRule ? "Adding..." : "Add rule"}
+            </Button>
+          </form>
         </CardContent>
       </Card>
     </div>

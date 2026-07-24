@@ -9,10 +9,19 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.agents import safety
-from app.models import AppointmentSlot
+from app.models import AppointmentSlot, PatientProfile
 from app.safety.guardrails import SANITIZED_SENTENCE
 from app.tools.appointment_tools import book_appointment, cancel_appointment
 from app.tools.followup_tools import create_reminder
+
+
+def _set_language(db, patient_id: int, language: str) -> None:
+    """Both seeded demo patients default to preferred_language="de"
+    (app/db/seed.py) - tests that want to pin the English deterministic
+    path set it explicitly instead of relying on that incidentally."""
+    profile = db.query(PatientProfile).filter_by(user_id=patient_id).first()
+    profile.preferred_language = language
+    db.flush()
 
 
 def _booked_state(db, **overrides) -> dict:
@@ -81,6 +90,7 @@ def test_deterministic_sanitizer_strips_poisoned_response_even_when_llm_says_saf
 
 def test_llm_failure_falls_back_to_deterministic_only_path(db, seeded, fake_llm):
     state = _booked_state(db)
+    _set_language(db, 1, "en")
     fake_llm([RuntimeError("llm endpoint down")])
 
     result = safety.run(state, db)
@@ -97,6 +107,7 @@ def test_draft_reflects_live_db_status_not_stale_state_dict(db, seeded, fake_llm
     the composed draft itself becomes final_response - proving the draft was
     built from the live row, not the cached dict still sitting in state."""
     state = _booked_state(db)
+    _set_language(db, 1, "en")
     cancel_appointment(db, state["appointment"]["id"])
     fake_llm([RuntimeError("llm down")])
 
@@ -104,3 +115,50 @@ def test_draft_reflects_live_db_status_not_stale_state_dict(db, seeded, fake_llm
 
     assert "cancelled" in result["final_response"].lower()
     assert "confirmed" not in result["final_response"].lower()
+
+
+# --- Language preference (PatientProfile.preferred_language) ----------------
+# Both seeded demo patients default to "de" (app/db/seed.py), so patient_id=1
+# already exercises the German path with no override needed.
+
+
+def test_safety_prompt_carries_german_language_instruction_for_llm_path(db, seeded, fake_llm):
+    state = _booked_state(db)
+    client = fake_llm(
+        [{"safe": True, "violations": [], "rewritten": "Ihr Termin ist bestätigt."}]
+    )
+
+    safety.run(state, db)
+
+    sent_user_content = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "Respond in German (de)." in sent_user_content
+
+
+def test_safety_prompt_carries_english_language_instruction_when_preferred(db, seeded, fake_llm):
+    state = _booked_state(db)
+    _set_language(db, 1, "en")
+    client = fake_llm(
+        [{"safe": True, "violations": [], "rewritten": "Your appointment is confirmed."}]
+    )
+
+    safety.run(state, db)
+
+    sent_user_content = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "Respond in English (en)." in sent_user_content
+
+
+def test_deterministic_fallback_uses_german_template_for_preferred_language_de(
+    db, seeded, fake_llm
+):
+    """The MOSAIC fallback path (LLM down) must not silently answer in
+    English for a German-preferring patient - patient_id=1 is "de" by
+    default in app/db/seed.py."""
+    state = _booked_state(db)
+    fake_llm([RuntimeError("llm down")])
+
+    result = safety.run(state, db)
+
+    final = result["final_response"]
+    assert "Ihr Termin bei" in final
+    assert "bestätigt" in final
+    assert "confirmed" not in final.lower()

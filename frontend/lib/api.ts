@@ -6,6 +6,8 @@
  */
 
 import type {
+  AgentRuleCreate,
+  AgentRuleOut,
   ApiErrorBody,
   AppointmentOut,
   AuditEventOut,
@@ -255,4 +257,21 @@ export function staffGenerateSlots(payload: SlotGenerateRequest): Promise<SlotOu
 
 export function staffRunDueReminders(): Promise<ReminderRunResponse> {
   return apiFetch("/api/internal/reminders/run-due", { method: "POST" });
+}
+
+// ---- agent rules (procedural memory, routes_staff.py) ----
+
+export function staffListAgentRules(agentName?: string): Promise<AgentRuleOut[]> {
+  return apiFetch(`/api/staff/agent-rules${query({ agent_name: agentName })}`);
+}
+
+export function staffCreateAgentRule(payload: AgentRuleCreate): Promise<AgentRuleOut> {
+  return apiFetch("/api/staff/agent-rules", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function staffSetAgentRuleActive(ruleId: number, active: boolean): Promise<AgentRuleOut> {
+  return apiFetch(`/api/staff/agent-rules/${ruleId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ active }),
+  });
 }

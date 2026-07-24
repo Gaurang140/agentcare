@@ -113,6 +113,14 @@ puts every property in `required` and a defaulted field would drop out and 400 t
 The single LLM entry point is `app/agents/llm.py::chat_json`. Nothing else calls
 `chat.completions` anywhere.
 
+Each node builds its system message with `app/agents/memory.py::build_system_prompt`: the base
+prompt above plus that agent's active procedural rules (`agent_rules`, staff-editable through
+`/api/staff/agent-rules`, see ADR-14), fetched fresh on every call so a staff edit applies on the
+very next request. The safety node also re-reads `PatientProfile.preferred_language` and
+threads a "Respond in German/English" instruction into its user content; the deterministic
+fallback draft it composes when the LLM call fails is rendered in that same language, so a
+German-preferring patient never silently gets an English reply.
+
 ## Workflow lifecycle
 
 1. Screen. `workflow_service.create_run` calls `screen_request` (deterministic, no LLM) first.
