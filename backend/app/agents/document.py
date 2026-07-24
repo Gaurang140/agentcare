@@ -6,6 +6,12 @@ text persisted on the row at upload time (document_tools.store_document
 already ran extract_text and truncated it to 1500 chars) - there is no raw
 file content to re-extract from at this point in the workflow, only the DB
 row, which is the real-DB-work the tool layer already did.
+
+Extracted text comes from a file a patient uploaded, so it is screened by
+the prompt-injection guard (Task F1) before it goes into the classification
+prompt. A poisoned document is left typed "other" and its own audit event is
+written, but it never kills the run - the rest of the uploaded documents
+still get classified and the workflow continues.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ from app.agents.llm import chat_json
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import PatientDocument
+from app.safety.injection_guard import screen_injection
 from app.tools.audit_tools import write_audit
 from app.tools.document_tools import check_required_documents
 
@@ -56,6 +63,21 @@ def run(state: AgentState, db: Session) -> dict:
             doc = db.get(PatientDocument, doc_id)
             if doc is None or doc.document_type != _UNKNOWN_TYPE:
                 continue
+
+            injection = screen_injection(doc.extracted_text or "")
+            if injection.action == "block":
+                doc.document_type = _UNKNOWN_TYPE
+                db.flush()
+                write_audit(
+                    db,
+                    None,
+                    "safety.injection_blocked_document",
+                    "patient_document",
+                    doc.id,
+                    {"matched": injection.matched, "via": injection.via},
+                )
+                continue
+
             result = chat_json(DOCUMENT, _classification_prompt(doc), DocumentOutput)
             doc.document_type = result.document_type
             db.flush()

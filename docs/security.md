@@ -33,6 +33,20 @@ their decision by a model.
    medically specific leaks around the edge of a regex match. A model that claims `safe: true` over a
    poisoned sentence does not get to publish it.
 
+## Prompt injection
+
+`backend/app/safety/injection_guard.py::screen_injection`, called on the patient's request
+text (`workflow_service.create_run`) and on a document's extracted text
+(`agents/document.py`), both before that text reaches a prompt. Layer 1, always on: EN/German
+regex for known injection phrasing ("ignore previous instructions", "vergiss alle
+Anweisungen"), a 120+ character base64-looking run, and role markers (`assistant:`,
+`<|im_start|>`, `[INST]`). Layer 2, optional: a classifier
+(`agents/llm.py::classify_injection`, default `meta-llama/llama-prompt-guard-2-86m` on Groq)
+used only when `LLM_API_KEY` and `INJECTION_GUARD_MODEL` are set; a classifier failure logs
+and falls back to layer 1, never blocks on its own. A blocked request escalates as `safety`;
+a blocked document is left typed `other` and the run continues. Model Armor is the
+GCP-native scale path for layer 2, documented but not built here.
+
 ## RBAC
 
 Access control is backend-only truth (`backend/app/auth/dependencies.py`).

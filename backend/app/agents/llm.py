@@ -1,8 +1,11 @@
-"""Single LLM entry point for the whole codebase.
+"""The two LLM entry points for the whole codebase.
 
-`chat_json` is the only place `client.chat.completions.create(...)` is
-called. Every agent node asks for a pydantic model back and gets one,
-validated; nothing else should import `openai` directly.
+`chat_json` is where every agent node gets its structured, pydantic-validated
+output. `classify_injection` is the one other place
+`client.chat.completions.create(...)` is called: a single plain (non-JSON)
+completion for the optional classifier layer of the prompt-injection guard
+(`safety/injection_guard.py`), since a prompt-guard model returns a bare
+label, not schema-shaped JSON. Nothing else should import `openai` directly.
 
 Call sequence for one `chat_json(...)`:
 
@@ -238,3 +241,24 @@ def chat_json(
             max_retries=1,
             force_json_object=True,
         )
+
+
+def classify_injection(text: str) -> str:
+    """Send `text` to the configured prompt-guard model and return its raw
+    completion content unparsed (a label, e.g. "benign" or "malicious" -
+    interpreting that label is `safety/injection_guard.py`'s job, not this
+    function's).
+
+    Uses the same primary client/credentials as `chat_json` (including the
+    test override) but a different model name
+    (`settings.injection_guard_model`) and a single plain-text user message,
+    no structured-output request and no retry loop. Raises on any transport
+    or API error; the caller is responsible for catching that and falling
+    back, since a classifier outage must never block a request on its own.
+    """
+    client = _resolve_primary()
+    response = client.chat.completions.create(
+        model=settings.injection_guard_model,
+        messages=[{"role": "user", "content": text}],
+    )
+    return _extract_content(response)

@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "openai/gpt-oss-120b"
 
+    # Prompt-injection guard's optional classifier layer
+    # (safety/injection_guard.py): a small preview model that reviews text
+    # the deterministic pattern list alone would miss. Only called when
+    # llm_api_key is also set; empty runs the deterministic layer alone.
+    injection_guard_model: str = "meta-llama/llama-prompt-guard-2-86m"
+
     # LLM fallback endpoint (optional; e.g. a local LM Studio server). Used
     # only when the primary client exhausts its retries.
     llm_fallback_base_url: str = ""

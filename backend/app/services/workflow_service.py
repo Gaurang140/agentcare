@@ -1,8 +1,9 @@
 """Runs one patient request through the LangGraph workflow: the deterministic
-safety screen first (Task 7), then - only if it allows the request through -
-the compiled graph (graph.py), with the outcome always landing on a
-WorkflowRun row. `resume_workflow` re-enters the same thread from its last
-checkpoint, for the crash-recovery demo.
+safety screen first (Task 7), then the prompt-injection guard (Task F1), then
+- only if both allow the request through - the compiled graph (graph.py),
+with the outcome always landing on a WorkflowRun row. `resume_workflow`
+re-enters the same thread from its last checkpoint, for the crash-recovery
+demo.
 
 The compiled graph is a module-level singleton (`get_graph`): it owns one
 checkpointer connection for the process's life, opened lazily on first use
@@ -28,10 +29,19 @@ from app.exceptions import NotFoundError
 from app.logging_setup import get_logger
 from app.models import User, WorkflowRun
 from app.safety.guardrails import ScreenResult, screen_request
+from app.safety.injection_guard import InjectionResult, screen_injection
 from app.tools.audit_tools import write_audit
 from app.tools.escalation_tools import create_escalation
 
 logger = get_logger(__name__)
+
+# Shown to the patient when the injection guard blocks a request. Deliberately
+# uninformative about why - explaining the block would hand an attacker a map
+# of what the guard catches.
+INJECTION_BLOCKED_RESPONSE = (
+    "Your request could not be processed automatically and has been sent to "
+    "staff for review."
+)
 
 _graph_stack: contextlib.ExitStack | None = None
 _graph: Any | None = None
@@ -149,6 +159,37 @@ def _screened_run(
     return workflow_run
 
 
+def _injection_blocked_run(
+    db: Session, user: User, request_text: str, injection: InjectionResult
+) -> WorkflowRun:
+    """Prompt-injection screening path (Task F1): runs after screen_request
+    has already allowed the request through, so - like `_screened_run` - no
+    graph and no coordinator LLM call either way."""
+    workflow_run = _new_workflow_run(db, user, request_text, status="escalated")
+    workflow_run.current_step = "injection_screen"
+    workflow_run.state = {
+        "final_response": INJECTION_BLOCKED_RESPONSE,
+        "safety_flags": injection.matched,
+    }
+
+    create_escalation(
+        db,
+        workflow_run.id,
+        reason=f"prompt injection detected ({injection.via}): {', '.join(injection.matched)}",
+        severity="safety",
+    )
+    write_audit(
+        db,
+        user.id,
+        "safety.injection_blocked",
+        "workflow_run",
+        workflow_run.id,
+        {"matched": injection.matched, "via": injection.via},
+    )
+    db.commit()
+    return workflow_run
+
+
 def _invoke_graph(db: Session, workflow_run: WorkflowRun, graph_input: dict | None) -> dict | None:
     """Shared invoke wrapper for both start and resume: never lets a graph
     exception become a 500. Any exception that escapes graph.invoke()
@@ -178,14 +219,15 @@ def create_run(
     db: Session, user: User, request_text: str, document_ids: list[int] | None = None
 ) -> WorkflowRun:
     """Screen the request and create its WorkflowRun row - synchronously,
-    with zero LLM calls or graph invocation either way. An emergency or
-    medical-refusal request is already terminal on return (its own
-    escalation, if any, already created via `_screened_run`); a request the
-    screen allows comes back with status "running" and nothing executed
-    yet. Callers that want the graph to actually run call `execute_workflow`
-    next (only when status is still "running") - split out so an HTTP route
-    can hand that part to a background task instead of blocking the
-    request on it, per the Task 12 brief."""
+    with zero LLM calls or graph invocation either way. An emergency,
+    medical-refusal or injection-blocked request is already terminal on
+    return (its own escalation, if any, already created via `_screened_run`
+    or `_injection_blocked_run`); a request both screens allow comes back
+    with status "running" and nothing executed yet. Callers that want the
+    graph to actually run call `execute_workflow` next (only when status is
+    still "running") - split out so an HTTP route can hand that part to a
+    background task instead of blocking the request on it, per the Task 12
+    brief."""
     screen = screen_request(request_text)
 
     if screen.action == "escalate_emergency":
@@ -196,6 +238,10 @@ def create_run(
         return _screened_run(
             db, user, request_text, screen, status="completed", action="refused_medical"
         )
+
+    injection = screen_injection(request_text)
+    if injection.action == "block":
+        return _injection_blocked_run(db, user, request_text, injection)
 
     workflow_run = _new_workflow_run(db, user, request_text, status="running")
     write_audit(
