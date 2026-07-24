@@ -9,12 +9,14 @@ import {
   ChevronRight,
   Circle,
   FileText,
+  Hourglass,
   PlayCircle,
   RotateCw,
   Route,
   ShieldAlert,
   ShieldCheck,
   Siren,
+  UserCheck,
   Workflow,
   type LucideIcon,
 } from "lucide-react";
@@ -29,10 +31,10 @@ interface ActionDisplay {
 /** action strings this app ever writes for entity_type "workflow_run" -
  * see backend/app/services/workflow_service.py, agents/graph.py and each
  * agents/<name>.py::run's own write_audit call. Agent names come out of
- * the `agent.<name>.completed` pattern; anything else is a workflow-level
- * lifecycle event, matched by exact string. Unrecognized strings still
- * render (the action text itself is always shown), just with a plain
- * fallback icon rather than a guess. */
+ * the `agent.<name>.completed` pattern; the rest are matched by exact
+ * string, which also wins over that pattern where the two overlap.
+ * Unrecognized strings still render (the action text itself is always
+ * shown), just with a plain fallback icon rather than a guess. */
 const AGENT_META: Record<string, ActionDisplay> = {
   coordinator: { label: "Coordinator", Icon: Workflow },
   routing: { label: "Routing", Icon: Route },
@@ -40,7 +42,8 @@ const AGENT_META: Record<string, ActionDisplay> = {
   document: { label: "Document", Icon: FileText },
   followup: { label: "Follow-up", Icon: Bell },
   safety: { label: "Safety", Icon: ShieldCheck },
-  escalate: { label: "Escalation", Icon: AlertTriangle },
+  // No "escalate" entry: that node's exit row is spelled out in
+  // WORKFLOW_META below, which is read first.
 };
 
 const WORKFLOW_META: Record<string, ActionDisplay> = {
@@ -48,15 +51,23 @@ const WORKFLOW_META: Record<string, ActionDisplay> = {
   "workflow.resumed": { label: "Workflow resumed", Icon: RotateCw },
   "workflow.escalated_emergency": { label: "Emergency escalation", Icon: Siren },
   "workflow.refused_medical": { label: "Refused (medical question)", Icon: ShieldAlert },
+  "workflow.waiting_approval": { label: "Waiting for staff approval", Icon: Hourglass },
+  "agent.escalate.resolved": { label: "Staff decision recorded", Icon: UserCheck },
+  // The escalate node's own exit row. It fits the agent pattern by name
+  // only: the node hands the case to a person, so "Escalation agent
+  // completed" would read as the opposite of what happened.
+  "agent.escalate.completed": { label: "Handed to staff", Icon: AlertTriangle },
 };
 
 function describeAction(action: string): ActionDisplay {
+  const exact = WORKFLOW_META[action];
+  if (exact) return exact;
   const agentMatch = /^agent\.([a-z_]+)\.completed$/.exec(action);
   if (agentMatch) {
     const meta = AGENT_META[agentMatch[1]];
     if (meta) return { label: `${meta.label} agent completed`, Icon: meta.Icon };
   }
-  return WORKFLOW_META[action] ?? { label: action, Icon: Circle };
+  return { label: action, Icon: Circle };
 }
 
 function formatTimestamp(value: string | null): string {

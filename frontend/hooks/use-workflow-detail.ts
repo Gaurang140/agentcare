@@ -9,6 +9,17 @@ import type { WorkflowEventPayload, WorkflowRunDetail } from "@/lib/types";
 const TERMINAL_STATUSES = new Set(["completed", "failed", "escalated"]);
 const POLL_MS = 3000;
 
+// Audit actions that change the run's status without ending it, so the
+// backend's own "done" event (terminal statuses only) never fires for them:
+// the escalate node parking the run at `waiting_approval`, and the staff
+// decision that picks it back up. Both arrive as ordinary timeline events,
+// and without a re-read here the page would keep showing the status it had
+// before the pause for as long as staff take to decide.
+const STATUS_CHANGING_ACTIONS = new Set([
+  "workflow.waiting_approval",
+  "agent.escalate.resolved",
+]);
+
 interface UseWorkflowDetailResult {
   detail: WorkflowRunDetail | null;
   events: WorkflowEventPayload[];
@@ -93,6 +104,9 @@ export function useWorkflowDetail(workflowId: number | null): UseWorkflowDetailR
       try {
         const payload = JSON.parse(evt.data) as WorkflowEventPayload;
         setEvents((prev) => [...prev, payload]);
+        if (STATUS_CHANGING_ACTIONS.has(payload.action)) {
+          refreshDetail();
+        }
       } catch {
         // malformed SSE payload - skip this one line, keep the stream open
       }
