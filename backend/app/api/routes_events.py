@@ -34,18 +34,29 @@ _HEARTBEAT_SECONDS = 15
 _TERMINAL_STATUSES = {"completed", "failed", "escalated"}
 
 
-def _serialize(event: AuditEvent) -> dict:
+def _patient_metadata(metadata: dict | None) -> dict | None:
+    """Drop the "error" key every specialist node's except branch writes into
+    its exit-audit metadata (`{"error": str(exc)}`): raw exception text is
+    staff-facing, and the portal timeline renders this metadata verbatim in
+    an expandable view. The AuditEvent row keeps the full detail - staff read
+    it from this same stream, ops from the log line the node wrote alongside."""
+    if not isinstance(metadata, dict) or "error" not in metadata:
+        return metadata
+    return {key: value for key, value in metadata.items() if key != "error"}
+
+
+def _serialize(event: AuditEvent, *, is_staff: bool) -> dict:
     return {
         "id": event.id,
         "action": event.action,
         "entity_type": event.entity_type,
         "entity_id": event.entity_id,
-        "metadata": event.metadata_json,
+        "metadata": event.metadata_json if is_staff else _patient_metadata(event.metadata_json),
         "created_at": event.created_at.isoformat() if isinstance(event.created_at, datetime) else None,
     }
 
 
-async def _event_stream(workflow_run_id: int):
+async def _event_stream(workflow_run_id: int, *, is_staff: bool):
     last_id = 0
     last_heartbeat = time.monotonic()
 
@@ -68,7 +79,7 @@ async def _event_stream(workflow_run_id: int):
             )
             for event in new_events:
                 last_id = event.id
-                yield f"data: {json.dumps(_serialize(event))}\n\n"
+                yield f"data: {json.dumps(_serialize(event, is_staff=is_staff))}\n\n"
 
             run = db.get(WorkflowRun, workflow_run_id)
             terminal = run is not None and run.status in _TERMINAL_STATUSES
@@ -98,8 +109,11 @@ def workflow_events(
         raise NotFoundError(f"WorkflowRun {workflow_id} not found")
     ensure_owner_or_staff(current_user, run.patient_id, db)
 
+    # Staff and the owning patient both read this stream, so the internal
+    # detail is gated on the role here rather than split across two
+    # endpoints - same shape as get_workflow in routes_workflows.py.
     return StreamingResponse(
-        _event_stream(workflow_id),
+        _event_stream(workflow_id, is_staff=current_user.role == "staff"),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
