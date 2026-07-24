@@ -1,11 +1,14 @@
 # Architecture decisions
 
 Each decision below is written as a short ADR: Context, Decision, Why (with verified versions,
-dates and costs) and Revisit-when. Every version and price was verified on 2026-07-23. Each ADR
-is tagged with an honest status: **Implemented now** means the code is in this repo and runs;
-**Designed for scale** means the decision is recorded for the GCP path that is not built yet
-(there is no `infra/` directory in the repo). The local Docker Compose stack, by contrast, is
-implemented now (`docker-compose.yml`, `backend/Dockerfile`, `frontend/Dockerfile`).
+dates and costs) and Revisit-when. Every version and price was verified on 2026-07-23 unless
+noted otherwise. Each ADR is tagged with an honest status: **Implemented now** means the code is
+in this repo and runs; **Implemented as committed IaC** means the Terraform (`infra/terraform/`)
+and/or Kubernetes (`infra/k8s/`) source is committed and validates (`tofu validate` /
+`terraform validate`, `kubectl kustomize`), but nothing has been applied against a real GCP
+project yet - no live cluster, database or bucket exists; **Designed for scale** means the
+decision is recorded for a path that is neither built nor applied. The local Docker Compose
+stack is implemented now (`docker-compose.yml`, `backend/Dockerfile`, `frontend/Dockerfile`).
 
 Free-tier-first is the governing rule. Anything with a real monthly floor goes in a documented
 scale path, not the hackathon build.
@@ -60,30 +63,41 @@ delegation matters more than a fixed auditable state machine.
 
 ---
 
-## ADR-03: Postgres and SQLite, with Neon for the demo
+## ADR-03: Postgres and SQLite, with Cloud SQL as the primary deployed database
 
-**Status:** Implemented now (SQLite default, Postgres switch in code). Deployment target designed.
+**Status:** Implemented now (SQLite default in local dev, Postgres switch in code). Cloud SQL is
+implemented as committed IaC (`infra/terraform/modules/cloud-sql`, `enable_cloud_sql` defaults
+`true`); not yet applied against a live GCP project.
 
 **Context.** The app needs a relational core for patients, appointments and the audit trail, and
-the LangGraph checkpointer needs a persistent store too. The demo has to cost about zero and stay
-alive between the build and later interviews.
+the LangGraph checkpointer needs a persistent store too. The deployment runs under the owner's
+one-time GCP trial credit (about €250, roughly 3 months from late July 2026) and needs an honest
+plan for what happens once that credit lapses.
 
-**Decision.** SQLAlchemy 2.0.51 over SQLite by default and Postgres (via `psycopg[binary]` 3.3.4)
-when `DATABASE_URL` points at one. **Neon** free-tier Postgres for the live demo. **Cloud SQL for
-PostgreSQL** as the enterprise path. AlloyDB, Spanner, Firestore and Memorystore are rejected.
+**Decision.** SQLAlchemy 2.0.51 over SQLite by default locally and Postgres (via
+`psycopg[binary]` 3.3.4) when `DATABASE_URL` points at one. **Cloud SQL for PostgreSQL 17** is the
+primary deployed database while the trial credit covers it. **Neon** free-tier Postgres is the
+documented post-credit swap path: one `DATABASE_URL` change, no code change. AlloyDB, Spanner,
+Firestore and Memorystore are rejected.
 
 **Why.**
 - SQLite needs no setup for local development, and a single `DATABASE_URL` change moves both the
   app and the checkpointer onto Postgres with no code change.
+- Cloud SQL PG17 (`infra/terraform/modules/cloud-sql`, `database_version = "POSTGRES_17"`) keeps
+  everything - the app, the runtime service accounts, the GCS bucket, the GKE cluster - inside the
+  one GCP project the trial credit applies to, with the same SQLAlchemy, Alembic and
+  `PostgresSaver` code path as every other environment and a real SLA. It has no always-free tier
+  on its own: `db-f1-micro`/`ENTERPRISE` edition is about $8/mo and dev-only with no SLA, and the
+  cheapest dedicated-core `db-standard-1` is about $49/mo plus roughly $0.17 to $0.22 per GB-month
+  of SSD. Under the trial credit, the `db-f1-micro` instance this Terraform module provisions
+  costs nothing out of pocket; the credit-expiry decision point is called out honestly in
+  `docs/deployment-gcp.md`.
 - Neon free tier: 0.5 GB storage per project, 100 compute-hours per month, auto scale-to-zero after
   5 minutes idle, no credit card, PostgreSQL 14 through 18. It survives dormancy and wakes fast, so
-  the portfolio piece keeps working with no attention. Supabase was the alternative but auto-pauses
-  after 7 days of inactivity and needs a manual unpause, which is the wrong failure mode here.
-- Cloud SQL is the boring correct managed Postgres for the enterprise story: same SQLAlchemy,
-  Alembic and `PostgresSaver`, real SLA. It has no always-free tier. `db-f1-micro` is about $8/mo
-  and dev-only with no SLA, and the cheapest dedicated-core `db-standard-1` is about $49/mo plus
-  roughly $0.17 to $0.22 per GB-month of SSD. The Cloud SQL 30-day free-trial instance (8 vCPU,
-  64 GB, 100 GB storage, $0) can prove the real managed service at $0 for a side demo.
+  once the trial credit runs out, setting `enable_cloud_sql=false` and pointing `DATABASE_URL` at
+  Neon keeps the portfolio piece running at genuine $0 with no code change. Supabase was the
+  alternative but auto-pauses after 7 days of inactivity and needs a manual unpause, the wrong
+  failure mode for a dormant portfolio piece.
 - Rejected, each with a real non-free floor and no capability this app needs: **AlloyDB** about
   $180 to $200/mo for a 2 vCPU / 8 GB shape, no free tier; **Spanner** about $40 to $50/mo for 100
   processing units, no free tier, solves a global-write-scale problem this app does not have;
@@ -91,60 +105,90 @@ PostgreSQL** as the enterprise path. AlloyDB, Spanner, Firestore and Memorystore
   the audit trail; **Memorystore for Redis** about $36/mo for the cheapest Basic instance, no free
   tier and nothing in the design needs sub-millisecond shared state.
 
-**Revisit when.** Real multi-tenant OLTP write load appears (then AlloyDB earns its floor), or a
-fast lane genuinely needs shared sub-millisecond state (then Memorystore).
+**Revisit when.** The trial credit lapses (flip `enable_cloud_sql=false`, point `DATABASE_URL` at
+Neon, no code change), real multi-tenant OLTP write load appears (then AlloyDB earns its floor),
+or a fast lane genuinely needs shared sub-millisecond state (then Memorystore).
 
 ---
 
-## ADR-04: Google Cloud Storage for uploaded documents
+## ADR-04: Google Cloud Storage for uploaded documents, in `europe-west3`
 
-**Status:** Implemented now as an adapter interface (local backend). GCS backend designed.
+**Status:** Implemented now as an adapter interface (`STORAGE_BACKEND` defaults to `local`). The
+GCS backend and bucket are implemented as committed IaC (`infra/terraform/modules/gcs`); not yet
+applied against a live GCP project.
 
-**Context.** Patient documents are binary blobs that do not belong in the relational database.
+**Context.** Patient documents are binary blobs that do not belong in the relational database, and
+the deployment needs to keep them in the EU while it runs under the owner's GCP trial credit.
 
 **Decision.** A storage adapter with one method, `save(patient_id, filename, content) -> ref`.
 `LocalStorage` is the default and is fully implemented. `GCSStorage` matches the same interface for
-`STORAGE_BACKEND=gcs`.
+`STORAGE_BACKEND=gcs`. The bucket location (`var.gcs_location`) defaults to `europe-west3`.
 
 **Why.** Keeping one narrow interface means the agent and route code never knows which backend is
 live. `google-cloud-storage` is intentionally not installed, so `GCSStorage` imports it lazily and
 raises a clear `AppError` (not an `ImportError`) if the backend is selected without the package.
-On GCP, Always-Free Cloud Storage is 5 GB-months of regional storage in US regions only
-(`us-east1`, `us-west1`, `us-central1`), which covers a demo's worth of PDFs for free. Uniform
-bucket-level access is Google's documented default and is the intended setting: it disables ACLs
-and keeps access IAM-only. A EU-resident bucket for a data-residency story gets none of the free
-tier, but the cost is a few cents either way.
+GCP's Always-Free Cloud Storage tier (5 GB-months) applies only to the US regions (`us-east1`,
+`us-west1`, `us-central1`), so a `europe-west3` bucket gets none of it; under the trial credit that
+cost is absorbed, and at hackathon-demo volume it is a few cents a month either way once the credit
+is gone. EU data residency is the deployment's actual requirement, so it is the default rather than
+a configuration a reviewer has to know to flip. Uniform bucket-level access is Google's documented
+default and is the intended setting: it disables ACLs and keeps access IAM-only.
 
-**Revisit when.** Documents need lifecycle rules, customer-managed encryption keys or EU residency,
-all of which are bucket configuration, not a code change.
+**Revisit when.** The trial credit lapses and the free-tier saving outweighs data residency (set
+`gcs_location` to `US` or `us-central1`), or documents need lifecycle rules beyond the
+`AbortIncompleteMultipartUpload` rule already set, or customer-managed encryption keys.
 
 ---
 
-## ADR-05: Terraform HCL, run with OpenTofu
+## ADR-05: GKE Autopilot over Cloud Run, provisioned as Terraform HCL run with OpenTofu
 
-**Status:** Designed for scale. No `infra/` directory exists yet.
+**Status:** Implemented as committed IaC. `infra/terraform/` (five modules: artifact-registry,
+gcs, iam, gke-autopilot, cloud-sql) and `infra/k8s/` (a kustomize base plus a `gcp` overlay) are
+committed and validate cleanly (`tofu validate`/`terraform validate`, `kubectl kustomize`), and
+`.github/workflows/deploy.yml` is wired for a manual `workflow_dispatch` deploy. Nothing has been
+applied against a real GCP project: there is no live cluster, and that first `tofu apply` is still
+gated on a project with billing enabled.
 
-**Context.** The GCP infrastructure (Artifact Registry, Cloud Run, the database, a GCS bucket, IAM)
-should be declarative and recognizable to any reviewer.
+**Context.** The GCP infrastructure (Artifact Registry, a compute target for the backend and
+frontend, Cloud SQL, a GCS bucket, IAM) should be declarative and recognizable to any reviewer. The
+compute target also has to hold open a long-lived Server-Sent-Events connection (the workflow
+timeline, `GET /api/workflows/{id}/events`) without a platform default cutting it early and to run
+a background scheduler (APScheduler) alongside the request-serving process.
 
-**Decision.** Write standard Terraform HCL and run it with **OpenTofu** 1.12.x and the
-`hashicorp/google` provider pinned `~> 7.41`. The `terraform` CLI works on the same files
+**Decision.** Compute: **GKE Autopilot**, not Cloud Run. Cloud Run stays a documented, lighter
+alternative. Infrastructure as code: standard Terraform HCL, run with **OpenTofu** 1.12.x and the
+`hashicorp/google` provider pinned `~> 7.41`; the `terraform` CLI works on the same files
 identically.
 
-**Why.** OpenTofu 1.12.5 (released 2026-07-21) is MPL 2.0, Linux Foundation governed and a drop-in
-fork: identical `.tf` syntax, identical state format, identical provider protocol. Terraform 1.15.8
-is under BUSL 1.1 (each release converts to MPL 2.0 four years later), and while its Additional Use
-Grant does not restrict a portfolio project, "why not Terraform" is a fair interview question and
-OpenTofu is a clean, no-downside answer after the IBM acquisition of HashiCorp in 2025. HCL is still
-the most recognized IaC syntax, so a reviewer sees standard `.tf` files and switching back to the
-Terraform CLI later is a one-word change, not a rewrite. The `hashicorp/google` provider ships every
-one to two weeks and works against OpenTofu unmodified; pinning `~> 7.41` from a 2026 start avoids
-the v6 to v7 breaking changes entirely. Pulumi, GCP Infrastructure Manager (Terraform-only, no
-OpenTofu) and Crossplane were considered and add a language runtime, a managed control plane or a
-Kubernetes dependency that six static modules do not need.
+**Why.**
+- GKE Autopilot over Cloud Run: this build already needed a real Kubernetes footprint to
+  demonstrate autoscaling, migrations-as-a-Job and CI-to-cluster deploys, not just a single
+  container - a `HorizontalPodAutoscaler` on the backend (1-4 replicas, 70% CPU), a `Job` that
+  reuses the backend image's own entrypoint for migrate-then-seed and a GCE Ingress whose
+  `BackendConfig` sets an explicit 3600-second timeout so the load balancer's 30-second default does
+  not cut the SSE stream (`infra/k8s/overlays/gcp/backendconfig.yaml`). None of that has a
+  first-class equivalent on Cloud Run. Autopilot specifically, not GKE Standard, because it removes
+  node-pool sizing and patching entirely: Google manages the nodes and bills per pod resource
+  request instead of per VM. The honest trade-off against Cloud Run is cost at idle: Cloud Run can
+  scale to zero, while the two GKE Autopilot Deployments run continuously and cost roughly
+  $15-30/month in pod billing regardless of traffic (`docs/deployment-gcp.md`'s cost table) - a real
+  floor Cloud Run would not have, absorbed here by the trial credit and accepted for the fuller
+  platform story this challenge rewards.
+- OpenTofu 1.12.5 (released 2026-07-21) is MPL 2.0, Linux Foundation governed and a drop-in fork:
+  identical `.tf` syntax, identical state format, identical provider protocol. Terraform 1.15.8 is
+  under BUSL 1.1 (each release converts to MPL 2.0 four years later), and while its Additional Use
+  Grant does not restrict a portfolio project, "why not Terraform" is a fair interview question and
+  OpenTofu is a clean, no-downside answer after the IBM acquisition of HashiCorp in 2025. HCL is
+  still the most recognized IaC syntax, so a reviewer sees standard `.tf` files and switching back
+  to the Terraform CLI later is a one-word change, not a rewrite. The `hashicorp/google` provider
+  ships every one to two weeks and works against OpenTofu unmodified; pinning `~> 7.41` from a 2026
+  start avoids the v6 to v7 breaking changes entirely. Pulumi, GCP Infrastructure Manager
+  (Terraform-only, no OpenTofu) and Crossplane were considered and add a language runtime, a managed
+  control plane or a Kubernetes dependency that six static modules do not need.
 
-**Revisit when.** A client mandates the Terraform CLI (swap the binary) or the project grows into a
-self-service infra platform (then reconsider Pulumi or Crossplane).
+**Revisit when.** Traffic is genuinely low and idle-cost matters more than the platform story (then
+Cloud Run is the honest cheaper answer), a client mandates the Terraform CLI (swap the binary), or
+the project grows into a self-service infra platform (then reconsider Pulumi or Crossplane).
 
 ---
 
@@ -310,8 +354,10 @@ timer double-fires, and Cloud Scheduler or Cloud Tasks becomes the right home fo
 
 ## ADR-12: GCP security lineup
 
-**Status:** Application-layer security implemented now (see `docs/security.md`). The GCP-native
-lineup below is designed for the deployment, which is not built yet.
+**Status:** Application-layer security implemented now (see `docs/security.md`). Workload Identity
+Federation is implemented as committed IaC (`infra/terraform/modules/iam`) and validates. Secret
+Manager access, Artifact Analysis and Identity-Aware Proxy are designed, not yet turned on, since
+nothing has been applied against a real GCP project.
 
 **Context.** A hospital-administration app on GCP needs a credible, mostly-free security posture,
 split into what a first deploy turns on and what waits for real scale.
@@ -331,17 +377,21 @@ and **Security Command Center**.
   be skipped.
 - Artifact Analysis scans images for CVEs at $0.26 per image on first push of a digest (roughly
   $3 to $8 for a whole build) and produces a real vulnerability report to show.
-- IAP puts Google-identity access in front of the staff or admin surface with one flag, now that
-  direct IAP-on-Cloud-Run reached GA around March 2026 (no load balancer needed), at $0. It gates on
-  Google identities, so it fits the staff surface only, never the public patient endpoint.
-- Baseline that is not optional: one dedicated service account per Cloud Run service with
+- IAP puts Google-identity access in front of the staff or admin surface with one flag: GCP's
+  Identity-Aware Proxy for GKE attaches to the same `BackendConfig` pattern this repo already uses
+  for the SSE timeout (`infra/k8s/overlays/gcp/backendconfig.yaml`), gated behind the GCE Ingress
+  the Terraform and kustomize layers provision, at $0 for IAP itself. It gates on Google identities,
+  so it fits the staff surface only, never the public patient endpoint.
+- Baseline that is not optional: one dedicated runtime service account per workload
+  (`infra/terraform/modules/iam`: `agentcare-backend`, `agentcare-frontend`), bound to its
+  Kubernetes service account through GKE Workload Identity rather than a downloaded key, with
   resource-scoped IAM bindings (never the default Compute Engine SA with project Editor), plus the
   `disableServiceAccountKeyCreation` and `automaticIamGrantsForDefaultServiceAccounts` org policy
   constraints, all $0.
 
 **Why (scale path, real cost or org-level).**
-- Binary Authorization is free on Cloud Run but its attestor, KMS key and CI signing wiring is real
-  engineering for later.
+- Binary Authorization's GKE enforcement is free but its attestor, KMS key and CI signing wiring is
+  real engineering for later.
 - Cloud Armor needs a global external load balancer plus about $5/mo per policy, $1/mo per rule and
   $0.75 per million requests, so it is not justified for synthetic demo traffic.
 - VPC Service Controls is $0 but operates at the organization level and needs Access Context Manager,

@@ -173,8 +173,11 @@ transaction as the change it records.
 
 Honest status: the application code and the local container stack are real and run today. The repo
 has a `backend/Dockerfile`, a `frontend/Dockerfile` and a `docker-compose.yml` at its root. The GCP
-path below is the decided design, not built: there is no `infra/` directory yet, and the GCS SDK is
-not installed (`GCSStorage` imports it lazily and raises a clear `AppError` if selected without it).
+path below is committed as Infrastructure as Code and validates cleanly (`tofu validate` /
+`terraform validate`, `kubectl kustomize`), but nothing has been applied against a real GCP
+project: there is no live cluster, database or bucket yet, and the GCS SDK is still not installed
+in the app image (`GCSStorage` imports it lazily and raises a clear `AppError` if selected without
+it, since `STORAGE_BACKEND` defaults to `local`).
 
 - Local (implemented now). SQLite at `agentcare.db`, a separate LangGraph checkpoint file at
   `checkpoints.db`, uploads under `./uploads`, `uvicorn app.main:app` and `next dev`. No keys
@@ -188,11 +191,30 @@ not installed (`GCSStorage` imports it lazily and raises a clear `AppError` if s
   The frontend builds with `output: "standalone"`. Prometheus scrapes the backend `/metrics`
   endpoint every 15 seconds, and Grafana loads a provisioned AgentCare dashboard. Ports: frontend
   3000, backend 8000, Prometheus 9090, Grafana 3001 (`admin` / `admin`).
-- GCP (designed). FastAPI and the standalone Next.js build on Cloud Run, Postgres on Neon free
-  tier for the live demo (Cloud SQL on the enterprise path), documents in a GCS bucket with
-  uniform bucket-level access, secrets in Secret Manager, keyless CI through Workload Identity
-  Federation and the staff surface behind Identity-Aware Proxy. See `docs/decisions.md` for the
-  reasoning and verified costs.
+- GCP (manifests and modules committed and validated, cluster not yet provisioned). Backend and
+  frontend each run as a `Deployment` behind a `ClusterIP` `Service` on a GKE Autopilot cluster
+  (`infra/k8s/base/backend.yaml`, `frontend.yaml`; `infra/terraform/modules/gke-autopilot`). A
+  `HorizontalPodAutoscaler` scales the backend Deployment 1-4 replicas on 70% CPU utilization,
+  since the backend is the piece whose load actually varies with LLM-bound work; the frontend
+  stays a single stateless replica (`infra/k8s/overlays/gcp/hpa.yaml`). A `backend-migrate` `Job`
+  runs the backend image's own entrypoint (`alembic upgrade head` then the idempotent seed) ahead
+  of rollout, reusing the container instead of duplicating migration logic
+  (`infra/k8s/base/migration-job.yaml`). A GCE Ingress routes `/api` to the backend Service and `/`
+  to the frontend Service, and the backend Service carries a `BackendConfig` with a 3600-second
+  timeout so the load balancer's 30-second default does not cut the SSE workflow-events stream
+  (`infra/k8s/overlays/gcp/ingress.yaml`, `backendconfig.yaml`). Postgres runs on Cloud SQL for
+  PostgreSQL 17, the primary path under the deployment's GCP trial credit
+  (`infra/terraform/modules/cloud-sql`, `enable_cloud_sql` defaults `true`); Neon free-tier
+  Postgres is the documented post-credit swap, one `DATABASE_URL` change and no code change.
+  Documents live in a GCS bucket in `europe-west3` for EU data residency, with uniform
+  bucket-level access (`infra/terraform/modules/gcs`). Secret values (the LLM key, `JWT_SECRET`, `DATABASE_URL`) live in Secret Manager, created and
+  rotated out-of-band; the backend runtime service account can read them
+  (`roles/secretmanager.secretAccessor`), and each value is copied by hand into a plain Kubernetes
+  `Secret` the backend Deployment reads through `envFrom` (`infra/k8s/base/secret.example.yaml` is
+  the template, deliberately excluded from kustomize's resource list). CI deploys through `.github/workflows/deploy.yml` on a manual
+  `workflow_dispatch`, authenticating with Workload Identity Federation
+  (`infra/terraform/modules/iam`) so no service-account JSON key ever exists. See
+  `docs/decisions.md` and `docs/deployment-gcp.md` for the reasoning and verified costs.
 
 ## Observability
 

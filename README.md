@@ -317,6 +317,26 @@ rules and the bilingual safety response, the data model, RBAC on staff and
 patient-data routes, the SSE timeline, the scheduler jobs and a full fake-LLM
 end-to-end graph run in `test_graph_e2e.py`. Linting is `ruff check backend`.
 
+## Stack at a glance
+
+| Choice | Instead of | Why |
+|---|---|---|
+| FastAPI | Flask / Django | Async-native for SSE streaming and the LangGraph invocation; shares Pydantic v2 with the agent schemas and the settings layer. |
+| LangGraph | CrewAI / AutoGen | An explicit `StateGraph` plus checkpointer gives real crash-resume (`graph.invoke(None, config)`); CrewAI and AutoGen lean toward role-play and hide the state machine. |
+| Postgres / Cloud SQL | NoSQL (Firestore) | A relational core for patients, appointments and the append-only audit trail; a document store would fragment that for no benefit this app needs. |
+| Next.js 16 | Streamlit | A multi-role portal with httpOnly cookie auth and backend-enforced RBAC needs real routing and session handling, not a single reactive Python script. |
+| Groq `gpt-oss-120b` | paid APIs | Free developer tier, no card and one of only two Groq models with strict `json_schema` structured output; $0.15 / $0.60 per million tokens if it were paid. |
+| Custom `chat_json` wrapper | LiteLLM | Groq and LM Studio already speak the same OpenAI schema, so there is no translation problem to solve; a `try/except` fallback stays fully legible mid-demo, a `Router` exception is not. |
+| pwdlib (Argon2id) | passlib | passlib is unmaintained; pwdlib is the current, actively developed Argon2id implementation. |
+| Terraform HCL via OpenTofu | console clicking | OpenTofu is a drop-in MPL 2.0 fork of Terraform, same HCL, state format and provider protocol; infrastructure becomes reviewable and diffable instead of a click history nobody can audit. |
+| GKE Autopilot + HPA | self-managed Kubernetes | No node pools to size or patch; Google manages the nodes and bills per pod resource request, and the HPA autoscales the one workload whose load actually varies. |
+| Workload Identity Federation | service-account JSON keys | GitHub Actions mints short-lived tokens instead of storing a long-lived key, the top GCP credential-leak vector, pinned to this exact repository. |
+| Prometheus + Grafana (local) | a SaaS APM | Scraping `/metrics` in a compose stack costs nothing and gives a clickable dashboard today; Google Managed Service for Prometheus is the near-free path once a cluster exists. |
+| APScheduler + BackgroundTasks | Celery + Redis | A single-process app has no need for a broker or worker fleet; Memorystore for Redis carries a real monthly floor with no free tier for state this design does not keep. |
+| SQL `agent_rules` memory | LangMem | LangMem's last release is about 9 months stale with no feature work since and manages memory through nondeterministic LLM judgment; a plain indexed table read is deterministic and auditable. |
+
+Full reasoning, verified versions and costs for every row: [docs/decisions.md](docs/decisions.md).
+
 ## Project structure
 
 ```
@@ -374,13 +394,16 @@ account.
   Postgres, so checkpoints live in the same database.
 - **GKE Autopilot, Terraform and kustomize (committed, not yet deployed).**
   `infra/terraform/` provisions Artifact Registry, IAM and Workload Identity
-  Federation, a GKE Autopilot cluster and an optional Cloud SQL instance;
+  Federation, a GKE Autopilot cluster and Cloud SQL for PostgreSQL 17 (on by
+  default, the primary database path under the deployment's GCP trial
+  credit; Neon free-tier Postgres is the documented post-credit swap);
   `infra/k8s/` is the kustomize base plus a `gcp` overlay (autoscaling,
-  GCE ingress, the SSE timeout BackendConfig); `.github/workflows/deploy.yml`
+  GCE ingress, the SSE timeout BackendConfig). `.github/workflows/deploy.yml`
   builds, pushes and applies both on a manual `workflow_dispatch`. Every piece
   validates on its own (`tofu validate`, `kubectl kustomize`, `actionlint`),
   but none of it has run against a real GCP project - that first `tofu apply`
-  is still gated on a project with billing enabled. Full walkthrough,
+  is still gated on a project with billing enabled. The whole path is scoped
+  to run inside a one-time ~€250, 3-month GCP trial credit. Full walkthrough,
   reasoning and verified costs: [docs/deployment-gcp.md](docs/deployment-gcp.md)
   and [docs/decisions.md](docs/decisions.md).
 

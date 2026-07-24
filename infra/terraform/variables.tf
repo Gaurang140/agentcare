@@ -11,15 +11,17 @@ variable "region" {
 
 variable "gcs_location" {
   description = <<-EOT
-    Location for the documents bucket. Defaults to the multi-region "US"
-    because GCP's Always-Free Cloud Storage tier (5 GB-months) applies only
-    to the US regions (us-east1, us-west1, us-central1) - see
-    docs/decisions.md ADR-04. Set this to "EU" or a specific europe-west
-    region when data residency outweighs the free-tier saving; at
-    hackathon-demo volume the difference is a few cents a month either way.
+    Location for the documents bucket. Defaults to "europe-west3" for EU
+    data residency, the deployment's actual requirement while it runs under
+    the owner's GCP trial credit - see docs/decisions.md ADR-04. GCP's
+    Always-Free Cloud Storage tier (5 GB-months) applies only to the US
+    regions (us-east1, us-west1, us-central1); set this to "US" or
+    "us-central1" to ride that permanent free tier once the trial credit is
+    gone. At hackathon-demo volume the difference is a few cents a month
+    either way.
   EOT
   type        = string
-  default     = "US"
+  default     = "europe-west3"
 }
 
 variable "github_repository" {
@@ -28,9 +30,9 @@ variable "github_repository" {
 }
 
 variable "enable_cloud_sql" {
-  description = "Provision a Cloud SQL for PostgreSQL instance. Off by default: the demo path runs on Neon free-tier Postgres (ADR-03); enable only for the enterprise-path demo."
+  description = "Provision a Cloud SQL for PostgreSQL instance. On by default: Cloud SQL is the primary database path while the GCP trial credit covers it (ADR-03). Set to false and point DATABASE_URL at Neon free-tier Postgres for the post-credit swap - one connection string, no code change."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "domain" {

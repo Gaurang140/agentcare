@@ -2,10 +2,12 @@
 
 This is the honest step-by-step for the designed GCP path: Artifact Registry, a GCS
 documents bucket, IAM (including Workload Identity Federation for GitHub Actions), a GKE
-Autopilot cluster, and an optional Cloud SQL instance. The Terraform (OpenTofu-compatible)
-source is `infra/terraform/`; see `docs/decisions.md` ADR-03 through ADR-05 and ADR-12 for
-why each piece was chosen. Nothing in this repo has applied any of it: there are no GCP
-credentials in this environment and none were created to write it.
+Autopilot cluster and a Cloud SQL for PostgreSQL 17 instance (on by default, the primary
+database path while the owner's GCP trial credit covers it; Neon free-tier Postgres is the
+documented post-credit swap). The Terraform (OpenTofu-compatible) source is
+`infra/terraform/`; see `docs/decisions.md` ADR-03 through ADR-05 and ADR-12 for why each
+piece was chosen. Nothing in this repo has applied any of it: there are no GCP credentials
+in this environment and none were created to write it.
 
 The Kubernetes manifests this section hands off to (Deployments, Services, Ingress) are a
 kustomize base plus a `gcp` overlay under `infra/k8s/` (see `infra/k8s/README.md`), and the
@@ -73,10 +75,12 @@ tofu apply \
   -var="github_repository=Gaurang140/agentcare"
 ```
 
-Add `-var="enable_cloud_sql=true"` only for the enterprise-path demo; the default path
-below runs on Neon. `tofu output` after apply prints the Artifact Registry URL, the bucket
-name, the three service account emails, and the `workload_identity_provider` string GitHub
-Actions needs.
+Cloud SQL for PostgreSQL 17 provisions by default (`enable_cloud_sql` defaults `true`), the
+primary database path while the GCP trial credit covers it. Pass
+`-var="enable_cloud_sql=false"` and set an external Neon `DATABASE_URL` in the Kubernetes
+Secret instead once the credit lapses (`docs/decisions.md` ADR-03). `tofu output` after
+apply prints the Artifact Registry URL, the bucket name, the three service account emails,
+and the `workload_identity_provider` string GitHub Actions needs.
 
 ## Build and push images
 
@@ -125,18 +129,21 @@ the demo. Empty it on purpose first if you actually want it gone:
 
 ## Costs
 
-| Item | Free tier | What it costs beyond free |
-|---|---|---|
-| Artifact Registry | 0.5 GB storage free | ~$0.10/GB-month after; the keep-last-10 cleanup policy bounds growth |
-| GCS documents bucket | 5 GB-months, US regions only | ~$0.02/GB-month (Standard, `US`); a few cents/month at demo volume even outside the free tier |
-| GKE Autopilot control plane | One cluster/billing account covered by the Autopilot free-tier credit | $0.10/hour if a second cluster exists or the credit lapses |
-| GKE Autopilot pods | None | Billed per vCPU/memory/storage request per pod, roughly $15-30/month for this app's two small Deployments run continuously |
-| Cloud SQL (`enable_cloud_sql=true`) | None | `db-f1-micro` ~$8/month plus ~$0.17-0.22/GB-month SSD; off by default (see below) |
-| Secret Manager | 6 active versions, 10k accesses/month | $0.06/version/month beyond that |
-| Workload Identity Federation | Free, no limit | $0 |
+| Item | Free tier | Covered by the trial credit | What it costs beyond both |
+|---|---|---|---|
+| Artifact Registry | 0.5 GB storage free | yes | ~$0.10/GB-month after; the keep-last-10 cleanup policy bounds growth |
+| GCS documents bucket (`europe-west3`, default) | none - Always Free 5 GB-months applies to US regions only | yes | ~$0.02-0.03/GB-month (Standard, EU); a few cents/month at demo volume |
+| GKE Autopilot control plane | One cluster/billing account covered by the Autopilot free-tier credit | yes | $0.10/hour if a second cluster exists or the credit lapses |
+| GKE Autopilot pods | None | yes | Billed per vCPU/memory/storage request per pod, roughly $15-30/month for this app's two small Deployments run continuously |
+| Cloud SQL (`enable_cloud_sql=true`, default) | None | yes | `db-f1-micro` ~$8/month plus ~$0.17-0.22/GB-month SSD once the credit lapses |
+| Secret Manager | 6 active versions, 10k accesses/month | yes | $0.06/version/month beyond that |
+| Workload Identity Federation | Free, no limit | n/a ($0 regardless) | $0 |
 
-**Default demo path uses Neon, not Cloud SQL.** `enable_cloud_sql` defaults to `false`
-because Neon's free-tier Postgres (0.5 GB storage, 100 compute-hours/month, scale-to-zero)
-covers a portfolio demo at $0 with no idle-cost risk, while Cloud SQL has no always-free
-tier at all (docs/decisions.md ADR-03). Flip the flag only to demonstrate the enterprise
-path once, then `tofu destroy` that piece rather than leaving it running.
+**Default deployment path uses Cloud SQL, not Neon.** `enable_cloud_sql` now defaults to
+`true`: the whole GCP path (GKE Autopilot, Cloud SQL, the `europe-west3` GCS bucket) is
+scoped to run inside the owner's one-time ~€250, 3-month GCP trial credit (roughly through
+late October 2026), which comfortably covers a `db-f1-micro` instance plus the rest of the
+table above. Before the credit lapses, either set `enable_cloud_sql=false` and point
+`DATABASE_URL` at Neon's free-tier Postgres (0.5 GB storage, 100 compute-hours/month,
+scale-to-zero, one connection-string change and no code change, see docs/decisions.md
+ADR-03), or budget for the ~$8/month `db-f1-micro` floor going forward.
