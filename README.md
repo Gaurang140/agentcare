@@ -96,6 +96,9 @@ Open http://localhost:3000 and log in with the demo accounts above. The
 frontend proxies `/api/*` to the backend on port 8000, so the session cookie
 rides along same-origin.
 
+Every command in this README, plus the full path from localhost to GCP with
+each flag explained, lives in [docs/runbook.md](docs/runbook.md).
+
 ## LLM configuration
 
 AgentCare talks to any OpenAI-compatible endpoint. The default is the Groq free
@@ -396,13 +399,13 @@ agentcare/
   backend/            FastAPI + LangGraph service
     app/              config, models, auth, safety, tools, agents, services, api
     alembic/          migration environment and versions
-    tests/            198 pytest tests (unit, RBAC, fake-LLM end-to-end)
+    tests/            242 pytest tests (unit, RBAC, fake-LLM end-to-end)
     Dockerfile
   frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
     app/              login, register, patient portal, staff portal
     components/       shared UI
     proxy.ts          cookie gate (UX only)
-  docs/               architecture, decisions, security, demo script
+  docs/               architecture, decisions, security, demo script, runbook
   monitoring/         prometheus.yml, grafana provisioning and dashboard
   scripts/            seed_demo.py
   docker-compose.yml
