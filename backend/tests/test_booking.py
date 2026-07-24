@@ -9,10 +9,11 @@ from datetime import date, timedelta
 import pytest
 
 from app.exceptions import ConflictError
-from app.models import AppointmentSlot, Department
+from app.models import AppointmentSlot, Department, Doctor
 from app.tools.appointment_tools import (
     book_appointment,
     cancel_appointment,
+    generate_slots_for_doctor,
     get_available_slots,
     list_patient_appointments,
     reschedule_appointment,
@@ -136,6 +137,40 @@ def test_get_available_slots_filters_by_department_and_date_range(db, seeded):
 
     assert 0 < len(slots) <= 5
     assert all(s["start_time"] for s in slots)
+
+
+def test_get_available_slots_excludes_inactive_doctors(db, seeded):
+    # Staff can deactivate a doctor (set_doctor_active) without deleting the
+    # calendar, so a deactivated doctor keeps free slots in the table. Those
+    # slots must not be offered to patients any more.
+    cardiology_id = _cardiology_id(db)
+    inactive = Doctor(department_id=cardiology_id, name="Dr. Inaktiv Beispiel", active=False)
+    db.add(inactive)
+    db.commit()
+
+    first_seeded_slot = (
+        db.query(AppointmentSlot)
+        .join(Doctor, AppointmentSlot.doctor_id == Doctor.id)
+        .filter(Doctor.department_id == cardiology_id, AppointmentSlot.status == "free")
+        .order_by(AppointmentSlot.start_time)
+        .first()
+    )
+    assert first_seeded_slot is not None
+    day = first_seeded_slot.start_time.date()
+
+    # One weekday of free slots for the inactive doctor, same day (and so
+    # same start times) as the active doctors' seeded slots.
+    generated = generate_slots_for_doctor(db, doctor_id=inactive.id, date_from=day, date_to=day)
+    assert generated, "the inactive doctor must actually own free slots for this to prove anything"
+
+    # limit comfortably above the whole department's slot count for that day.
+    slots = get_available_slots(
+        db, department_id=cardiology_id, date_from=day, date_to=day, limit=100
+    )
+
+    doctor_ids = {s["doctor_id"] for s in slots}
+    assert inactive.id not in doctor_ids
+    assert doctor_ids, "active doctors' slots must still be offered"
 
 
 def test_list_patient_appointments_reflects_bookings(db, seeded):

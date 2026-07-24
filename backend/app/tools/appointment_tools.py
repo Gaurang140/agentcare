@@ -30,7 +30,12 @@ def get_available_slots(
     date_to: date,
     limit: int = 10,
 ) -> list[dict]:
-    """Free slots for any doctor in department_id, within [date_from, date_to]."""
+    """Free slots for any active doctor in department_id, within [date_from, date_to].
+
+    Deactivating a doctor (staff action) leaves their calendar in place, so
+    the doctor filter is what keeps those slots out of every patient-facing
+    availability list.
+    """
     range_start = datetime.combine(date_from, time.min)
     range_end = datetime.combine(date_to, time.max)
 
@@ -39,6 +44,7 @@ def get_available_slots(
         .join(Doctor, AppointmentSlot.doctor_id == Doctor.id)
         .filter(
             Doctor.department_id == department_id,
+            Doctor.active.is_(True),
             AppointmentSlot.status == "free",
             AppointmentSlot.start_time >= range_start,
             AppointmentSlot.start_time <= range_end,
