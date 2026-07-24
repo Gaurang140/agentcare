@@ -68,6 +68,15 @@ def store_document(
         db.query(PatientDocument).filter_by(patient_id=patient_id, checksum=checksum).first()
     )
     if existing is not None:
+        write_audit(
+            db,
+            None,
+            "document.duplicate_detected",
+            "patient_document",
+            existing.id,
+            {"patient_id": patient_id, "filename": filename, "checksum": checksum},
+        )
+        db.commit()
         return {
             "id": existing.id,
             "duplicate": True,

@@ -38,7 +38,7 @@ def _isolated_checkpointer(tmp_path, monkeypatch):
 
 
 def _patient_user(db: Session) -> User:
-    user = db.query(User).filter_by(email="patient@demo.agentcare.local").first()
+    user = db.query(User).filter_by(email="patient@agentcare-demo.com").first()
     assert user is not None
     return user
 

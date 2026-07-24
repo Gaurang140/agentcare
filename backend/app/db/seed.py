@@ -122,7 +122,7 @@ def seed(db: Session) -> dict[str, int]:
                 )
 
     patient = User(
-        email="patient@demo.agentcare.local",
+        email="patient@agentcare-demo.com",
         password_hash=hash_password(_DEMO_PASSWORD),
         role="patient",
         full_name="Max Mustermann",
@@ -138,7 +138,7 @@ def seed(db: Session) -> dict[str, int]:
     )
 
     second_patient = User(
-        email="erika@demo.agentcare.local",
+        email="erika@agentcare-demo.com",
         password_hash=hash_password(_DEMO_PASSWORD),
         role="patient",
         full_name="Erika Musterfrau",
@@ -148,7 +148,7 @@ def seed(db: Session) -> dict[str, int]:
     db.add(PatientProfile(user_id=second_patient.id, preferred_language="de"))
 
     staff = User(
-        email="staff@demo.agentcare.local",
+        email="staff@agentcare-demo.com",
         password_hash=hash_password(_DEMO_PASSWORD),
         role="staff",
         full_name="Admin Petra Muster",

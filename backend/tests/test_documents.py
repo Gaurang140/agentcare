@@ -31,6 +31,16 @@ def test_duplicate_document_detected(db, seeded):
     assert r1["duplicate"] is False and r2["duplicate"] is True
     assert r2["existing_id"] == r1["id"]
 
+    from app.models import AuditEvent
+
+    dup_events = (
+        db.query(AuditEvent)
+        .filter_by(action="document.duplicate_detected", entity_id=r1["id"])
+        .all()
+    )
+    assert len(dup_events) == 1
+    assert dup_events[0].metadata_json["filename"] == "ecg_copy.pdf"
+
 
 def test_duplicate_detection_is_scoped_per_patient(db, seeded):
     """Same bytes, different patient: not a duplicate - dedup key is (patient_id, checksum)."""
