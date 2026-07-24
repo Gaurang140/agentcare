@@ -1,6 +1,7 @@
-# Designed-for-scale path (docs/decisions.md ADR-03): the demo runs on Neon
-# free-tier Postgres, not this module. Every resource below is count-gated
-# on enable_cloud_sql and creates nothing while it stays false.
+# Primary database path while the GCP trial credit covers it (docs/decisions.md
+# ADR-03); enable_cloud_sql defaults to true in the root variables. Neon
+# free-tier Postgres is the post-credit swap: set enable_cloud_sql=false and
+# point DATABASE_URL there. Every resource below is count-gated on that flag.
 
 data "google_compute_network" "vpc" {
   count   = var.enable_cloud_sql ? 1 : 0
