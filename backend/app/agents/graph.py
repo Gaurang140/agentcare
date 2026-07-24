@@ -136,7 +136,9 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     LangGraph re-executes a resumed node from its first line, so everything
     above the interrupt runs a second time when the decision arrives - which
     is exactly why the escalation is reused rather than created blind, and
-    why nothing above the interrupt writes an audit row.
+    why nothing above the interrupt writes unconditionally. The create branch
+    (and the escalation.created audit row that comes with it) is skipped on
+    the second pass, which finds the row the first pass left.
 
     What the decision does depends on what the run was stopped for. An
     approved uncertainty case goes back to the coordinator with the staff

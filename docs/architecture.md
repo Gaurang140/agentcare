@@ -162,8 +162,9 @@ nothing moves until `POST /api/staff/escalations/{id}/resolve` records a decisio
 to the paused thread through `workflow_service.resume_with_decision`.
 
 LangGraph re-executes a resumed node from its first line, so everything above the interrupt runs
-twice. That is why the escalation is reused rather than created blind, and why no audit row is
-written above the interrupt: the second pass finds the row the first pass left and adds nothing.
+twice. That is why the escalation is reused rather than created blind, and why nothing above the
+interrupt writes unconditionally. The first pass may open the row and its `escalation.created`
+audit event; the second pass finds that row, skips the create branch and adds nothing.
 
 What the decision does:
 

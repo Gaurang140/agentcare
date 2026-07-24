@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import require_internal_or_staff, require_role
 from app.db.session import get_db
-from app.exceptions import NotFoundError
+from app.exceptions import NotFoundError, ValidationError
 from app.models import AuditEvent, Escalation, User, WorkflowRun
 from app.schemas.appointment import DepartmentOut, SlotOut
 from app.schemas.staff import (
@@ -106,12 +106,32 @@ def resolve_escalation_route(
     staff: Annotated[User, Depends(require_role("staff"))],
     db: Annotated[Session, Depends(get_db)],
 ) -> EscalationOut:
-    # resolve_escalation writes its own audit event with staff.id as the
-    # real actor - no separate write_audit call needed here.
-    resolve_escalation(db, escalation_id, staff.id, payload.approve, payload.note)
     escalation = db.get(Escalation, escalation_id)
     if escalation is None:
         raise NotFoundError(f"Escalation {escalation_id} not found")
+
+    run = (
+        db.get(WorkflowRun, escalation.workflow_run_id)
+        if escalation.workflow_run_id is not None
+        else None
+    )
+
+    # The pause window. The escalate node commits its escalation row on the
+    # way into interrupt(), so the queue can show a case whose run is still
+    # "running": the pause only lands on the WorkflowRun once invoke() has
+    # returned. Deciding inside that window records the decision, finds no
+    # waiting run to hand it to, and is then overwritten by the pause itself -
+    # a run parked forever on a closed escalation that no queue lists and no
+    # resume path accepts. Refused before the row is touched, so the case
+    # stays open and staff can retry a moment later. Runs the pre-graph
+    # screens escalated are already terminal ("escalated"/"completed") and
+    # never see this.
+    if run is not None and run.status == "running":
+        raise ValidationError("This request is still being handed over. Try again in a moment.")
+
+    # resolve_escalation writes its own audit event with staff.id as the
+    # real actor - no separate write_audit call needed here.
+    resolve_escalation(db, escalation_id, staff.id, payload.approve, payload.note)
 
     # The decision is not only a record: a run parked at the escalate node's
     # interrupt is waiting for it, and approving an uncertainty case sends
@@ -119,16 +139,14 @@ def resolve_escalation_route(
     # inline rather than in a background task so the staff member's next
     # screen already shows the outcome; the run is a handful of LLM calls and
     # a crash inside it is contained by resume_with_decision.
-    if escalation.workflow_run_id is not None:
-        run = db.get(WorkflowRun, escalation.workflow_run_id)
-        if run is not None and run.status == "waiting_approval":
-            workflow_service.resume_with_decision(
-                db,
-                run.id,
-                approved=payload.approve,
-                note=payload.note,
-                reviewer_id=staff.id,
-            )
+    if run is not None and run.status == "waiting_approval":
+        workflow_service.resume_with_decision(
+            db,
+            run.id,
+            approved=payload.approve,
+            note=payload.note,
+            reviewer_id=staff.id,
+        )
 
     return _to_escalation_out(escalation)
 

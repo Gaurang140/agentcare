@@ -88,7 +88,7 @@ export interface DocumentListResponse {
 export interface WorkflowRunSummary {
   id: number;
   patient_id: number;
-  status: string; // "running" | "completed" | "failed" | "escalated"
+  status: string; // "running" | "waiting_approval" | "completed" | "failed" | "escalated"
   current_step: string | null;
   request_text: string;
   created_at: string;

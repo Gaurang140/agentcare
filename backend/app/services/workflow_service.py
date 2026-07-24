@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from langgraph.types import Command
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.agents.graph import build_graph, open_checkpointer
@@ -414,11 +415,28 @@ def resume_with_decision(
     approve harmless. The invoke goes through `_invoke_graph`, so a crash
     while resuming ends as a failed run with its own escalation, exactly like
     a crash on the first pass, and never as a 500 out of the staff route.
+
+    The run is claimed before the invoke, not merely read: the status moves
+    waiting_approval -> running in one conditional UPDATE, committed first,
+    the same way `appointment_tools.book_appointment` claims a slot. Two
+    staff members approving the same case at the same moment would both read
+    waiting_approval and both resume the one thread otherwise, off one
+    checkpoint, which on a booking run means booking twice. The loser's
+    UPDATE matches zero rows and takes the no-op path.
     """
     workflow_run = db.get(WorkflowRun, workflow_run_id)
     if workflow_run is None:
         raise NotFoundError(f"WorkflowRun {workflow_run_id} not found")
     if workflow_run.status != "waiting_approval":
+        return workflow_run
+
+    claimed = db.execute(
+        update(WorkflowRun)
+        .where(WorkflowRun.id == workflow_run_id, WorkflowRun.status == "waiting_approval")
+        .values(status="running")
+    )
+    db.commit()
+    if claimed.rowcount == 0:
         return workflow_run
 
     resume = Command(resume={"approved": approved, "note": note, "reviewer_id": reviewer_id})

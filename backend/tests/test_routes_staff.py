@@ -116,6 +116,46 @@ def test_resolve_escalation_hands_the_decision_to_a_paused_workflow(
     assert len(client.chat.completions.calls) == 3
 
 
+def test_resolve_escalation_refuses_while_the_run_is_still_running(
+    patient_client, staff_client, db_session
+):
+    """The escalate node commits its escalation row before `interrupt()` hands
+    control back, so the staff queue can show a case whose run has not been
+    parked yet. A decision landing in that window would be recorded against a
+    run that is about to write `waiting_approval` over its own status, with
+    the escalation already closed and nothing left to deliver the decision to.
+    The route refuses before it touches the row, so the case stays in the
+    queue for the retry."""
+    patient = db_session.query(User).filter_by(email="patient@example.com").first()
+    assert patient is not None
+    run = WorkflowRun(
+        user_id=patient.id,
+        patient_id=patient.id,
+        thread_id="wf-pause-window",
+        request_text="something about an appointment, maybe",
+        status="running",
+    )
+    db_session.add(run)
+    db_session.flush()
+    esc = Escalation(
+        workflow_run_id=run.id, reason="needs a human", severity="uncertainty", status="open"
+    )
+    db_session.add(esc)
+    db_session.commit()
+
+    resp = staff_client.post(
+        f"/api/staff/escalations/{esc.id}/resolve",
+        json={"approve": True, "note": "decided too early"},
+    )
+
+    assert resp.status_code == 400, resp.text
+    db_session.expire_all()
+    reloaded = db_session.get(Escalation, esc.id)
+    assert reloaded.status == "open"
+    assert reloaded.reviewed_by is None
+    assert reloaded.resolution_note is None
+
+
 def test_resolve_escalation_denied_for_patient(patient_client, db_session):
     esc = Escalation(workflow_run_id=None, reason="x", severity="uncertainty", status="open")
     db_session.add(esc)

@@ -14,6 +14,7 @@ import json
 from datetime import date, timedelta
 
 import pytest
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.agents.responses import staff_decision_response
@@ -27,6 +28,7 @@ from app.models import (
     PatientDocument,
     Reminder,
     User,
+    WorkflowRun,
 )
 from app.services import workflow_service
 from app.tools.appointment_tools import get_available_slots
@@ -505,6 +507,48 @@ def test_agent_failure_escalation_closes_even_when_staff_approves(db, seeded, fa
     assert [e.severity for e in db.query(Escalation).all()] == ["agent_failure"]
     assert db.query(Appointment).count() == 0
     assert len(client.chat.completions.calls) == 3
+
+
+def test_second_decision_on_the_same_run_never_invokes_the_graph_twice(
+    db, seeded, fake_llm, monkeypatch
+):
+    """Two staff members deciding the same case at once must not resume one
+    thread twice: two resumed runs off one checkpoint can book twice.
+
+    The loser is simulated the way the race actually produces it. It read the
+    run while the row still said `waiting_approval`, and by the time it acts
+    the winner has claimed the row. `resume_with_decision` claims the run with
+    a conditional UPDATE rather than trusting that read, so the loser's claim
+    matches no row and the graph is never invoked a second time.
+    """
+    fake_llm(_uncertainty_pause_script())
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "something about an appointment, maybe", []
+    )
+    assert run.status == "waiting_approval"
+
+    # The winner's claim, written straight to the row: the loser's session
+    # keeps the run cached exactly as it read it a moment earlier.
+    db.execute(
+        update(WorkflowRun).where(WorkflowRun.id == run.id).values(status="running"),
+        execution_options={"synchronize_session": False},
+    )
+    assert db.get(WorkflowRun, run.id).status == "waiting_approval"
+
+    invoked: list = []
+
+    class _CountingGraph:
+        def invoke(self, graph_input, config):
+            invoked.append(graph_input)
+            return {}
+
+    monkeypatch.setattr(workflow_service, "get_graph", lambda: _CountingGraph())
+
+    workflow_service.resume_with_decision(
+        db, run.id, approved=True, note="mine", reviewer_id=_REVIEWER_ID
+    )
+
+    assert invoked == []
 
 
 def test_resume_unknown_workflow_run_raises_not_found(db, seeded, fake_llm):

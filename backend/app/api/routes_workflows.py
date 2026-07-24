@@ -15,7 +15,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
-from app.agents.responses import staff_review_response
+from app.agents.responses import staff_decision_response, staff_review_response
 from app.auth.dependencies import ensure_owner_or_staff, get_current_user
 from app.db import session as db_session_module
 from app.db.session import get_db
@@ -153,10 +153,20 @@ def _serialize_escalation(
     that steered the agents. What the patient reads about a decided case is
     the templated answer on the run itself (agents/responses.py), never the
     note. `reviewed_by` goes with it - which staff member took a case is the
-    staff queue's business."""
+    staff queue's business.
+
+    The masked reason follows the decision. A case still open gets the
+    neutral staff-review line; once staff have decided, the patient reads the
+    same template the run itself closes on, so an approved run does not show
+    a promise of review next to the appointment it just confirmed."""
     if escalation is None:
         return None
-    reason = escalation.reason if include_internal else staff_review_response(db, patient_id)
+    if include_internal:
+        reason = escalation.reason
+    elif escalation.status in ("approved", "rejected"):
+        reason = staff_decision_response(db, patient_id, escalation.status == "approved")
+    else:
+        reason = staff_review_response(db, patient_id)
     return {
         "id": escalation.id,
         "reason": reason,

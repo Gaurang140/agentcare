@@ -12,7 +12,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from app.api.routes_workflows import run_workflow_background
+from app.agents.responses import staff_decision_response, staff_review_response
+from app.api.routes_workflows import _serialize_escalation, run_workflow_background
 from app.config import settings
 from app.db.seed import seed
 from app.models import (
@@ -416,6 +417,13 @@ def test_failed_run_hides_internal_detail_from_the_patient(
     assert _STAFF_NOTE not in body
     assert payload["escalation"]["resolution_note"] is None
     assert payload["state"]["final_response"]
+    # The case is decided, so the masked reason says so. Telling the patient a
+    # staff member will review a request that was reviewed an hour ago is the
+    # one thing this projection must not do.
+    run = db_session.get(WorkflowRun, workflow_id)
+    assert payload["escalation"]["reason"] == staff_decision_response(
+        db_session, run.patient_id, True
+    )
 
 
 def test_staff_still_see_the_raw_failure_detail_on_the_same_endpoint(
@@ -435,6 +443,32 @@ def test_staff_still_see_the_raw_failure_detail_on_the_same_endpoint(
     assert payload["escalation"]["resolution_note"] == _STAFF_NOTE
     assert _CRASH_MARKER in payload["state"]["error"]
     assert payload["state"]["plan"] == ["route_department", "escalate"]
+
+
+def test_masked_escalation_reason_follows_the_staff_decision(patient_client, db_session):
+    """The masked reason is decision-aware. An open case gets the neutral
+    staff-review line; a decided one gets the same template the run itself
+    closes on, so the portal never sits a review promise next to a confirmed
+    appointment. Staff keep the raw reason at every status."""
+    patient = db_session.query(User).filter_by(email="patient@example.com").first()
+    assert patient is not None
+
+    def _reason(status: str, *, include_internal: bool = False) -> str:
+        escalation = Escalation(
+            workflow_run_id=None,
+            reason="raw staff-facing text",
+            severity="uncertainty",
+            status=status,
+        )
+        payload = _serialize_escalation(
+            escalation, include_internal=include_internal, db=db_session, patient_id=patient.id
+        )
+        return payload["reason"]
+
+    assert _reason("open") == staff_review_response(db_session, patient.id)
+    assert _reason("approved") == staff_decision_response(db_session, patient.id, True)
+    assert _reason("rejected") == staff_decision_response(db_session, patient.id, False)
+    assert _reason("approved", include_internal=True) == "raw staff-facing text"
 
 
 def test_injection_blocked_run_never_shows_the_patient_the_matched_patterns(
