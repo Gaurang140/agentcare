@@ -162,6 +162,8 @@ def test_create_run_blocks_injection_request_with_escalation_and_audit_and_no_ll
     escalation = db.query(Escalation).filter_by(workflow_run_id=run.id).first()
     assert escalation is not None
     assert escalation.severity == "safety"
+    # Staff-facing row, so this one keeps the matched patterns.
+    assert "ignore previous instructions" in escalation.reason
 
     audit = (
         db.query(AuditEvent)
@@ -169,7 +171,10 @@ def test_create_run_blocks_injection_request_with_escalation_and_audit_and_no_ll
         .first()
     )
     assert audit is not None
-    assert "ignore previous instructions" in audit.metadata_json["matched"]
+    # The patient timeline streams this row, so it names the layer that
+    # blocked and nothing more - the matched patterns go to the log and the
+    # escalation reason instead.
+    assert audit.metadata_json == {"via": "deterministic"}
 
 
 def test_create_run_clean_request_still_runs_normally(db, fake_llm):

@@ -186,13 +186,24 @@ def _injection_blocked_run(
         reason=f"prompt injection detected ({injection.via}): {', '.join(injection.matched)}",
         severity="safety",
     )
+    # The patient timeline streams AuditEvent rows straight through, so the
+    # matched patterns stay out of the metadata: telling an attacker which
+    # pattern fired is the same map the blocked-response text refuses to hand
+    # over. Ops still get the full list from this log line, and staff from the
+    # escalation reason above.
+    logger.warning(
+        "injection_blocked",
+        workflow_id=workflow_run.id,
+        via=injection.via,
+        matched=injection.matched,
+    )
     write_audit(
         db,
         user.id,
         "safety.injection_blocked",
         "workflow_run",
         workflow_run.id,
-        {"matched": injection.matched, "via": injection.via},
+        {"via": injection.via},
     )
     db.commit()
     return workflow_run

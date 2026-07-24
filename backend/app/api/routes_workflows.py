@@ -15,6 +15,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
+from app.agents.responses import staff_review_response
 from app.auth.dependencies import ensure_owner_or_staff, get_current_user
 from app.db import session as db_session_module
 from app.db.session import get_db
@@ -124,12 +125,34 @@ def list_workflows(
     return [_to_workflow_summary(run) for run in runs]
 
 
-def _serialize_escalation(escalation: Escalation | None) -> dict | None:
+_PATIENT_STATE_KEYS = ("final_response", "appointment", "completed_steps", "uploaded_document_ids")
+# safety_flags deliberately excluded: the injection-blocked path stores the
+# matched guard patterns there, which must not reach the requester.
+
+
+def _patient_state(state: dict | None) -> dict | None:
+    """Project the run state down to what the portal actually renders. An
+    allowlist, not a blocklist: a new state key written by some future node
+    stays invisible to patients until someone decides it belongs here."""
+    if state is None:
+        return None
+    return {key: state[key] for key in _PATIENT_STATE_KEYS if key in state}
+
+
+def _serialize_escalation(
+    escalation: Escalation | None, *, include_internal: bool, db: Session, patient_id: int
+) -> dict | None:
+    """Escalation reasons are staff-facing text: a node's raw exception
+    string, the injection guard's matched patterns, whatever the specialist
+    that escalated wrote. The portal renders `reason` verbatim, so a patient
+    gets the same neutral staff-review line the no-LLM escalation paths use,
+    already localized to their preferred language."""
     if escalation is None:
         return None
+    reason = escalation.reason if include_internal else staff_review_response(db, patient_id)
     return {
         "id": escalation.id,
-        "reason": escalation.reason,
+        "reason": reason,
         "severity": escalation.severity,
         "status": escalation.status,
         "reviewed_by": escalation.reviewed_by,
@@ -148,6 +171,10 @@ def get_workflow(
         raise NotFoundError(f"WorkflowRun {workflow_id} not found")
     ensure_owner_or_staff(current_user, run.patient_id, db)
 
+    # Staff and the owning patient both read this route (the staff detail
+    # sheet and the portal share it), so the internal detail is gated on the
+    # role rather than split across two endpoints.
+    is_staff = current_user.role == "staff"
     state = run.state or {}
     document_ids = state.get("uploaded_document_ids") or []
     documents = (
@@ -173,12 +200,14 @@ def get_workflow(
         status=run.status,
         current_step=run.current_step,
         request_text=run.request_text,
-        state=run.state,
+        state=run.state if is_staff else _patient_state(run.state),
         created_at=run.created_at,
         updated_at=run.updated_at,
         appointment=state.get("appointment"),
         documents=documents,
-        escalation=_serialize_escalation(escalation),
+        escalation=_serialize_escalation(
+            escalation, include_internal=is_staff, db=db, patient_id=run.patient_id
+        ),
     )
 
 
