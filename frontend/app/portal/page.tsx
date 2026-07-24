@@ -184,7 +184,15 @@ export default function PortalHomePage() {
                   <TableRow
                     key={run.id}
                     className="cursor-pointer"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => router.push(`/portal/workflows/${run.id}`)}
+                    onKeyDown={(keyEvent) => {
+                      if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+                        keyEvent.preventDefault();
+                        router.push(`/portal/workflows/${run.id}`);
+                      }
+                    }}
                   >
                     <TableCell>{run.id}</TableCell>
                     <TableCell className="max-w-xs truncate">{run.request_text}</TableCell>

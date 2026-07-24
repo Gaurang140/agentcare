@@ -58,7 +58,7 @@ export function NavShell({ role, children }: NavShellProps) {
   return (
     <div className="flex min-h-full flex-1 flex-col">
       <header className="flex flex-col gap-3 border-b px-6 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <span className="text-base font-semibold">AgentCare</span>
           <Badge variant="secondary" className="capitalize">
             {role === "staff" ? "Staff console" : "Patient portal"}

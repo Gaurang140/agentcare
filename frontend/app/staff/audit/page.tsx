@@ -123,7 +123,16 @@ export default function StaffAuditPage() {
                   <Fragment key={event.id}>
                     <TableRow
                       className={hasMetadata ? "cursor-pointer" : undefined}
+                      role={hasMetadata ? "button" : undefined}
+                      tabIndex={hasMetadata ? 0 : undefined}
                       onClick={() => hasMetadata && toggleExpanded(event.id)}
+                      onKeyDown={(keyEvent) => {
+                        if (!hasMetadata) return;
+                        if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+                          keyEvent.preventDefault();
+                          toggleExpanded(event.id);
+                        }
+                      }}
                     >
                       <TableCell>
                         {hasMetadata ? (

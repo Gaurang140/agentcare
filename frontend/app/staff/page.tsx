@@ -104,7 +104,15 @@ export default function StaffQueuePage() {
                   <TableRow
                     key={run.id}
                     className="cursor-pointer"
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setSelected(run)}
+                    onKeyDown={(keyEvent) => {
+                      if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+                        keyEvent.preventDefault();
+                        setSelected(run);
+                      }
+                    }}
                   >
                     <TableCell>Patient #{run.patient_id}</TableCell>
                     <TableCell
