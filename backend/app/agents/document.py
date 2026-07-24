@@ -43,6 +43,13 @@ logger = get_logger(__name__)
 
 _UNKNOWN_TYPE = "other"
 
+# A classification the model is not sure about is a guess, and a wrong
+# document_type quietly changes what the department counts as missing. Under
+# this threshold the guess stays in the audit trail for staff and never
+# reaches the row. This is the document node's own number; routing.py sets a
+# different one for a different decision.
+_CONFIDENCE_THRESHOLD = 0.6
+
 
 class DocumentOutput(BaseModel):
     document_type: Literal[
@@ -113,6 +120,17 @@ def run(state: AgentState, db: Session) -> dict:
             result = chat_json(
                 system, _classification_prompt(doc.filename, redacted_text), DocumentOutput
             )
+            if result.confidence < _CONFIDENCE_THRESHOLD:
+                write_audit(
+                    db,
+                    None,
+                    "document.low_confidence",
+                    "patient_document",
+                    doc.id,
+                    {"confidence": result.confidence, "suggested": result.document_type},
+                )
+                continue
+
             doc.document_type = result.document_type
             db.flush()
             classified.append(

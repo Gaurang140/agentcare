@@ -22,6 +22,20 @@ from app.tools.followup_tools import create_followup_task, create_reminder
 
 logger = get_logger(__name__)
 
+# Bounds on what the LLM's plan is allowed to turn into real rows. An
+# unbounded reminder list floods the patient's schedule, a negative
+# days_before_appointment lands the reminder after the appointment it is
+# reminding about, and a very large one lands it in the past, where
+# send_due_reminders marks it sent on its next tick. Enforced in code, not
+# as pydantic Field(ge=..., le=...): Groq's strict json_schema mode rejects
+# the "minimum"/"maximum" keywords those emit (AGENTS.md rule 3).
+_MAX_REMINDERS = 5
+_MAX_DAYS = 90
+
+
+def _clamp_days(value: int) -> int:
+    return min(max(value, 0), _MAX_DAYS)
+
 
 class ReminderSpec(BaseModel):
     type: str
@@ -68,14 +82,14 @@ def run(state: AgentState, db: Session) -> dict:
         start_time = datetime.fromisoformat(appointment["start_time"])
 
         created: list[dict] = []
-        for spec in plan.reminders:
-            scheduled_at = start_time - timedelta(days=spec.days_before_appointment)
+        for spec in plan.reminders[:_MAX_REMINDERS]:
+            scheduled_at = start_time - timedelta(days=_clamp_days(spec.days_before_appointment))
             created.append(
                 create_reminder(db, patient_id, appointment_id, spec.type, scheduled_at)
             )
         created.append(
             create_followup_task(
-                db, patient_id, appointment_id, days_after=plan.followup_days_after
+                db, patient_id, appointment_id, days_after=_clamp_days(plan.followup_days_after)
             )
         )
 

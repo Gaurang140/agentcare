@@ -5,7 +5,7 @@ LLM, persist the classification, then report required-document coverage.
 from __future__ import annotations
 
 from app.agents import document
-from app.models import Department, PatientDocument
+from app.models import AuditEvent, Department, PatientDocument
 
 
 def _cardiology_id(db) -> int:
@@ -47,6 +47,32 @@ def test_classifies_unknown_type_document_and_persists_it(db, seeded, fake_llm):
         {"id": doc.id, "document_type": "blood_test", "confidence": 0.88}
     ]
     assert len(client.chat.completions.calls) == 1
+
+
+def test_low_confidence_classification_is_not_persisted(db, seeded, fake_llm):
+    """Under the confidence threshold the guess is recorded in the audit
+    trail for staff, never written onto the document row."""
+    doc = _store_doc(db, document_type="other")
+    client = fake_llm([{"document_type": "blood_test", "confidence": 0.3}])
+
+    result = document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    db.refresh(doc)
+    assert doc.document_type == "other"
+    assert result["documents_result"]["classified"] == []
+    assert len(client.chat.completions.calls) == 1
+
+    audit = (
+        db.query(AuditEvent)
+        .filter_by(
+            action="document.low_confidence",
+            entity_type="patient_document",
+            entity_id=doc.id,
+        )
+        .first()
+    )
+    assert audit is not None
+    assert audit.metadata_json == {"confidence": 0.3, "suggested": "blood_test"}
 
 
 def test_already_typed_document_is_not_reclassified(db, seeded, fake_llm):
