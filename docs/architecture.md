@@ -46,7 +46,7 @@ flowchart TD
         doc["document"]
         followup["followup"]
         safety["safety_finalize"]
-        esc["escalate"]
+        esc["escalate (interrupt: waits for staff)"]
     end
 
     tools["DB tools + audit writer"]
@@ -65,6 +65,7 @@ flowchart TD
     coord --> followup --> coord
     coord --> safety --> tools
     coord --> esc --> tools
+    esc -. "staff approved: run continues" .-> coord
     routing --> tools
     appt --> tools
     doc --> tools
@@ -92,11 +93,12 @@ so the request returns `{workflow_id, status}` before any LLM call.
 The graph is a coordinator loop. `START` enters the coordinator, which is a pure decision node:
 it appends one of six plan words to `state["plan"]` and never calls a node itself. A conditional
 edge maps the latest plan word to the next node. Each specialist runs its own DB work, then
-returns to the coordinator. `safety_finalize` and `escalate` are the two terminal nodes. Any
-node that sets `state["error"]` forces `escalate` regardless of the coordinator's last decision,
-so the graph stays safe even if the coordinator's own LLM call misreads an error. Each agent
-catches its own exceptions and reports them as `state["error"]` rather than raising, so a node
-boundary never crashes the graph.
+returns to the coordinator. `safety_finalize` ends a run; `escalate` stops one, and whether it
+ends there is a human's call (see "Human in the loop" below). Any node that sets
+`state["error"]` forces `escalate` regardless of the coordinator's last decision, so the graph
+stays safe even if the coordinator's own LLM call misreads an error. Each agent catches its own
+exceptions and reports them as `state["error"]` rather than raising, so a node boundary never
+crashes the graph.
 
 | Agent | Prompt (`app/agents/prompts.py`) | Tools it owns | Structured output |
 |---|---|---|---|
@@ -137,15 +139,50 @@ German-preferring patient never silently gets an English reply.
    each writing an `agent.<name>.completed` audit row on exit.
 5. Finalize or escalate. `safety_finalize` composes the patient-facing answer from freshly
    re-queried rows, runs it past the LLM reviewer and the deterministic sanitizer, then ends the
-   run. `escalate` opens an escalation and ends the run.
-6. Crash-resume. `resume_workflow` calls `graph.invoke(None, config)` with the same `thread_id`,
+   run. `escalate` opens an escalation and stops on an interrupt, waiting for a staff decision.
+6. Staff decision. `resume_with_decision` re-enters the paused thread with
+   `Command(resume={...})`. An approved uncertainty case goes back to the coordinator and
+   finishes; anything else closes on a template. Details below.
+7. Crash-resume. `resume_workflow` calls `graph.invoke(None, config)` with the same `thread_id`,
    re-entering from the last saved super-step checkpoint. It is a no-op on an already-finished
-   thread, so nothing re-executes or duplicates. A background task or scheduler sweep that never
-   finished shows up as a run stuck in `running`, which the stall job escalates after 30 minutes.
+   thread, so nothing re-executes or duplicates, and it refuses a run in `waiting_approval`,
+   which moves only on a decision. A background task or scheduler sweep that never finished
+   shows up as a run stuck in `running`, which the stall job escalates after 30 minutes. That
+   job matches `running` only, so it never takes a paused run out of a human's hands.
 
 The graph is built and compiled once at startup (`workflow_service.get_graph`). Its checkpointer
 is opened as a context manager and held for the process lifetime through a module-level
 `ExitStack`, closed by the FastAPI lifespan on shutdown.
+
+## Human in the loop
+
+The `escalate` node calls LangGraph's `interrupt()` after it has opened or reused the escalation
+row. The run is checkpointed mid-graph, `WorkflowRun.status` becomes `waiting_approval` and
+nothing moves until `POST /api/staff/escalations/{id}/resolve` records a decision and hands it
+to the paused thread through `workflow_service.resume_with_decision`.
+
+LangGraph re-executes a resumed node from its first line, so everything above the interrupt runs
+twice. That is why the escalation is reused rather than created blind, and why no audit row is
+written above the interrupt: the second pass finds the row the first pass left and adds nothing.
+
+What the decision does:
+
+| Case | Decision | Outcome |
+|---|---|---|
+| uncertainty (no `state["error"]`) | approve | `escalation_id` and `final_response` clear, the note becomes `state["staff_guidance"]`, a conditional edge sends the run back to the coordinator and the request completes |
+| uncertainty | reject | closes on `staff_decision_response(..., approved=False)`, status `escalated` |
+| agent_failure (`state["error"]` set) | either | closes on the template, status `failed`. There is nothing to carry on with, so a human takes the case by hand |
+
+`staff_guidance` is appended to the coordinator and routing user prompts, which is what lets a
+re-run land somewhere different from the one that gave up. The note itself is staff-facing: it
+lives on `Escalation.resolution_note`, and neither that column nor `staff_guidance` is in the
+patient projections in `routes_workflows.py`. What the patient reads is the answer the resumed
+run produced or one of the two templates in `agents/responses.py`.
+
+A resumed run that escalates again is a second legitimate handoff. It opens its own escalation
+row rather than reusing the one staff already closed (`state["resolved_escalation_ids"]`), and
+waits again. The emergency and injection screens sit outside all of this: they are decided
+before the graph starts and answer at once.
 
 ## Data model
 

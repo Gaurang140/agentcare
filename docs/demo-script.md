@@ -56,17 +56,26 @@ judge should notice.
   breathe`.
 - Say: "Some requests are not administrative. This one never reaches a model."
 - Notice: an instant response to call 112 and zero model calls, while an
-  emergency escalation drops into the staff queue in the other window.
+  emergency escalation drops into the staff queue in the other window. This
+  screen answers at once and never waits for approval, which is the point of
+  keeping it outside the graph.
 
-**1:30 - 1:45 | Staff approves with a note**
+**1:30 - 1:50 | Staff approval restarts a paused run**
 
-- Click: switch to the staff window, open the escalation queue, resolve the
-  emergency with a short note.
-- Say: "A human owns every escalation and closes it with a note."
-- Notice: the resolution and the reviewer are written back to the record. The
-  boundary between software and clinician is explicit.
+- Click: in the patient window submit `something about an appointment, maybe`
+  and let it come back as **waiting approval**. Switch to the staff window, open
+  that escalation and approve it with the note
+  `patient means cardiology, book the earliest slot`. Switch back.
+- Say: "The agents stopped rather than guess, and the run is parked mid-graph.
+  This approval is not a rubber stamp on a closed case. It restarts the run
+  with what the staff member said."
+- Notice: the patient window goes from waiting approval to a booked cardiology
+  appointment on its own, with nobody re-submitting anything. The staff note is
+  on the escalation record and nowhere in what the patient reads.
+- Rehearse this one: the request has to be ambiguous enough that routing
+  actually escalates. If the model resolves it, use a vaguer sentence.
 
-**1:45 - 2:00 | Audit trail and a Grafana glance**
+**1:50 - 2:00 | Audit trail and a Grafana glance**
 
 - Click: open the staff audit view, then flip to Grafana at
   http://localhost:3001.

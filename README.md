@@ -121,9 +121,9 @@ LLM_FALLBACK_MODEL=your_local_model
 is reachable, an agent's structured-output call fails, the node records the
 error instead of raising, and the graph routes the run to staff escalation with
 a full audit trail. That is the designed degradation path, not a crash: nothing
-medical is ever guessed, and a human picks the request up. The emergency and
-medical-refusal responses need no model at all, so those two safety behaviors
-work with an empty key.
+medical is ever guessed, and the run waits for a human to pick it up. The
+emergency and medical-refusal responses need no model at all, so those two
+safety behaviors work with an empty key.
 
 ## Try the safety boundary
 
@@ -226,13 +226,46 @@ curl -s -b cookies.txt -X POST http://localhost:8000/api/workflows/<id>/resume
 The response shows the run finishing from where it left off. The audit trail
 records a `workflow.resumed` event next to the steps that already ran.
 
+## Staff approval that resumes the run
+
+An escalation here is a real pause, not a note in a queue. When the graph hands
+a case to a human it stops inside the `escalate` node on LangGraph's
+`interrupt()`: the run is checkpointed mid-graph, its status becomes
+`waiting_approval` and nothing else happens until a staff member decides.
+
+What the decision does depends on the case.
+
+- **Approve an uncertainty case** and the run carries on from where it stopped.
+  The reviewer's note becomes guidance the coordinator and routing agents read,
+  and the request the patient made actually completes. An ambiguous booking
+  that stopped before a department was resolved comes back with an appointment
+  on it.
+- **Reject**, or approve a case whose agent had already failed, and the run
+  closes on a deterministic message in the patient's language. There is nothing
+  to carry on with, so a human takes the case by hand.
+
+The reviewer's note never reaches the patient. It lives on
+`Escalation.resolution_note` for staff and steers the agents through state the
+patient projection does not expose. What the patient reads is either the answer
+the resumed run produced or the template above.
+
+Staff decide at `POST /api/staff/escalations/{id}/resolve`, which records the
+decision and hands it to the paused run in the same request. The patient-facing
+`POST /api/workflows/{id}/resume` refuses a run that is waiting for staff: that
+thread moves on a decision and on nothing else.
+
+The emergency and prompt-injection screens are deliberately outside this. They
+are decided before the graph starts, answer at once and never wait for anyone
+(`backend/app/safety/`).
+
 ## The agents
 
 The graph is a coordinator loop. The coordinator is a pure decision node: it
 picks the next step and never does domain work itself. Each specialist runs its
-own database work, then returns to the coordinator. `safety_finalize` and
-`escalate` are the two terminal nodes, and any node that records an error forces
-`escalate`, so the graph stays safe even if the coordinator misreads a result.
+own database work, then returns to the coordinator. `safety_finalize` ends a
+run and `escalate` pauses one for a human, and any node that records an error
+forces `escalate`, so the graph stays safe even if the coordinator misreads a
+result.
 
 | Agent | Role | Prompt | Tools it owns |
 |---|---|---|---|
@@ -243,9 +276,9 @@ own database work, then returns to the coordinator. `safety_finalize` and
 | Follow-up | schedules reminders and post-visit tasks | `FOLLOWUP` | `create_reminder`, `create_followup_task` (+ audit) |
 | Safety | re-queries rows, reviews and sanitizes the reply | `SAFETY` | none domain-owned; `sanitize_agent_output` |
 
-`escalate` is a terminal handler, not a model-driven agent: it opens an
-escalation for a human and ends the run. All structured model output goes
-through one entry point, `app/agents/llm.py::chat_json`. Full detail is in
+`escalate` is a handler, not a model-driven agent: it opens an escalation and
+stops the run on an interrupt until a human decides. All structured model output
+goes through one entry point, `app/agents/llm.py::chat_json`. Full detail is in
 [docs/architecture.md](docs/architecture.md).
 
 - **Staff-tunable agent rules and bilingual responses.** Each agent reads its own staff-editable
@@ -284,7 +317,7 @@ flowchart TD
         doc["document"]
         followup["followup"]
         safety["safety_finalize"]
-        esc["escalate"]
+        esc["escalate (interrupt: waits for staff)"]
     end
 
     tools["DB tools + audit writer"]
@@ -303,6 +336,7 @@ flowchart TD
     coord --> followup --> coord
     coord --> safety --> tools
     coord --> esc --> tools
+    esc -. "staff approved: run continues" .-> coord
     routing --> tools
     appt --> tools
     doc --> tools
@@ -326,12 +360,14 @@ diagram is [docs/architecture.mmd](docs/architecture.mmd).
 cd backend && ../.venv/bin/python -m pytest -q
 ```
 
-198 tests pass. They cover the agents (each with an injected fake model, no
+230 tests pass. They cover the agents (each with an injected fake model, no
 network and no keys), the tools and deterministic safety guardrails (including
 the prompt-injection guard and the PII redaction boundary), procedural agent
 rules and the bilingual safety response, the data model, RBAC on staff and
 patient-data routes, the SSE timeline, the scheduler jobs and a full fake-LLM
-end-to-end graph run in `test_graph_e2e.py`. Linting is `ruff check backend`.
+end-to-end graph run in `test_graph_e2e.py`, including the pause-and-approve
+path from `waiting_approval` through to the booked appointment. Linting is
+`ruff check backend`.
 
 ## Stack at a glance
 

@@ -29,7 +29,7 @@ flowchart TD
         doc["document"]
         followup["followup"]
         safety["safety_finalize"]
-        esc["escalate"]
+        esc["escalate (interrupt: waits for staff)"]
     end
 
     tools["DB tools + audit writer"]
@@ -48,6 +48,7 @@ flowchart TD
     coord --> followup --> coord
     coord --> safety --> tools
     coord --> esc --> tools
+    esc -. "staff approved: run continues" .-> coord
     routing --> tools
     appt --> tools
     doc --> tools
