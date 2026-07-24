@@ -7,8 +7,12 @@ prompt directly from patient-submitted text (`request_text` / a document's
 
 from __future__ import annotations
 
+import pytest
+from presidio_analyzer import RecognizerResult
+
 from app.agents import appointment, coordinator, document, routing
 from app.models import AppointmentSlot, AuditEvent, Department, Doctor, PatientDocument
+from app.safety import pii
 from app.safety.pii import PIIRedactor, redact_for_llm
 
 # --- PIIRedactor: one category at a time ------------------------------------
@@ -332,3 +336,217 @@ def test_safety_node_draft_reaches_llm_with_no_redaction_tokens(db, seeded, fake
     assert "[REDACTED_" not in sent_user_content
     assert booking["start_time"] in sent_user_content
     assert _pii_audit(db, 1) == []
+
+
+# --- Presidio pass (Task T15) ------------------------------------------------
+# `redact_for_llm` runs the regex families first, then Presidio's analyzer over
+# what is left, so names, locations and anything the regex families cannot
+# describe are redacted too. `PIIRedactor.redact` stays the pure regex pass, so
+# every test above this line still describes exactly one deterministic rule.
+
+
+class _RecordingLogger:
+    """Stands in for the module's structlog logger and keeps the event names.
+
+    structlog is configured with a PrintLoggerFactory and cached bound loggers,
+    so pytest's caplog sees nothing (same reason and same shape as
+    tests/test_observability.py)."""
+
+    def __init__(self) -> None:
+        self.warnings: list[tuple[str, dict]] = []
+
+    def warning(self, event: str, **kwargs) -> None:
+        self.warnings.append((event, kwargs))
+
+    def info(self, event: str, **kwargs) -> None:
+        pass
+
+    def error(self, event: str, **kwargs) -> None:
+        pass
+
+    def debug(self, event: str, **kwargs) -> None:
+        pass
+
+    @property
+    def events(self) -> list[str]:
+        return [event for event, _ in self.warnings]
+
+
+@pytest.fixture
+def stub_presidio(monkeypatch):
+    """Replace the lazily built Presidio engines with a test double.
+
+    The engines are an expensive module-level singleton, so a test that swaps
+    the builder has to clear the cache going in (or it keeps the real engines)
+    and going out (or the next test keeps the double)."""
+
+    def _install(builder):
+        monkeypatch.setattr(pii, "_build_engines", builder)
+        pii.reset_engines_for_tests()
+
+    yield _install
+    pii.reset_engines_for_tests()
+
+
+@pytest.fixture
+def recording_logger(monkeypatch):
+    logger = _RecordingLogger()
+    monkeypatch.setattr(pii, "logger", logger)
+    return logger
+
+
+def test_english_name_and_location_redacted():
+    text, counts = redact_for_llm("My name is John Smith and I live in London.")
+    assert text == "My name is [REDACTED_NAME] and I live in [REDACTED_LOCATION]."
+    assert counts == {"name": 1, "location": 1}
+
+
+def test_english_name_and_address_redacted():
+    text, counts = redact_for_llm("Patient John Smith, 221B Baker Street, London, needs a slot.")
+    assert "[REDACTED_NAME]" in text
+    assert "[REDACTED_LOCATION]" in text
+    assert "John Smith" not in text
+    assert "London" not in text
+    assert counts["name"] >= 1
+    assert counts["location"] == 1
+
+
+def test_german_sentence_name_and_location_redacted():
+    text, counts = redact_for_llm("Mein Name ist Erika Mustermann und ich wohne in Berlin")
+    assert "[REDACTED_NAME]" in text
+    assert "[REDACTED_LOCATION]" in text
+    assert "Erika Mustermann" not in text
+    assert "Berlin" not in text
+    assert counts["name"] >= 1
+    assert counts["location"] == 1
+
+
+def test_german_language_argument_runs_the_german_pipeline():
+    text, counts = redact_for_llm(
+        "Ich heisse Erika Mustermann, Hauptstrasse 5, Berlin.", language="de"
+    )
+    assert "[REDACTED_NAME]" in text
+    assert "Erika Mustermann" not in text
+    assert "Berlin" not in text
+    assert counts["name"] >= 1
+
+
+def test_english_text_is_not_read_with_the_german_model():
+    """de_core_news_sm tags ordinary English admin words as names ("Book",
+    "sinus rhythm"), so the German pipeline only runs on text that carries
+    German cues or when the caller names the language. Without that rule an
+    English request would come out half redacted."""
+    text, counts = redact_for_llm("ECG report, sinus rhythm")
+    assert text == "ECG report, sinus rhythm"
+    assert counts == {}
+
+
+def test_clean_admin_text_survives_both_passes():
+    text, counts = redact_for_llm("Book me a cardiology appointment next week")
+    assert text == "Book me a cardiology appointment next week"
+    assert counts == {}
+
+
+def test_regex_pass_wins_where_presidio_overlaps():
+    """Presidio also recognizes emails. The regex pass ran first, so the value
+    is already a token by then: exactly one token, counted exactly once, and
+    the token itself is never redacted a second time."""
+    text, counts = redact_for_llm("contact me at jane.doe@example.com please")
+    assert text == "contact me at [REDACTED_EMAIL] please"
+    assert text.count("[REDACTED_EMAIL]") == 1
+    assert counts == {"email": 1}
+
+
+def test_presidio_result_below_the_score_threshold_is_ignored(stub_presidio):
+    """A weak guess never rewrites the text. The stub returns one result under
+    `_PRESIDIO_SCORE_THRESHOLD` and one over it."""
+    from presidio_anonymizer import AnonymizerEngine
+
+    threshold = pii._PRESIDIO_SCORE_THRESHOLD
+
+    class _StubAnalyzer:
+        def analyze(self, text, language, entities):
+            return [
+                RecognizerResult(entity_type="PERSON", start=0, end=4, score=threshold - 0.01),
+                RecognizerResult(entity_type="LOCATION", start=14, end=20, score=threshold),
+            ]
+
+    stub_presidio(
+        lambda: pii._Engines(
+            analyzer=_StubAnalyzer(),
+            anonymizer=AnonymizerEngine(),
+            operators=pii._build_operators(),
+        )
+    )
+
+    text, counts = redact_for_llm("Alex lives in Berlin")
+
+    assert text == "Alex lives in [REDACTED_LOCATION]"
+    assert counts == {"location": 1}
+
+
+def test_engine_build_failure_falls_back_to_the_regex_result(stub_presidio, recording_logger):
+    def _raise():
+        raise RuntimeError("no spacy model installed")
+
+    stub_presidio(_raise)
+
+    text, counts = redact_for_llm("My name is John Smith, email jane.doe@example.com")
+
+    assert text == "My name is John Smith, email [REDACTED_EMAIL]"
+    assert counts == {"email": 1}
+    assert recording_logger.events == ["pii_presidio_unavailable"]
+
+
+def test_engine_build_failure_is_logged_once_not_per_request(stub_presidio, recording_logger):
+    """A broken install must not print a warning per patient request."""
+
+    def _raise():
+        raise RuntimeError("no spacy model installed")
+
+    stub_presidio(_raise)
+
+    for _ in range(3):
+        redact_for_llm("My name is John Smith")
+
+    assert recording_logger.events == ["pii_presidio_unavailable"]
+
+
+def test_analysis_failure_falls_back_to_the_regex_result(stub_presidio, recording_logger):
+    class _BrokenAnalyzer:
+        def analyze(self, text, language, entities):
+            raise RuntimeError("analysis blew up")
+
+    stub_presidio(
+        lambda: pii._Engines(analyzer=_BrokenAnalyzer(), anonymizer=None, operators={})
+    )
+
+    text, counts = redact_for_llm("My name is John Smith, email jane.doe@example.com")
+
+    assert text == "My name is John Smith, email [REDACTED_EMAIL]"
+    assert counts == {"email": 1}
+    assert recording_logger.events == ["pii_presidio_failed"]
+
+
+def test_routing_node_audit_counts_carry_the_new_categories(db, seeded, fake_llm):
+    """The audit row keeps its shape: category counts only, no raw value."""
+    client = fake_llm(
+        [{"intent": "book", "department": "Cardiology", "confidence": 0.9, "reason": "ask"}]
+    )
+    state = {
+        "workflow_id": 1,
+        "user_id": 1,
+        "patient_id": 1,
+        "request_text": "Book cardiology for John Smith",
+    }
+
+    routing.run(state, db)
+
+    sent_user_content = client.chat.completions.calls[0]["messages"][1]["content"]
+    assert "[REDACTED_NAME]" in sent_user_content
+    assert "John Smith" not in sent_user_content
+
+    rows = _pii_audit(db, 1)
+    assert len(rows) == 1
+    assert rows[0].metadata_json["counts"] == {"name": 1}
+    assert "John Smith" not in str(rows[0].metadata_json)

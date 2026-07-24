@@ -8,18 +8,61 @@ patient. `agents/safety.py` composes the patient-facing `final_response` from
 freshly queried database rows, not from patient-submitted text, so it never
 calls into this module (see that node's own docstring).
 
-`PIIRedactor.redact` finds five categories of PII with battle-tested regex
-families (each documented at its definition below) and replaces every match
-with a fixed `[REDACTED_<CATEGORY>]` token, so the shape of the text survives
-for the LLM (still a sentence about an appointment) while the sensitive value
-does not. `redact_for_llm` is the one function every call site should import:
-a thin wrapper around a shared, compiled `PIIRedactor` instance, so the whole
-redaction rule (categories, tokens, ordering) lives in this one file.
+`redact_for_llm` is the one function every call site should import. It runs
+two passes over the text, in this order:
+
+Pass 1, regex (`PIIRedactor.redact`): five categories of PII found with
+battle-tested regex families (each documented at its definition below), every
+match replaced by a fixed `[REDACTED_<CATEGORY>]` token, so the shape of the
+text survives for the LLM (still a sentence about an appointment) while the
+sensitive value does not. Deterministic, no model, no state.
+
+Pass 2, Presidio (`presidio-analyzer` + `presidio-anonymizer` over spaCy
+`en_core_web_sm` / `de_core_news_sm`): named-entity recognition over what pass
+1 left, for the categories no regex can describe - person names and locations -
+plus a second net under the email, phone and IBAN families. Its findings are
+replaced with the same token style (`[REDACTED_NAME]`, `[REDACTED_LOCATION]`),
+so the counts dict and the audit row keep their shape: category counts only,
+never a value.
+
+Score threshold: a Presidio result below `_PRESIDIO_SCORE_THRESHOLD` (0.5) is
+ignored. The number is chosen against what the engines actually return here -
+spaCy NER entities arrive at 0.85, a validated email or IBAN at 1.0, and a
+bare phone-number shape with no context word at 0.4. 0.5 keeps the first two
+groups and drops the phone-shape guesses, which pass 1 has already had its own
+stricter go at.
+
+Language: pass 2 analyzes with the language the caller names
+(`PatientProfile.preferred_language`, "en" or "de"). With no language it
+analyzes English, and adds a German pass only when the text carries German
+cues (`_GERMAN_HINT_RE`). That gate is deliberate: `de_core_news_sm` reads
+English admin text badly enough to tag "Book", "Insurance card" and "sinus
+rhythm" as person names, so an unconditional German pass would redact half of
+an ordinary English request.
+
+Failure containment: the engines are built lazily on first use and held as a
+module-level singleton (construction loads two spaCy models, about a second).
+A build failure is logged once per process as `pii_presidio_unavailable` and
+never retried; an analysis failure is logged as `pii_presidio_failed`. Both
+return the pass-1 result unchanged, so a Presidio problem degrades redaction
+back to the regex families instead of blocking a patient request.
+
+Runtime needs no network: the spaCy models are installed packages, pinned by
+wheel URL in the root requirements.txt, and the one library call underneath
+Presidio that could reach out (tldextract, behind its email validation) is
+capped in `_build_engines` before it is ever imported.
 """
 
 from __future__ import annotations
 
+import os
 import re
+from collections import Counter
+from typing import Any, NamedTuple
+
+from app.logging_setup import get_logger
+
+logger = get_logger(__name__)
 
 # --- Category patterns -------------------------------------------------------
 # Applied in a fixed order (see `_PIPELINE` below) chosen so an earlier,
@@ -104,6 +147,9 @@ _TOKENS: dict[str, str] = {
     "health_insurance": "[REDACTED_HEALTH_INSURANCE]",
     "phone": "[REDACTED_PHONE]",
     "date_of_birth": "[REDACTED_DOB]",
+    # Pass 2 only (Presidio): no regex family describes these.
+    "name": "[REDACTED_NAME]",
+    "location": "[REDACTED_LOCATION]",
 }
 
 # Category -> patterns, applied in this exact order (see comments above for
@@ -146,11 +192,192 @@ class PIIRedactor:
 _redactor = PIIRedactor()
 
 
-def redact_for_llm(text: str) -> tuple[str, dict[str, int]]:
+# --- Pass 2: Presidio --------------------------------------------------------
+
+# Presidio entity type -> the category (and so the token) it is reported as.
+# PERSON and LOCATION are what pass 2 exists for. The other three are the
+# second net under the regex families: a value pass 1's pattern missed still
+# comes out as the same token pass 1 would have used, never a new one.
+_PRESIDIO_CATEGORIES: dict[str, str] = {
+    "PERSON": "name",
+    "LOCATION": "location",
+    "EMAIL_ADDRESS": "email",
+    "PHONE_NUMBER": "phone",
+    "IBAN_CODE": "iban",
+}
+
+# See the module docstring for how this number was chosen.
+_PRESIDIO_SCORE_THRESHOLD = 0.5
+
+# Small spaCy models only (the ceiling this project sets for a 16 GB machine).
+# Both are installed as packages, pinned by wheel URL in the root
+# requirements.txt, so nothing is downloaded at runtime.
+_SPACY_MODELS: dict[str, str] = {"en": "en_core_web_sm", "de": "de_core_news_sm"}
+
+# German cues: function words and umlauts that an English request does not
+# carry. One hit is enough to add the German pass (see the module docstring for
+# why the German model is not run unconditionally). Over-triggering is the safe
+# direction: it only adds a second opinion on the same text.
+_GERMAN_HINT_RE = re.compile(
+    r"(?i)(?<!\w)(ich|mein|meine|meinen|meiner|mir|mich|bitte|termin|arzt|"
+    r"aerztin|krankenhaus|und|ist|sind|nicht|kein|keine|einen|eine|der|die|das|"
+    r"wohne|wohnhaft|geboren|habe|hat|fuer|von|zum|zur|sehr|geehrte)(?!\w)"
+    r"|[äöüßÄÖÜ]"
+)
+
+# A token pass 1 already wrote. Pass 2 never touches one: without this an
+# `[REDACTED_EMAIL]` could be read as a name and rewritten a second time.
+_TOKEN_RE = re.compile(r"\[REDACTED_[A-Z_]+\]")
+
+
+class _Engines(NamedTuple):
+    """The Presidio objects, built together and cached together."""
+
+    analyzer: Any
+    anonymizer: Any
+    operators: dict[str, Any]
+
+
+_engines: _Engines | None = None
+_engines_unavailable = False
+
+
+def _build_operators() -> dict[str, Any]:
+    """Presidio operator per entity type: replace the span with this module's
+    token for that category."""
+    from presidio_anonymizer.entities import OperatorConfig
+
+    return {
+        entity: OperatorConfig("replace", {"new_value": _TOKENS[category]})
+        for entity, category in _PRESIDIO_CATEGORIES.items()
+    }
+
+
+def _build_engines() -> _Engines:
+    """Load both spaCy models and wire them into an analyzer. About a second of
+    work and tens of MB of memory, so it happens once, on first use."""
+    # presidio's email recognizer validates a match through tldextract, which
+    # by default tries to refresh the public suffix list over the network and
+    # falls back to its bundled snapshot. Cap that attempt before tldextract is
+    # imported: this module's contract is that no patient request waits on a
+    # network call.
+    os.environ.setdefault("TLDEXTRACT_CACHE_TIMEOUT", "2")
+
+    from presidio_analyzer import AnalyzerEngine
+    from presidio_analyzer.nlp_engine import NlpEngineProvider
+    from presidio_anonymizer import AnonymizerEngine
+
+    nlp_engine = NlpEngineProvider(
+        nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [
+                {"lang_code": lang, "model_name": model}
+                for lang, model in _SPACY_MODELS.items()
+            ],
+        }
+    ).create_engine()
+    analyzer = AnalyzerEngine(
+        nlp_engine=nlp_engine, supported_languages=list(_SPACY_MODELS)
+    )
+    return _Engines(
+        analyzer=analyzer, anonymizer=AnonymizerEngine(), operators=_build_operators()
+    )
+
+
+def _get_engines() -> _Engines | None:
+    """The cached engines, or None when they cannot be built. A build failure
+    is remembered, so a broken install logs one warning for the process instead
+    of one per patient request."""
+    global _engines, _engines_unavailable
+    if _engines is not None:
+        return _engines
+    if _engines_unavailable:
+        return None
+    try:
+        _engines = _build_engines()
+    except Exception as exc:  # noqa: BLE001 - any failure degrades to pass 1
+        _engines_unavailable = True
+        logger.warning("pii_presidio_unavailable", error=str(exc))
+        return None
+    return _engines
+
+
+def reset_engines_for_tests() -> None:
+    """Drop the cached engines (and any remembered build failure). Tests that
+    swap `_build_engines` call this on the way in and on the way out."""
+    global _engines, _engines_unavailable
+    _engines = None
+    _engines_unavailable = False
+
+
+def _languages_for(text: str, language: str | None) -> tuple[str, ...]:
+    """Which analyzer languages to run. A caller's language wins; with none,
+    English always runs and German joins it on German-looking text."""
+    named = (language or "").strip().lower()[:2]
+    if named in _SPACY_MODELS:
+        return (named,)
+    if _GERMAN_HINT_RE.search(text):
+        return ("en", "de")
+    return ("en",)
+
+
+def _presidio_pass(text: str, language: str | None) -> tuple[str, dict[str, int]]:
+    """Run the analyzer over pass 1's output and replace what it finds.
+
+    Returns the text unchanged and no counts whenever the engines are missing,
+    the analysis fails, or nothing clears the score threshold.
+    """
+    engines = _get_engines()
+    if engines is None:
+        return text, {}
+
+    existing = [match.span() for match in _TOKEN_RE.finditer(text)]
+    try:
+        results = []
+        for lang in _languages_for(text, language):
+            results.extend(
+                engines.analyzer.analyze(
+                    text=text, language=lang, entities=list(_PRESIDIO_CATEGORIES)
+                )
+            )
+        keep = [
+            result
+            for result in results
+            if result.score >= _PRESIDIO_SCORE_THRESHOLD
+            and not any(result.start < end and start < result.end for start, end in existing)
+        ]
+        if not keep:
+            return text, {}
+        # The anonymizer resolves overlaps between the two language passes, so
+        # a name both models found is replaced (and counted) exactly once.
+        anonymized = engines.anonymizer.anonymize(
+            text=text, analyzer_results=keep, operators=engines.operators
+        )
+        counts = Counter(
+            _PRESIDIO_CATEGORIES[item.entity_type] for item in anonymized.items
+        )
+    except Exception as exc:  # noqa: BLE001 - any failure degrades to pass 1
+        logger.warning("pii_presidio_failed", error=str(exc))
+        return text, {}
+    return anonymized.text, dict(counts)
+
+
+def redact_for_llm(text: str, language: str | None = None) -> tuple[str, dict[str, int]]:
     """Redact `text` before it is embedded in a prompt bound for the LLM
     provider. The one call every agent node uses - see the module docstring
-    for the boundary this function draws and which nodes call it
-    (`agents/routing.py`, `agents/coordinator.py`, `agents/appointment.py`,
-    `agents/document.py`).
+    for the boundary this function draws, the two passes it runs and which
+    nodes call it (`agents/routing.py`, `agents/coordinator.py`,
+    `agents/appointment.py`, `agents/document.py`).
+
+    `language` is the patient's `preferred_language` ("en" or "de") when the
+    caller has it. Anything else, including None, lets the function decide
+    from the text.
     """
-    return _redactor.redact(text)
+    redacted, counts = _redactor.redact(text)
+    if not redacted.strip():
+        return redacted, counts
+
+    redacted, ner_counts = _presidio_pass(redacted, language)
+    for category, found in ner_counts.items():
+        counts[category] = counts.get(category, 0) + found
+    return redacted, counts
