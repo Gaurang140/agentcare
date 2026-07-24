@@ -28,6 +28,14 @@ class AgentState(TypedDict, total=False):
     reminders: Annotated[list[dict], operator.add]
     safety_flags: Annotated[list[str], operator.add]
     escalation_id: int | None
+    # Escalations this run has already had back from a human. Plain
+    # `escalation_id` goes to None when an approved run carries on, so
+    # without this list the next handoff would reuse the row staff already
+    # closed instead of opening one they can still see (agents/graph.py).
+    resolved_escalation_ids: Annotated[list[int], operator.add]
+    # The reviewing staff member's note, on an approved uncertainty case
+    # only: routing hint for the agents, never patient-facing text.
+    staff_guidance: str | None
     plan: list[str]  # coordinator's remaining steps
     completed_steps: Annotated[list[str], operator.add]
     final_response: str | None

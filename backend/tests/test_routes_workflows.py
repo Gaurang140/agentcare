@@ -281,6 +281,41 @@ def test_resume_route_returns_status_and_writes_audit_with_real_actor(
     assert audit.actor_id == user.id
 
 
+def test_resume_route_refuses_a_run_waiting_for_staff(patient_client, db_session, fake_llm):
+    """The crash-recovery resume and the staff decision are different things.
+    A run parked at the escalate node's interrupt only moves when a staff
+    member decides, so the patient-facing resume must refuse it rather than
+    re-enter the thread and re-raise the same interrupt."""
+    fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {"intent": "other", "department": None, "confidence": 0.4, "reason": "ambiguous"},
+            {"next_step": "finalize", "reasoning": "coordinator missed the escalation"},
+        ]
+    )
+
+    resp = patient_client.post(
+        "/api/requests", data={"text": "something about an appointment, maybe"}
+    )
+    assert resp.status_code == 202, resp.text
+    workflow_id = resp.json()["workflow_id"]
+    run_workflow_background(workflow_id, [])
+
+    refused = patient_client.post(f"/api/workflows/{workflow_id}/resume")
+
+    assert refused.status_code == 400, refused.text
+    db_session.expire_all()
+    run = db_session.get(WorkflowRun, workflow_id)
+    assert run.status == "waiting_approval"
+    # The refusal is not a silent no-op audited as a resume.
+    assert (
+        db_session.query(AuditEvent)
+        .filter_by(action="workflow.resumed", entity_type="workflow_run", entity_id=workflow_id)
+        .count()
+        == 0
+    )
+
+
 # --- Patient-safe projections ------------------------------------------------
 # The patient portal renders `escalation.reason` verbatim and can read the whole
 # `state` dict straight out of the JSON, so neither may carry internal detail:
@@ -320,19 +355,45 @@ def _routing_failure_script() -> list:
     ]
 
 
-def _failed_run_id(patient_client) -> int:
+_STAFF_NOTE = "reviewed by dr weber, patient called back on 0170-1234567"
+
+
+def _failed_run_id(patient_client, staff_client, db_session) -> int:
+    """A run whose routing agent crashed, taken all the way to failed.
+
+    The escalate node parks it at an interrupt first, so a staff decision is
+    part of getting there now - the same two steps the staff route takes,
+    taken through the staff route itself. Approving an agent_failure case
+    does not hand it back to the agents: it closes on the template, which is
+    why no further LLM response is scripted."""
     resp = patient_client.post(
         "/api/requests", data={"text": "I need a cardiology appointment next week"}
     )
     assert resp.status_code == 202, resp.text
     workflow_id = resp.json()["workflow_id"]
     run_workflow_background(workflow_id, [])
+
+    db_session.expire_all()
+    assert db_session.get(WorkflowRun, workflow_id).status == "waiting_approval"
+    escalation = (
+        db_session.query(Escalation)
+        .filter_by(workflow_run_id=workflow_id)
+        .order_by(Escalation.id.desc())
+        .first()
+    )
+    resolved = staff_client.post(
+        f"/api/staff/escalations/{escalation.id}/resolve",
+        json={"approve": True, "note": _STAFF_NOTE},
+    )
+    assert resolved.status_code == 200, resolved.text
     return workflow_id
 
 
-def test_failed_run_hides_internal_detail_from_the_patient(patient_client, db_session, fake_llm):
+def test_failed_run_hides_internal_detail_from_the_patient(
+    patient_client, independent_staff_client, db_session, fake_llm
+):
     fake_llm(_routing_failure_script())
-    workflow_id = _failed_run_id(patient_client)
+    workflow_id = _failed_run_id(patient_client, independent_staff_client, db_session)
 
     db_session.expire_all()
     escalation = db_session.query(Escalation).filter_by(workflow_run_id=workflow_id).first()
@@ -349,15 +410,21 @@ def test_failed_run_hides_internal_detail_from_the_patient(patient_client, db_se
     assert _CRASH_MARKER not in body
     assert "routing agent failed" not in body
     assert set(payload["state"] or {}) <= _PATIENT_VISIBLE_STATE_KEYS
+    # The reviewer wrote the note for other staff, and on an approved run it
+    # is what steered the agents. Either way it is not something the patient
+    # reads: they get the templated answer on the run instead.
+    assert _STAFF_NOTE not in body
+    assert payload["escalation"]["resolution_note"] is None
+    assert payload["state"]["final_response"]
 
 
 def test_staff_still_see_the_raw_failure_detail_on_the_same_endpoint(
-    patient_client, independent_staff_client, fake_llm
+    patient_client, independent_staff_client, db_session, fake_llm
 ):
     """The staff detail sheet reads the same route as the portal, so masking
     has to be role-gated rather than applied to the payload for everyone."""
     fake_llm(_routing_failure_script())
-    workflow_id = _failed_run_id(patient_client)
+    workflow_id = _failed_run_id(patient_client, independent_staff_client, db_session)
 
     detail = independent_staff_client.get(f"/api/workflows/{workflow_id}")
     assert detail.status_code == 200, detail.text
@@ -365,6 +432,7 @@ def test_staff_still_see_the_raw_failure_detail_on_the_same_endpoint(
 
     assert "routing agent failed" in payload["escalation"]["reason"]
     assert _CRASH_MARKER in payload["escalation"]["reason"]
+    assert payload["escalation"]["resolution_note"] == _STAFF_NOTE
     assert _CRASH_MARKER in payload["state"]["error"]
     assert payload["state"]["plan"] == ["route_department", "escalate"]
 

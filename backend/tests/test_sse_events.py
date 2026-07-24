@@ -15,7 +15,7 @@ import pytest
 
 from app.api.routes_workflows import run_workflow_background
 from app.config import settings
-from app.models import AuditEvent, User
+from app.models import AuditEvent, Escalation, User, WorkflowRun
 from app.services import workflow_service
 
 
@@ -93,13 +93,35 @@ def _routing_failure_script() -> list:
     ]
 
 
-def _failed_run_id(patient_client) -> int:
+def _failed_run_id(patient_client, staff_client, db_session) -> int:
+    """A run whose routing agent crashed, taken all the way to failed.
+
+    The escalate node parks it at an interrupt on the way, so a staff
+    decision is now part of reaching a terminal status - and every stream
+    read below depends on the run being terminal, or the generator would
+    poll until the test timed out. Approving an agent_failure case closes it
+    on a template rather than handing it back to the agents, so nothing
+    further is scripted."""
     resp = patient_client.post(
         "/api/requests", data={"text": "I need a cardiology appointment next week"}
     )
     assert resp.status_code == 202, resp.text
     workflow_id = resp.json()["workflow_id"]
     run_workflow_background(workflow_id, [])
+
+    db_session.expire_all()
+    assert db_session.get(WorkflowRun, workflow_id).status == "waiting_approval"
+    escalation = (
+        db_session.query(Escalation)
+        .filter_by(workflow_run_id=workflow_id)
+        .order_by(Escalation.id.desc())
+        .first()
+    )
+    resolved = staff_client.post(
+        f"/api/staff/escalations/{escalation.id}/resolve",
+        json={"approve": True, "note": "handled by the practice team"},
+    )
+    assert resolved.status_code == 200, resolved.text
     return workflow_id
 
 
@@ -118,10 +140,10 @@ def _streamed_metadata(test_client, workflow_id: int) -> list[dict]:
 
 
 def test_stream_hides_raw_exception_text_from_the_patient(
-    patient_client, db_session, fake_llm
+    patient_client, independent_staff_client, db_session, fake_llm
 ):
     fake_llm(_routing_failure_script())
-    workflow_id = _failed_run_id(patient_client)
+    workflow_id = _failed_run_id(patient_client, independent_staff_client, db_session)
 
     db_session.expire_all()
     stored = [
@@ -140,12 +162,12 @@ def test_stream_hides_raw_exception_text_from_the_patient(
 
 
 def test_staff_still_see_the_raw_exception_text_on_the_same_stream(
-    patient_client, independent_staff_client, fake_llm
+    patient_client, independent_staff_client, db_session, fake_llm
 ):
     """Staff read the same route as the portal, so masking has to be
     role-gated rather than applied to every caller's payload."""
     fake_llm(_routing_failure_script())
-    workflow_id = _failed_run_id(patient_client)
+    workflow_id = _failed_run_id(patient_client, independent_staff_client, db_session)
 
     streamed = _streamed_metadata(independent_staff_client, workflow_id)
     errors = [metadata["error"] for metadata in streamed if "error" in metadata]

@@ -92,6 +92,18 @@ export default function WorkflowDetailPage() {
         </CardContent>
       </Card>
 
+      {detail?.status === "waiting_approval" ? (
+        <Card className="border-primary/30 bg-muted/40">
+          <CardHeader>
+            <CardTitle className="text-base">With the practice team</CardTitle>
+            <CardDescription>
+              A staff member is reviewing this request. It continues on its own once they
+              decide, and this page updates when it does.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      ) : null}
+
       {isTerminal ? (
         <Card className="border-primary/30 bg-muted/40">
           <CardHeader>

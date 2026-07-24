@@ -32,6 +32,7 @@ from app.schemas.staff import (
     SlotGenerateRequest,
     WorkflowRunSummary,
 )
+from app.services import workflow_service
 from app.tools.agent_rule_tools import create_rule, list_rules, set_rule_active
 from app.tools.appointment_tools import generate_slots_for_doctor
 from app.tools.department_tools import (
@@ -111,6 +112,24 @@ def resolve_escalation_route(
     escalation = db.get(Escalation, escalation_id)
     if escalation is None:
         raise NotFoundError(f"Escalation {escalation_id} not found")
+
+    # The decision is not only a record: a run parked at the escalate node's
+    # interrupt is waiting for it, and approving an uncertainty case sends
+    # that run back to the agents to finish what the patient asked for. Done
+    # inline rather than in a background task so the staff member's next
+    # screen already shows the outcome; the run is a handful of LLM calls and
+    # a crash inside it is contained by resume_with_decision.
+    if escalation.workflow_run_id is not None:
+        run = db.get(WorkflowRun, escalation.workflow_run_id)
+        if run is not None and run.status == "waiting_approval":
+            workflow_service.resume_with_decision(
+                db,
+                run.id,
+                approved=payload.approve,
+                note=payload.note,
+                reviewer_id=staff.id,
+            )
+
     return _to_escalation_out(escalation)
 
 

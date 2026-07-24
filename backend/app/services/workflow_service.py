@@ -20,13 +20,14 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from langgraph.types import Command
 from sqlalchemy.orm import Session
 
 from app.agents.graph import build_graph, open_checkpointer
 from app.agents.responses import emergency_response, medical_refusal_response
 from app.agents.state import AgentState
 from app.config import settings
-from app.exceptions import NotFoundError
+from app.exceptions import NotFoundError, ValidationError
 from app.logging_setup import get_logger
 from app.models import User, WorkflowRun
 from app.safety.guardrails import ScreenResult, screen_request
@@ -104,6 +105,59 @@ def _observability(config: dict[str, Any], workflow_id: int):
     config.setdefault("callbacks", []).append(CallbackHandler())
     with propagate_attributes(metadata={"workflow_id": workflow_id}):
         yield
+
+
+# The key LangGraph adds to invoke()'s result when the run stopped on an
+# interrupt() instead of finishing. Its value is a list of Interrupt objects,
+# which are not JSON-serializable and must not reach WorkflowRun.state.
+_INTERRUPT_KEY = "__interrupt__"
+
+
+def _interrupt_payload(result: dict) -> dict:
+    """What the escalate node handed to `interrupt()`: the escalation and
+    workflow ids of the handoff the run is now waiting on."""
+    interrupts = result.get(_INTERRUPT_KEY) or ()
+    value = getattr(interrupts[0], "value", None) if interrupts else None
+    return value if isinstance(value, dict) else {}
+
+
+def _paused_state(result: dict, escalation_id: int | None) -> dict:
+    """The checkpointed state to store on a run parked at the interrupt.
+
+    `final_response` is cleared: a run waiting for a human has no answer
+    yet, and the handoff line the escalating specialist wrote on its way out
+    is not one. The escalation id comes from the interrupt payload rather
+    than the state, because a coordinator-chosen escalation is opened inside
+    the paused node and its own writes never landed.
+    """
+    state = {key: value for key, value in result.items() if key != _INTERRUPT_KEY}
+    state["final_response"] = None
+    if escalation_id is not None:
+        state["escalation_id"] = escalation_id
+    return state
+
+
+def _apply_pause(db: Session, workflow_run: WorkflowRun, result: dict) -> bool:
+    """Park the run at the escalate node's interrupt, and say whether that is
+    what happened. Commits, because a paused run has to survive the process
+    that paused it - the decision arrives in some later request."""
+    if not result.get(_INTERRUPT_KEY):
+        return False
+
+    escalation_id = _interrupt_payload(result).get("escalation_id")
+    workflow_run.status = "waiting_approval"
+    workflow_run.current_step = "escalate"
+    workflow_run.state = _paused_state(result, escalation_id)
+    write_audit(
+        db,
+        None,
+        "workflow.waiting_approval",
+        "workflow_run",
+        workflow_run.id,
+        {"escalation_id": escalation_id},
+    )
+    db.commit()
+    return True
 
 
 def _final_status(state: dict) -> str:
@@ -209,13 +263,17 @@ def _injection_blocked_run(
     return workflow_run
 
 
-def _invoke_graph(db: Session, workflow_run: WorkflowRun, graph_input: dict | None) -> dict | None:
-    """Shared invoke wrapper for both start and resume: never lets a graph
-    exception become a 500. Any exception that escapes graph.invoke()
-    (a real bug, not a node-level LLM/tool failure - those are already
-    caught inside each node and surface as state["error"] instead) is
+def _invoke_graph(
+    db: Session, workflow_run: WorkflowRun, graph_input: dict | Command | None
+) -> dict | None:
+    """Shared invoke wrapper for start, crash-resume and the staff decision:
+    never lets a graph exception become a 500. Any exception that escapes
+    graph.invoke() (a real bug, not a node-level LLM/tool failure - those are
+    already caught inside each node and surface as state["error"] instead) is
     caught here, logged, and turned into a failed WorkflowRun with its own
-    agent_failure escalation."""
+    agent_failure escalation. A stop on `interrupt()` is not an exception:
+    LangGraph returns normally with a "__interrupt__" key, handled by the
+    callers through `_apply_pause`."""
     graph = get_graph()
     config: dict[str, Any] = {
         "configurable": {"thread_id": workflow_run.thread_id, "db": db},
@@ -300,7 +358,7 @@ def execute_workflow(
     }
 
     final_state = _invoke_graph(db, workflow_run, initial_state)
-    if final_state is not None:
+    if final_state is not None and not _apply_pause(db, workflow_run, final_state):
         _apply_final_state(workflow_run, final_state)
         db.commit()
     return workflow_run
@@ -324,13 +382,52 @@ def start_workflow(
 def resume_workflow(db: Session, workflow_run_id: int) -> WorkflowRun:
     """Re-enter the same thread from its last checkpoint (the restart demo):
     `graph.invoke(None, config)`. A no-op on an already-completed thread -
-    nothing left to resume, so no node re-executes and nothing duplicates."""
+    nothing left to resume, so no node re-executes and nothing duplicates.
+
+    Refuses a run waiting for staff. That thread does resume, but only into
+    the same interrupt it is already stopped on, and only a decision
+    (`resume_with_decision`) gets it past there. Answering the patient's own
+    resume with a 400 says so, rather than looking like a retry that quietly
+    changed nothing."""
     workflow_run = db.get(WorkflowRun, workflow_run_id)
     if workflow_run is None:
         raise NotFoundError(f"WorkflowRun {workflow_run_id} not found")
+    if workflow_run.status == "waiting_approval":
+        raise ValidationError("This request is waiting for staff review")
 
     final_state = _invoke_graph(db, workflow_run, None)
-    if final_state:
+    if final_state and not _apply_pause(db, workflow_run, final_state):
+        _apply_final_state(workflow_run, final_state)
+        db.commit()
+    return workflow_run
+
+
+def resume_with_decision(
+    db: Session, workflow_run_id: int, approved: bool, note: str | None, reviewer_id: int
+) -> WorkflowRun:
+    """Hand a staff decision to a run parked at the escalate node's
+    interrupt, and let the graph carry it out: an approved uncertainty case
+    goes back to the coordinator and finishes the patient's request, anything
+    else closes on a template (see `agents/graph.py::_escalate_node`).
+
+    A no-op on a run that is not waiting, which makes a double-clicked
+    approve harmless. The invoke goes through `_invoke_graph`, so a crash
+    while resuming ends as a failed run with its own escalation, exactly like
+    a crash on the first pass, and never as a 500 out of the staff route.
+    """
+    workflow_run = db.get(WorkflowRun, workflow_run_id)
+    if workflow_run is None:
+        raise NotFoundError(f"WorkflowRun {workflow_run_id} not found")
+    if workflow_run.status != "waiting_approval":
+        return workflow_run
+
+    resume = Command(resume={"approved": approved, "note": note, "reviewer_id": reviewer_id})
+    final_state = _invoke_graph(db, workflow_run, resume)
+    if final_state is None:
+        return workflow_run
+    # A resumed run can reach the escalate node a second time: a legitimate
+    # second handoff, on its own escalation row, waiting for staff again.
+    if not _apply_pause(db, workflow_run, final_state):
         _apply_final_state(workflow_run, final_state)
         db.commit()
     return workflow_run

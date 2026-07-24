@@ -35,7 +35,7 @@ class CoordinatorOutput(BaseModel):
 
 
 def _user_prompt(state: AgentState, request_text: str) -> str:
-    return (
+    prompt = (
         f"Patient request: {request_text}\n"
         f"Intent: {state.get('intent')}\n"
         f"Department: {state.get('department_name')}\n"
@@ -45,6 +45,14 @@ def _user_prompt(state: AgentState, request_text: str) -> str:
         f"Prior decisions (plan): {state.get('plan') or []}\n"
         f"Error, if any: {state.get('error')}"
     )
+    # Only set on a run a staff member approved out of the escalate node
+    # (agents/graph.py): the note that unblocked it, so the decision that
+    # follows is made with what the human clarified rather than against the
+    # same ambiguity that stopped the run.
+    guidance = state.get("staff_guidance")
+    if guidance:
+        prompt += f"\nStaff guidance: {guidance}"
+    return prompt
 
 
 def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:

@@ -10,12 +10,14 @@ the real system prompts would make an LLM choose.
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 import pytest
 from sqlalchemy.orm import Session
 
-from app.agents.responses import staff_review_response
+from app.agents.responses import staff_decision_response
+from app.api.routes_workflows import _patient_state
 from app.config import settings
 from app.models import (
     Appointment,
@@ -28,8 +30,12 @@ from app.models import (
 )
 from app.services import workflow_service
 from app.tools.appointment_tools import get_available_slots
+from app.tools.escalation_tools import resolve_escalation
 
 _SLOT_WINDOW_DAYS = 14
+
+# Seeded user 3 is the staff account (see tests/test_responses.py).
+_REVIEWER_ID = 3
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +94,36 @@ def _full_booking_script(slot_id: int) -> list[dict]:
     ]
 
 
+def _uncertainty_pause_script() -> list[dict]:
+    """The three scripted calls that park a run at the escalate node's
+    interrupt: the coordinator routes, routing gives up on an ambiguous
+    request and opens its own uncertainty escalation, and the coordinator
+    burns one more decision before the graph's short-circuit sends the run
+    to escalate regardless of what it picked."""
+    return [
+        {"next_step": "route_department", "reasoning": "nothing routed yet"},
+        {"intent": "other", "department": None, "confidence": 0.4, "reason": "ambiguous"},
+        {"next_step": "finalize", "reasoning": "coordinator missed the escalation"},
+    ]
+
+
+def _staff_decision(db, run, *, approved: bool, note: str):
+    """The two steps routes_staff.resolve_escalation_route takes, in its
+    order: record the decision on the escalation row, then hand it to the
+    graph waiting at the interrupt."""
+    escalation = (
+        db.query(Escalation)
+        .filter_by(workflow_run_id=run.id)
+        .order_by(Escalation.id.desc())
+        .first()
+    )
+    assert escalation is not None
+    resolve_escalation(db, escalation.id, _REVIEWER_ID, approved, note)
+    return workflow_service.resume_with_decision(
+        db, run.id, approved=approved, note=note, reviewer_id=_REVIEWER_ID
+    )
+
+
 def test_full_booking_workflow_persists_everything(db, seeded, fake_llm):
     dept_id = _cardiology_id(db)
     slot_id = _first_free_slot_id(db, dept_id)
@@ -132,9 +168,11 @@ def test_node_failure_escalates_and_marks_run_failed(db, seeded, fake_llm):
     """The 3rd LLM call (the coordinator's second decision) raises. The
     coordinator node itself catches it and reports state["error"] instead
     of crashing the graph; the graph's own routing then forces escalate
-    regardless of the now-stale plan, so the run still ends cleanly -
-    failed, with its own agent_failure escalation, never a raised
-    exception out of start_workflow (never a 500 upstream)."""
+    regardless of the now-stale plan, so the run still ends cleanly - with
+    its own agent_failure escalation and a human, never a raised exception
+    out of start_workflow (never a 500 upstream). It reaches the human
+    first: the run parks at the escalate node's interrupt and only the
+    staff decision closes it, failed."""
     client = fake_llm(
         [
             {"next_step": "route_department", "reasoning": "nothing routed yet"},
@@ -146,19 +184,23 @@ def test_node_failure_escalates_and_marks_run_failed(db, seeded, fake_llm):
     run = workflow_service.start_workflow(
         db, _patient_user(db), "I need a cardiology appointment next week", []
     )
+    assert run.status == "waiting_approval"
 
-    assert run.status == "failed"
+    resumed = _staff_decision(db, run, approved=True, note="taking this one by hand")
+
+    assert resumed.status == "failed"
     assert db.query(Escalation).filter_by(severity="agent_failure").count() == 1
     assert len(client.chat.completions.calls) == 3
 
 
-def test_specialist_escalation_ends_the_run(db, seeded, fake_llm):
+def test_specialist_escalation_stops_the_run_at_the_escalate_node(db, seeded, fake_llm):
     """Routing escalates on low confidence and the coordinator's next
     decision ignores it ("finalize"). The graph must not take that decision:
     an escalation_id on the state routes straight to the escalate node, so
-    the safety agent never runs, the staff-review answer the escalating
-    specialist wrote survives, and the escalate node reuses the row routing
-    already opened instead of filing a second one for the same run."""
+    the safety agent never runs and the escalate node reuses the row routing
+    already opened instead of filing a second one for the same run. The
+    answer the patient ends up with comes from the staff decision, not from
+    the specialist that gave up."""
     client = fake_llm(
         [
             {"next_step": "route_department", "reasoning": "nothing routed yet"},
@@ -170,10 +212,13 @@ def test_specialist_escalation_ends_the_run(db, seeded, fake_llm):
     run = workflow_service.start_workflow(
         db, _patient_user(db), "something about an appointment, maybe", []
     )
+    assert run.status == "waiting_approval"
 
-    assert run.status == "escalated"
+    resumed = _staff_decision(db, run, approved=False, note="nothing bookable here")
+
+    assert resumed.status == "escalated"
     assert db.query(Escalation).count() == 1
-    assert run.state["final_response"] == staff_review_response(db, run.patient_id)
+    assert resumed.state["final_response"] == staff_decision_response(db, resumed.patient_id, False)
     assert db.query(AuditEvent).filter_by(action="agent.safety.completed").count() == 0
     assert len(client.chat.completions.calls) == 3
 
@@ -181,9 +226,11 @@ def test_specialist_escalation_ends_the_run(db, seeded, fake_llm):
 def test_appointment_escalation_is_not_filed_twice(db, seeded, fake_llm):
     """The appointment agent gives up after two invented slot ids and files
     its own agent_failure escalation without setting state["error"]. The run
-    ends there (status escalated, not failed), nothing is booked, and the
-    escalate node reuses that row - so the staff queue shows one escalation
-    for the run, still carrying the severity the appointment agent chose."""
+    stops there for staff, nothing is booked, and the escalate node reuses
+    that row - so the staff queue shows one escalation for the run, still
+    carrying the severity the appointment agent chose. The node writes its
+    exit audit once, on the far side of the interrupt, even though the
+    resumed node re-executes everything above it."""
     client = fake_llm(
         [
             {"next_step": "route_department", "reasoning": "nothing routed yet"},
@@ -198,8 +245,11 @@ def test_appointment_escalation_is_not_filed_twice(db, seeded, fake_llm):
     run = workflow_service.start_workflow(
         db, _patient_user(db), "I need a cardiology appointment next week", []
     )
+    assert run.status == "waiting_approval"
 
-    assert run.status == "escalated"
+    resumed = _staff_decision(db, run, approved=False, note="no slot to give")
+
+    assert resumed.status == "escalated"
     assert db.query(Appointment).count() == 0
     escalations = db.query(Escalation).all()
     assert [e.severity for e in escalations] == ["agent_failure"]
@@ -259,10 +309,16 @@ def test_finalize_before_followup_escalates_instead_of_completing_empty(db, seed
     run = workflow_service.start_workflow(
         db, _patient_user(db), "I need a cardiology appointment next week", []
     )
-
-    assert run.status == "escalated"
+    assert run.status == "waiting_approval"
+    # The escalation the staff queue shows was opened by the escalate node
+    # itself here, before the interrupt, so it is durable while the run waits.
     assert [e.severity for e in db.query(Escalation).all()] == ["uncertainty"]
-    assert run.state["final_response"] == staff_review_response(db, run.patient_id)
+
+    resumed = _staff_decision(db, run, approved=False, note="agent skipped the workflow")
+
+    assert resumed.status == "escalated"
+    assert [e.severity for e in db.query(Escalation).all()] == ["uncertainty"]
+    assert resumed.state["final_response"] == staff_decision_response(db, resumed.patient_id, False)
     assert db.query(Appointment).count() == 0
     assert db.query(Reminder).count() == 0
     assert db.query(AuditEvent).filter_by(action="agent.safety.completed").count() == 0
@@ -309,13 +365,146 @@ def test_finalize_with_unhandled_uploads_escalates(db, seeded, fake_llm):
     run = workflow_service.start_workflow(
         db, _patient_user(db), "I need a cardiology appointment next week", [doc.id]
     )
+    assert run.status == "waiting_approval"
 
-    assert run.status == "escalated"
+    resumed = _staff_decision(db, run, approved=False, note="the upload was never read")
+
+    assert resumed.status == "escalated"
     assert [e.severity for e in db.query(Escalation).all()] == ["uncertainty"]
-    assert run.state.get("documents_result") is None
+    assert resumed.state.get("documents_result") is None
     assert db.query(AuditEvent).filter_by(action="agent.document.completed").count() == 0
     assert db.query(AuditEvent).filter_by(action="agent.safety.completed").count() == 0
     assert len(client.chat.completions.calls) == 7
+
+
+# --- Pause and approve (the real human-in-the-loop) --------------------------
+# The escalate node calls LangGraph's interrupt(), so a run that reaches it
+# stops mid-graph instead of ending. Staff then decide, and only an approved
+# uncertainty case picks the work back up: approve on a run whose agent
+# already failed, or any rejection, closes with a template.
+
+
+def test_uncertainty_escalation_pauses_the_run_for_staff(db, seeded, fake_llm):
+    """The escalate node hands the case over and stops. Nothing is final
+    yet: no answer, no safety pass, and the escalation staff will see is
+    still open."""
+    client = fake_llm(_uncertainty_pause_script())
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "something about an appointment, maybe", []
+    )
+
+    assert run.status == "waiting_approval"
+    assert run.current_step == "escalate"
+    assert run.state.get("final_response") is None
+    assert [(e.severity, e.status) for e in db.query(Escalation).all()] == [
+        ("uncertainty", "open")
+    ]
+    assert db.query(AuditEvent).filter_by(action="agent.safety.completed").count() == 0
+    assert len(client.chat.completions.calls) == 3
+
+
+def test_staff_approval_resumes_the_run_and_books_the_appointment(db, seeded, fake_llm):
+    """The demo beat: an ambiguous request parks, a staff member approves it
+    with a note naming the department, and the run picks up where it stopped
+    and books the appointment it was asked for. The note steers the agents
+    and lands on the escalation row; it never becomes something the patient
+    reads."""
+    slot_id = _first_free_slot_id(db, _cardiology_id(db))
+    note = "patient means cardiology"
+    client = fake_llm(
+        [
+            *_uncertainty_pause_script(),
+            # Everything below runs only because staff approved.
+            {"next_step": "route_department", "reasoning": "staff named the department"},
+            {"intent": "book", "department": "Cardiology", "confidence": 0.95, "reason": "routing"},
+            {"next_step": "handle_appointment", "reasoning": "department resolved"},
+            {"slot_id": slot_id, "reason": "earliest match"},
+            {"next_step": "handle_documents", "reasoning": "appointment booked"},
+            {"next_step": "schedule_followup", "reasoning": "documents checked"},
+            {
+                "reminders": [{"type": "appointment", "days_before_appointment": 1}],
+                "followup_days_after": 14,
+            },
+            {"next_step": "finalize", "reasoning": "reminders scheduled"},
+            {"safe": True, "violations": [], "rewritten": "Your appointment is confirmed."},
+        ]
+    )
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "something about an appointment, maybe", []
+    )
+    assert run.status == "waiting_approval"
+
+    resumed = _staff_decision(db, run, approved=True, note=note)
+
+    assert resumed.status == "completed"
+    assert db.query(Appointment).filter_by(patient_id=1, status="confirmed").count() == 1
+    # One row for one handoff, kept for the audit trail and now resolved.
+    assert [(e.status, e.resolution_note) for e in db.query(Escalation).all()] == [
+        ("approved", note)
+    ]
+    # The note reached the agents as guidance ...
+    assert any(note in json.dumps(call) for call in client.chat.completions.calls)
+    # ... and reaches the patient through nothing at all: not the answer, and
+    # not the state projection the portal renders (routes_workflows).
+    assert note not in (resumed.state["final_response"] or "")
+    assert note not in json.dumps(_patient_state(resumed.state))
+    assert len(client.chat.completions.calls) == 12
+
+
+def test_staff_rejection_closes_the_run_with_the_template(db, seeded, fake_llm):
+    """A rejected case does not go back to the agents. It ends on the
+    deterministic rejection template, with the staff member's own words kept
+    on the escalation row where only staff read them."""
+    client = fake_llm(_uncertainty_pause_script())
+    note = "not eligible"
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "something about an appointment, maybe", []
+    )
+    assert run.status == "waiting_approval"
+
+    resumed = _staff_decision(db, run, approved=False, note=note)
+
+    assert resumed.status == "escalated"
+    assert resumed.state["final_response"] == staff_decision_response(db, resumed.patient_id, False)
+    assert note not in resumed.state["final_response"]
+    assert db.query(Appointment).count() == 0
+    assert [(e.status, e.resolution_note) for e in db.query(Escalation).all()] == [
+        ("rejected", note)
+    ]
+    # Nothing ran after the decision: the three calls are the ones from before it.
+    assert len(client.chat.completions.calls) == 3
+
+
+def test_agent_failure_escalation_closes_even_when_staff_approves(db, seeded, fake_llm):
+    """Approval means "carry on" only where there is something to carry on
+    with. This run's routing agent failed, so the state carries an error and
+    no amount of staff approval can hand it back to the agents: it closes on
+    the template and stays failed, with the case in a human's hands."""
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            RuntimeError("llm endpoint down"),
+            {"next_step": "escalate", "reasoning": "routing failed"},
+        ]
+    )
+    note = "called the patient, handled by phone"
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", []
+    )
+    assert run.status == "waiting_approval"
+
+    resumed = _staff_decision(db, run, approved=True, note=note)
+
+    assert resumed.status == "failed"
+    assert resumed.state["final_response"] == staff_decision_response(db, resumed.patient_id, True)
+    assert note not in resumed.state["final_response"]
+    assert [e.severity for e in db.query(Escalation).all()] == ["agent_failure"]
+    assert db.query(Appointment).count() == 0
+    assert len(client.chat.completions.calls) == 3
 
 
 def test_resume_unknown_workflow_run_raises_not_found(db, seeded, fake_llm):

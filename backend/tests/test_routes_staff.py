@@ -7,9 +7,23 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import pytest
+
 from app.config import settings
 from app.db.seed import seed
-from app.models import AgentRule, AuditEvent, Escalation, User
+from app.models import AgentRule, AuditEvent, Escalation, User, WorkflowRun
+from app.services import workflow_service
+
+
+@pytest.fixture()
+def isolated_checkpointer(tmp_path, monkeypatch):
+    """A fresh checkpoint file for the one test here that runs the graph -
+    see test_graph_e2e.py's fixture of the same name for why the
+    process-wide graph singleton has to be reset around it."""
+    monkeypatch.setattr(settings, "checkpoint_db_path", str(tmp_path / "checkpoints.db"))
+    workflow_service.close_graph()
+    yield
+    workflow_service.close_graph()
 
 
 def test_staff_requests_denied_for_patient(patient_client):
@@ -65,6 +79,41 @@ def test_resolve_escalation_persists_reviewer_note_and_audit(staff_client, db_se
     )
     assert audit is not None
     assert audit.actor_id == staff.id
+
+
+def test_resolve_escalation_hands_the_decision_to_a_paused_workflow(
+    staff_client, db_session, fake_llm, isolated_checkpointer
+):
+    """The staff decision is the only thing that moves a run parked at the
+    escalate node's interrupt. Rejecting is the cheapest proof the route is
+    wired to the graph at all: the run closes on the spot, with no further
+    agent work and nothing left in the script."""
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {"intent": "other", "department": None, "confidence": 0.4, "reason": "ambiguous"},
+            {"next_step": "finalize", "reasoning": "coordinator missed the escalation"},
+        ]
+    )
+    patient = db_session.query(User).filter_by(email="patient@example.com").first()
+    run = workflow_service.start_workflow(
+        db_session, patient, "something about an appointment, maybe", []
+    )
+    assert run.status == "waiting_approval"
+    escalation = (
+        db_session.query(Escalation).filter_by(workflow_run_id=run.id).one()
+    )
+
+    resp = staff_client.post(
+        f"/api/staff/escalations/{escalation.id}/resolve",
+        json={"approve": False, "note": "cannot be booked as described"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "rejected"
+    db_session.expire_all()
+    assert db_session.get(WorkflowRun, run.id).status == "escalated"
+    assert len(client.chat.completions.calls) == 3
 
 
 def test_resolve_escalation_denied_for_patient(patient_client, db_session):

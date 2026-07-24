@@ -19,8 +19,16 @@ what the coordinator last decided: a node's unrecovered failure
 exceptions and reports them this way rather than raising), and an escalation
 a specialist already opened (`state["escalation_id"]` set). The graph must
 never depend on the coordinator's own LLM call noticing either one: once a
-case is with a human, the run ends rather than working on past the handoff
-and overwriting the staff-review answer.
+case is with a human, the run stops rather than working on past the handoff
+and answering over the top of it.
+
+The escalate node is where it stops, on LangGraph's `interrupt()`: the run
+is checkpointed mid-graph, its WorkflowRun goes to status `waiting_approval`
+and nothing moves until a staff member decides
+(`workflow_service.resume_with_decision`). Approving an uncertainty case
+sends the run back to the coordinator with the reviewer's note as guidance,
+so the work the patient asked for still happens; a rejection, or any run
+whose agent had already failed, ends on a deterministic template instead.
 
 The same applies to the ordering rules the coordinator prompt states
 (prompts.py). `_step_allowed` enforces them against the completed-step
@@ -39,10 +47,11 @@ from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import interrupt
 from sqlalchemy.orm import Session
 
 from app.agents import appointment, coordinator, document, followup, routing, safety
-from app.agents.responses import staff_review_response
+from app.agents.responses import staff_decision_response
 from app.agents.state import AgentState
 from app.config import settings
 from app.logging_setup import get_logger
@@ -92,9 +101,26 @@ def _safety_finalize_node(state: AgentState, config: RunnableConfig) -> dict:
     return safety.run(state, _db(config))
 
 
+def _existing_escalation(db: Session, state: AgentState) -> Escalation | None:
+    """The open handoff this run is already having with staff, if any.
+
+    Rows this run has already had back (approved, and the run carried on)
+    are excluded: they are closed business, and reusing one would park the
+    run against an escalation staff have no reason to look at again. The
+    exclusion list is written by this node itself, so the pre-interrupt
+    re-execution below - which happens before that write lands - still sees
+    the row it just created and reuses it.
+    """
+    resolved = state.get("resolved_escalation_ids") or []
+    query = db.query(Escalation).filter_by(workflow_run_id=state.get("workflow_id"))
+    if resolved:
+        query = query.filter(Escalation.id.notin_(resolved))
+    return query.order_by(Escalation.id.desc()).first()
+
+
 def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
-    """Terminal node for a coordinator-chosen escalate, a specialist's own
-    escalation, or a specialist's unrecovered error.
+    """The human handoff, for a coordinator-chosen escalate, a specialist's
+    own escalation, or a specialist's unrecovered error.
 
     A specialist that already opened an escalation for this run (routing on
     low confidence, appointment on an unrecoverable booking failure) hands
@@ -105,6 +131,20 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     the state carries an error and uncertainty when the coordinator
     escalated a clean state (contradictory or out-of-scope request, per its
     prompt).
+
+    Then the node stops on `interrupt()` and the run waits for a human.
+    LangGraph re-executes a resumed node from its first line, so everything
+    above the interrupt runs a second time when the decision arrives - which
+    is exactly why the escalation is reused rather than created blind, and
+    why nothing above the interrupt writes an audit row.
+
+    What the decision does depends on what the run was stopped for. An
+    approved uncertainty case goes back to the coordinator with the staff
+    note as guidance and no block left on the state, so the work the patient
+    asked for actually happens. Anything else - a rejection, or a run whose
+    agent already failed and has nothing to carry on with - ends here on a
+    deterministic template. The escalation row survives either way, resolved,
+    as the audit trail of who decided what.
     """
     db = _db(config)
     workflow_id = state.get("workflow_id")
@@ -113,12 +153,7 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
 
     escalation_id = state.get("escalation_id")
     if escalation_id is None:
-        existing = (
-            db.query(Escalation)
-            .filter_by(workflow_run_id=workflow_id)
-            .order_by(Escalation.id.desc())
-            .first()
-        )
+        existing = _existing_escalation(db, state)
         if existing is not None:
             escalation_id = existing.id
         else:
@@ -133,15 +168,48 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     if row is not None:
         severity = row.severity
 
+    decision = interrupt({"escalation_id": escalation_id, "workflow_id": workflow_id})
+
+    approved = bool(decision.get("approved"))
+    guidance = (decision.get("note") or "").strip() or None
+    write_audit(
+        db,
+        decision.get("reviewer_id"),
+        "agent.escalate.resolved",
+        "workflow_run",
+        workflow_id,
+        {"escalation_id": escalation_id, "approved": approved},
+    )
     write_audit(
         db, None, "agent.escalate.completed", "workflow_run", workflow_id, {"severity": severity}
     )
     db.commit()
+
+    if approved and not error:
+        # escalation_id back to None so the router's short-circuit and
+        # _final_status treat the continued run as an ordinary one. The row
+        # itself stays, resolved, and is listed as handled so a later handoff
+        # opens a fresh one.
+        return {
+            "escalation_id": None,
+            "resolved_escalation_ids": [escalation_id],
+            "final_response": None,
+            "staff_guidance": guidance,
+            "completed_steps": ["escalate"],
+        }
     return {
         "escalation_id": escalation_id,
-        "final_response": staff_review_response(db, state.get("patient_id")),
+        "resolved_escalation_ids": [escalation_id],
+        "final_response": staff_decision_response(db, state.get("patient_id"), approved),
         "completed_steps": ["escalate"],
     }
+
+
+def _route_from_escalate(state: AgentState) -> str:
+    """A decided case that produced an answer is finished; one that did not
+    is an approved uncertainty case going back to the coordinator to do the
+    work it was stopped before doing."""
+    return END if state.get("final_response") else "coordinator"
 
 
 def _ran(state: AgentState, step: str) -> bool:
@@ -229,7 +297,9 @@ def build_graph(checkpointer) -> CompiledStateGraph:
     graph.add_edge("document", "coordinator")
     graph.add_edge("followup", "coordinator")
     graph.add_edge("safety_finalize", END)
-    graph.add_edge("escalate", END)
+    graph.add_conditional_edges(
+        "escalate", _route_from_escalate, {END: END, "coordinator": "coordinator"}
+    )
 
     return graph.compile(checkpointer=checkpointer)
 

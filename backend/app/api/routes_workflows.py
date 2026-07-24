@@ -146,7 +146,14 @@ def _serialize_escalation(
     string, the injection guard's matched patterns, whatever the specialist
     that escalated wrote. The portal renders `reason` verbatim, so a patient
     gets the same neutral staff-review line the no-LLM escalation paths use,
-    already localized to their preferred language."""
+    already localized to their preferred language.
+
+    `resolution_note` is the same kind of text from the other end: the
+    reviewer's own words about the case, and on an approved run the guidance
+    that steered the agents. What the patient reads about a decided case is
+    the templated answer on the run itself (agents/responses.py), never the
+    note. `reviewed_by` goes with it - which staff member took a case is the
+    staff queue's business."""
     if escalation is None:
         return None
     reason = escalation.reason if include_internal else staff_review_response(db, patient_id)
@@ -155,8 +162,8 @@ def _serialize_escalation(
         "reason": reason,
         "severity": escalation.severity,
         "status": escalation.status,
-        "reviewed_by": escalation.reviewed_by,
-        "resolution_note": escalation.resolution_note,
+        "reviewed_by": escalation.reviewed_by if include_internal else None,
+        "resolution_note": escalation.resolution_note if include_internal else None,
     }
 
 

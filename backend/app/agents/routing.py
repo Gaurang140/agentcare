@@ -45,12 +45,18 @@ class RoutingOutput(BaseModel):
     reason: str
 
 
-def _user_prompt(request_text: str, departments: list[dict]) -> str:
+def _user_prompt(request_text: str, departments: list[dict], guidance: str | None = None) -> str:
     names = ", ".join(d["name"] for d in departments)
-    return (
+    prompt = (
         f"Patient request: {request_text}\n"
         f"Available departments (choose exactly one of these, or null): {names}"
     )
+    # Set only on a run staff approved out of the escalate node: this node is
+    # usually the one that gave up on the request in the first place, so a
+    # re-run without the human's clarification would land in the same place.
+    if guidance:
+        prompt += f"\nStaff guidance: {guidance}"
+    return prompt
 
 
 def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
@@ -107,7 +113,11 @@ def run(state: AgentState, db: Session) -> dict:
         departments = list_departments(db)
         request_text = _redact_request_text(db, workflow_id, state.get("request_text", ""))
         system = build_system_prompt(db, "routing", ROUTING)
-        result = chat_json(system, _user_prompt(request_text, departments), RoutingOutput)
+        result = chat_json(
+            system,
+            _user_prompt(request_text, departments, state.get("staff_guidance")),
+            RoutingOutput,
+        )
 
         if result.intent == "other":
             # Nothing downstream can serve a request outside the supported
