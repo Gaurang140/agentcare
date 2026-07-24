@@ -381,7 +381,7 @@ path from `waiting_approval` through to the booked appointment. Linting is
 | Custom `chat_json` wrapper | LiteLLM | Groq and LM Studio already speak the same OpenAI schema, so there is no translation problem to solve; a `try/except` fallback stays fully legible mid-demo, a `Router` exception is not. |
 | pwdlib (Argon2id) | passlib | passlib is unmaintained; pwdlib is the current, actively developed Argon2id implementation. |
 | Terraform HCL via OpenTofu | console clicking | OpenTofu is a drop-in MPL 2.0 fork of Terraform, same HCL, state format and provider protocol; infrastructure becomes reviewable and diffable instead of a click history nobody can audit. |
-| GKE Autopilot + HPA | self-managed Kubernetes | No node pools to size or patch; Google manages the nodes and bills per pod resource request, and the HPA autoscales the one workload whose load actually varies. |
+| GKE Autopilot | self-managed Kubernetes | No node pools to size or patch; Google manages the nodes and bills per pod resource request. The backend stays at one replica because its APScheduler jobs run in-process with no distributed lock. |
 | Workload Identity Federation | service-account JSON keys | GitHub Actions mints short-lived tokens instead of storing a long-lived key, the top GCP credential-leak vector, pinned to this exact repository. |
 | Prometheus + Grafana (local) | a SaaS APM | Scraping `/metrics` in a compose stack costs nothing and gives a clickable dashboard today; Google Managed Service for Prometheus is the near-free path once a cluster exists. |
 | APScheduler + BackgroundTasks | Celery + Redis | A single-process app has no need for a broker or worker fleet; Memorystore for Redis carries a real monthly floor with no free tier for state this design does not keep. |
@@ -456,8 +456,8 @@ the workflow still runs to completion untraced and logs one
   Federation, a GKE Autopilot cluster and Cloud SQL for PostgreSQL 17 (on by
   default, the primary database path under the deployment's GCP trial
   credit; Neon free-tier Postgres is the documented post-credit swap);
-  `infra/k8s/` is the kustomize base plus a `gcp` overlay (autoscaling,
-  GCE ingress, the SSE timeout BackendConfig). `.github/workflows/deploy.yml`
+  `infra/k8s/` is the kustomize base plus a `gcp` overlay (GCE ingress and
+  the SSE timeout BackendConfig). `.github/workflows/deploy.yml`
   builds, pushes and applies both on a manual `workflow_dispatch`. Every piece
   validates on its own (`tofu validate`, `kubectl kustomize`, `actionlint`),
   but none of it has run against a real GCP project - that first `tofu apply`

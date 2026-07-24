@@ -161,13 +161,15 @@ alternative. Infrastructure as code: standard Terraform HCL, run with **OpenTofu
 identically.
 
 **Why.**
-- GKE Autopilot over Cloud Run: this build already needed a real Kubernetes footprint to
-  demonstrate autoscaling, migrations-as-a-Job and CI-to-cluster deploys, not just a single
-  container - a `HorizontalPodAutoscaler` on the backend (1-4 replicas, 70% CPU), a `Job` that
+- GKE Autopilot over Cloud Run: this build already needed a real Kubernetes footprint for
+  migrations-as-a-Job and CI-to-cluster deploys, not just a single container - a `Job` that
   reuses the backend image's own entrypoint for migrate-then-seed and a GCE Ingress whose
   `BackendConfig` sets an explicit 3600-second timeout so the load balancer's 30-second default does
   not cut the SSE stream (`infra/k8s/overlays/gcp/backendconfig.yaml`). None of that has a
-  first-class equivalent on Cloud Run. Autopilot specifically, not GKE Standard, because it removes
+  first-class equivalent on Cloud Run. There is deliberately no autoscaler: the backend runs its
+  APScheduler jobs in-process with no distributed lock, so a second replica would fire every
+  reminder twice, and an honest single replica beats an autoscaler that corrupts the job schedule
+  under load. Autopilot specifically, not GKE Standard, because it removes
   node-pool sizing and patching entirely: Google manages the nodes and bills per pod resource
   request instead of per VM. The honest trade-off against Cloud Run is cost at idle: Cloud Run can
   scale to zero, while the two GKE Autopilot Deployments run continuously and cost roughly

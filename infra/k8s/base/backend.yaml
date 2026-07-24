@@ -8,6 +8,7 @@ metadata:
   labels:
     app: backend
 spec:
+  # single replica: in-process APScheduler has no distributed lock; scale out only after moving jobs to a worker
   replicas: 1
   selector:
     matchLabels:

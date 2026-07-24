@@ -232,9 +232,10 @@ it, since `STORAGE_BACKEND` defaults to `local`).
 - GCP (manifests and modules committed and validated, cluster not yet provisioned). Backend and
   frontend each run as a `Deployment` behind a `ClusterIP` `Service` on a GKE Autopilot cluster
   (`infra/k8s/base/backend.yaml`, `frontend.yaml`; `infra/terraform/modules/gke-autopilot`). A
-  `HorizontalPodAutoscaler` scales the backend Deployment 1-4 replicas on 70% CPU utilization,
-  since the backend is the piece whose load actually varies with LLM-bound work; the frontend
-  stays a single stateless replica (`infra/k8s/overlays/gcp/hpa.yaml`). A `backend-migrate` `Job`
+  Both stay at one replica. The backend runs its APScheduler jobs (reminders, stalled-workflow
+  sweep) in the same process that serves requests, with no distributed lock, so a second replica
+  would fire every job twice; scaling it out means moving those jobs to a worker first
+  (`infra/k8s/base/backend.yaml`). A `backend-migrate` `Job`
   runs the backend image's own entrypoint (`alembic upgrade head` then the idempotent seed) ahead
   of rollout, reusing the container instead of duplicating migration logic
   (`infra/k8s/base/migration-job.yaml`). A GCE Ingress routes `/api` to the backend Service and `/`

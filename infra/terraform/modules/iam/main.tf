@@ -10,7 +10,7 @@ resource "google_service_account" "backend" {
   project      = var.project_id
   account_id   = "agentcare-backend"
   display_name = "AgentCare backend runtime"
-  description  = "Identity for the FastAPI/LangGraph backend pod. The infra/k8s overlay binds this to a Kubernetes service account through GKE Workload Identity; no key is ever downloaded for it."
+  description  = "Identity for the FastAPI/LangGraph backend pod. Binding it to a Kubernetes service account through GKE Workload Identity is a manual step, not wired in infra/k8s yet (see docs/deployment-gcp.md); no key is ever downloaded for it."
 }
 
 resource "google_service_account" "frontend" {

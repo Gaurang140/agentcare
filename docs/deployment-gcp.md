@@ -62,6 +62,11 @@ To update a secret later, add a new version rather than deleting and recreating 
 echo -n "rotated_value" | gcloud secrets versions add llm-api-key --data-file=-
 ```
 
+Secret Manager and the Kubernetes `Secret` the backend reads through `envFrom`
+(`infra/k8s/base/secret.example.yaml`) are two hand-maintained copies of the same values,
+with nothing syncing one to the other, so a rotation has to be applied in both places or
+the cluster keeps serving the old value.
+
 ## Terraform (OpenTofu) apply order
 
 ```bash
@@ -82,29 +87,66 @@ Secret instead once the credit lapses (`docs/decisions.md` ADR-03). `tofu output
 apply prints the Artifact Registry URL, the bucket name, the three service account emails,
 and the `workload_identity_provider` string GitHub Actions needs.
 
+The module creates the instance and its private-IP networking only. It creates no database
+and no user, so the `DATABASE_URL` the backend needs does not exist until you add both by
+hand:
+
+```bash
+gcloud sql databases create agentcare --instance=agentcare-postgres
+gcloud sql users create agentcare --instance=agentcare-postgres --password="A_LONG_RANDOM_PASSWORD"
+```
+
+The instance has no public IP, so anything connecting to it runs inside the VPC or goes
+through the Cloud SQL Auth Proxy with `cloud_sql_connection_name`. Put the resulting
+`DATABASE_URL` in the Kubernetes Secret next to the other values.
+
 ## Build and push images
 
 GKE Autopilot nodes are `linux/amd64`; building on an Apple Silicon laptop needs an
-explicit target platform or the image will not start on the cluster.
+explicit target platform or the image will not start on the cluster. Run both commands from
+the repository root. The backend build context is the repository root rather than
+`backend/`, because the Dockerfile copies the root `requirements.txt` before the app tree,
+which is why it names the Dockerfile with `-f`. This matches what
+`.github/workflows/deploy.yml` builds.
 
 ```bash
 REPO=$(tofu -chdir=infra/terraform output -raw artifact_registry_repository_url)
 gcloud auth configure-docker "${REPO%%/*}"
 
-docker buildx build --platform linux/amd64 -t "$REPO/backend:latest" --push ./backend
+docker buildx build --platform linux/amd64 -t "$REPO/backend:latest" -f backend/Dockerfile --push .
 docker buildx build --platform linux/amd64 -t "$REPO/frontend:latest" --push ./frontend
 ```
 
 ## Handoff to the k8s overlay
 
-The kustomize overlay under `infra/k8s/` consumes four things from this layer's outputs:
+The kustomize overlay under `infra/k8s/` consumes three things from this layer's outputs:
 the image URLs above, `gke_cluster_name` / `gke_cluster_location` for
-`gcloud container clusters get-credentials`, the `backend_service_account_email` and
-`frontend_service_account_email` for the Kubernetes service account
-`iam.gke.io/gcp-service-account` annotation that completes Workload Identity binding, and
-`documents_bucket_name` for the backend's `GCS_BUCKET` environment variable. That overlay
-also owns the Ingress and, if `var.domain` is set, the ManagedCertificate resource; neither
-is provisioned by this Terraform layer.
+`gcloud container clusters get-credentials`, and `documents_bucket_name` for the backend's
+`GCS_BUCKET` environment variable. That overlay also owns the Ingress and, if `var.domain`
+is set, the ManagedCertificate resource; neither is provisioned by this Terraform layer.
+
+**Workload Identity for the pods is a manual step, not yet wired in the manifests.** The
+Terraform layer creates the two runtime service accounts
+(`backend_service_account_email`, `frontend_service_account_email`) and the cluster is
+created with `workload_identity_config`, but nothing under `infra/k8s/` creates a
+Kubernetes service account, carries the `iam.gke.io/gcp-service-account` annotation or sets
+`serviceAccountName` on a pod. Until someone does this by hand the pods run under the
+namespace default service account, so the backend does not yet reach GCS or Secret Manager
+as `agentcare-backend`. Wiring it takes three commands and a one-line manifest change:
+
+```bash
+BACKEND_SA=$(tofu -chdir=infra/terraform output -raw backend_service_account_email)
+kubectl create serviceaccount agentcare-backend
+kubectl annotate serviceaccount agentcare-backend "iam.gke.io/gcp-service-account=$BACKEND_SA"
+gcloud iam service-accounts add-iam-policy-binding "$BACKEND_SA" \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:YOUR_PROJECT_ID.svc.id.goog[default/agentcare-backend]"
+```
+
+then add `serviceAccountName: agentcare-backend` to the pod spec in
+`infra/k8s/base/backend.yaml`. The Workload Identity Federation that GitHub Actions uses is
+a different mechanism and is wired: see `.github/workflows/deploy.yml` and the
+`workload_identity_provider` output.
 
 ```bash
 gcloud container clusters get-credentials \
