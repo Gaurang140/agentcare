@@ -50,15 +50,75 @@ def test_low_confidence_escalates_instead_of_routing(db, seeded, fake_llm):
     assert escalation.workflow_run_id == 1
 
 
-def test_null_department_escalates(db, seeded, fake_llm):
+def test_null_department_escalates_for_booking_intent(db, seeded, fake_llm):
+    """Booking needs a department to work with, so a null one escalates."""
     fake_llm(
-        [{"intent": "other", "department": None, "confidence": 0.95, "reason": "unclear ask"}]
+        [{"intent": "book", "department": None, "confidence": 0.95, "reason": "unclear ask"}]
+    )
+
+    result = routing.run(_state(request_text="I need an appointment somewhere"), db)
+
+    assert result["department_id"] is None
+    assert result["escalation_id"] is not None
+    escalation = db.get(Escalation, result["escalation_id"])
+    assert escalation.severity == "uncertainty"
+
+
+def test_cancel_without_department_passes_through(db, seeded, fake_llm):
+    """Cancelling works off the patient's existing appointment, so a null
+    department is not a reason to hand a well-formed request to staff."""
+    fake_llm(
+        [{"intent": "cancel", "department": None, "confidence": 0.9, "reason": "clear cancel"}]
+    )
+
+    result = routing.run(_state(request_text="please cancel my appointment"), db)
+
+    assert result["intent"] == "cancel"
+    assert result["department_id"] is None
+    assert result["department_name"] is None
+    assert result["routing_confidence"] == 0.9
+    assert "escalation_id" not in result
+    assert result["completed_steps"] == ["routing"]
+    assert db.query(Escalation).count() == 0
+
+
+def test_attach_documents_without_department_passes_through(db, seeded, fake_llm):
+    """The document node degrades to classify-only without a department, so
+    document uploads route through without one."""
+    fake_llm(
+        [
+            {
+                "intent": "attach_documents",
+                "department": None,
+                "confidence": 0.9,
+                "reason": "upload only",
+            }
+        ]
+    )
+
+    result = routing.run(_state(request_text="here is my insurance card"), db)
+
+    assert result["intent"] == "attach_documents"
+    assert result["department_id"] is None
+    assert result["department_name"] is None
+    assert "escalation_id" not in result
+    assert db.query(Escalation).count() == 0
+
+
+def test_other_intent_escalates_even_with_department_and_confidence(db, seeded, fake_llm):
+    """"other" means the request is outside the supported administrative
+    intents. That escalates deterministically here, without depending on the
+    coordinator to notice."""
+    fake_llm(
+        [{"intent": "other", "department": "Cardiology", "confidence": 0.95, "reason": "off topic"}]
     )
 
     result = routing.run(_state(request_text="what's the weather like"), db)
 
+    assert result["intent"] == "other"
     assert result["department_id"] is None
     assert result["escalation_id"] is not None
+    assert result["final_response"] == "a staff member will review your request"
     escalation = db.get(Escalation, result["escalation_id"])
     assert escalation.severity == "uncertainty"
 

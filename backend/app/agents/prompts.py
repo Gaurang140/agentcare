@@ -21,6 +21,8 @@ Classify the patient's ADMINISTRATIVE intent and map it to exactly one departmen
 provided list. You do not interpret symptoms medically; you only route the request, like a
 front desk. Mentioning a body part or prior treatment is routing information, not diagnosis.
 If you are not at least 70% sure, set department to null.
+Department may also be null for cancel, status and attach_documents; anything outside hospital
+administration is intent "other".
 Return JSON: {"intent": "book|reschedule|cancel|attach_documents|status|other",
 "department": "<name or null>", "confidence": 0.0-1.0, "reason": "one sentence, no medical claims"}."""
 

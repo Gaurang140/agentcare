@@ -26,6 +26,13 @@ logger = get_logger(__name__)
 
 _CONFIDENCE_THRESHOLD = 0.7
 
+# Only these two intents cannot be served without a department: booking and
+# rescheduling need one to look up slots. Cancel works off the patient's own
+# appointment, status reads it back, and the document node degrades to
+# classify-only when no department is set - so a null department there is a
+# well-formed request, not a reason to hand the patient to staff.
+_DEPARTMENT_REQUIRED_INTENTS = {"book", "reschedule"}
+
 
 class RoutingOutput(BaseModel):
     intent: Literal["book", "reschedule", "cancel", "attach_documents", "status", "other"]
@@ -91,8 +98,10 @@ def _escalate_uncertain(
 
 
 def run(state: AgentState, db: Session) -> dict:
-    """Classify the patient's intent and department; escalate on low
-    confidence or a department that doesn't resolve, instead of guessing."""
+    """Classify the patient's intent and department; escalate on an
+    unsupported intent, low confidence, a department that is missing where the
+    intent needs one, or a department that doesn't resolve, instead of
+    guessing."""
     workflow_id = state.get("workflow_id")
     try:
         departments = list_departments(db)
@@ -100,35 +109,51 @@ def run(state: AgentState, db: Session) -> dict:
         system = build_system_prompt(db, "routing", ROUTING)
         result = chat_json(system, _user_prompt(request_text, departments), RoutingOutput)
 
-        if result.confidence < _CONFIDENCE_THRESHOLD or not result.department:
-            return _escalate_uncertain(
-                db, workflow_id, state.get("patient_id"), result.intent, result.confidence, result.reason
-            )
-
-        department = find_department(db, result.department)
-        if department is None:
-            # The LLM was told to pick from the given list; a name that
-            # doesn't resolve is treated the same as low confidence rather
-            # than passed through.
+        if result.intent == "other":
+            # Nothing downstream can serve a request outside the supported
+            # administrative intents, so it goes to staff here rather than
+            # depending on the coordinator to notice.
             return _escalate_uncertain(
                 db,
                 workflow_id,
                 state.get("patient_id"),
                 result.intent,
                 result.confidence,
-                f"unresolvable department: {result.department}",
+                "request outside supported administrative intents",
             )
+
+        needs_department = result.intent in _DEPARTMENT_REQUIRED_INTENTS
+        if result.confidence < _CONFIDENCE_THRESHOLD or (needs_department and not result.department):
+            return _escalate_uncertain(
+                db, workflow_id, state.get("patient_id"), result.intent, result.confidence, result.reason
+            )
+
+        department_id: int | None = None
+        department_name: str | None = None
+        if result.department:
+            department = find_department(db, result.department)
+            if department is None:
+                # The LLM was told to pick from the given list; a name that
+                # doesn't resolve is treated the same as low confidence rather
+                # than passed through.
+                return _escalate_uncertain(
+                    db,
+                    workflow_id,
+                    state.get("patient_id"),
+                    result.intent,
+                    result.confidence,
+                    f"unresolvable department: {result.department}",
+                )
+            department_id, department_name = department["id"], department["name"]
 
         update = {
             "intent": result.intent,
-            "department_id": department["id"],
-            "department_name": department["name"],
+            "department_id": department_id,
+            "department_name": department_name,
             "routing_confidence": result.confidence,
             "completed_steps": ["routing"],
         }
-        _exit_audit(
-            db, workflow_id, {"department": department["name"], "confidence": result.confidence}
-        )
+        _exit_audit(db, workflow_id, {"department": department_name, "confidence": result.confidence})
         return update
     except Exception as exc:  # noqa: BLE001 - node boundary must never crash the graph
         logger.error("routing_agent_failed", workflow_id=workflow_id, error=str(exc))
