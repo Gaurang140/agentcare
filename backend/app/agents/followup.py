@@ -19,7 +19,7 @@ from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import Reminder
 from app.tools.audit_tools import write_audit
-from app.tools.followup_tools import create_followup_task, create_reminder, reminder_summary
+from app.tools.followup_tools import ReminderItem, create_reminders_batch, reminder_summary
 
 logger = get_logger(__name__)
 
@@ -67,13 +67,16 @@ def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
 def _reminders_already_scheduled(db: Session, appointment_id: int) -> list[dict]:
     """The batch this node has already written for the appointment.
 
-    Each reminder is committed as it is created, before LangGraph writes the
-    checkpoint saying this node ran, so a process that dies in that window
-    resumes into a node whose rows exist but whose run was never recorded.
-    The whole appointment is the key. A per-reminder key cannot work: the
-    resumed node re-plans from scratch, and the LLM's second plan names
-    different types and different times for the same appointment, so every
-    row it produced would look new.
+    The batch is committed before LangGraph writes the checkpoint saying this
+    node ran, so a process that dies in that window resumes into a node whose
+    rows exist but whose run was never recorded. The whole appointment is the
+    key. A per-reminder key cannot work: the resumed node re-plans from
+    scratch, and the LLM's second plan names different types and different
+    times for the same appointment, so every row it produced would look new.
+
+    Reading any row as "the batch is done" is only sound because the batch is
+    written as one transaction (`followup_tools.create_reminders_batch`):
+    there is no state where some of it exists and the rest does not.
     """
     rows = db.query(Reminder).filter_by(appointment_id=appointment_id).order_by(Reminder.id).all()
     return [reminder_summary(row) for row in rows]
@@ -107,17 +110,23 @@ def run(state: AgentState, db: Session) -> dict:
         plan = chat_json(system, _plan_prompt(appointment, missing), FollowupOutput)
         start_time = datetime.fromisoformat(appointment["start_time"])
 
-        created: list[dict] = []
-        for spec in plan.reminders[:_MAX_REMINDERS]:
-            scheduled_at = start_time - timedelta(days=_clamp_days(spec.days_before_appointment))
-            created.append(
-                create_reminder(db, patient_id, appointment_id, spec.type, scheduled_at)
+        items = [
+            ReminderItem(
+                spec.type,
+                start_time - timedelta(days=_clamp_days(spec.days_before_appointment)),
             )
-        created.append(
-            create_followup_task(
-                db, patient_id, appointment_id, days_after=_clamp_days(plan.followup_days_after)
+            for spec in plan.reminders[:_MAX_REMINDERS]
+        ]
+        # The post-visit task is the last item of the same batch, not a
+        # separate write: `appointment["start_time"]` is the slot's own start
+        # time, so the row is timed exactly as create_followup_task would
+        # time it, and it now shares the batch's transaction.
+        items.append(
+            ReminderItem(
+                "followup", start_time + timedelta(days=_clamp_days(plan.followup_days_after))
             )
         )
+        created = create_reminders_batch(db, patient_id, appointment_id, items)
 
         update = {"reminders": created, "completed_steps": ["followup"]}
         _exit_audit(db, workflow_id, {"reminder_count": len(created)})
