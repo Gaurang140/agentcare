@@ -18,6 +18,17 @@ layer 1's fixed pattern list does not anticipate. A layer-2 failure never
 blocks on its own - it is logged and the request falls through to layer 1's
 already-clean verdict, per the rule that a classifier outage must never take
 the system down.
+
+The two layers see different strings on purpose. Layer 1 is a local pure
+function, so it reads the raw text and keeps every character an attacker
+typed. Layer 2 leaves the process for a model provider, so it is behind the
+same PII boundary as every other prompt and reads
+`safety/pii.py::redact_for_llm`'s copy instead. Nothing is lost by that:
+redaction replaces values (an email, a phone number, a name) with fixed
+tokens and leaves phrasing alone, and phrasing is the only thing an
+injection classifier judges. No audit row is written here - `screen_injection`
+has no database session, and the agent call sites already audit the
+redactions they perform on their own way to the model.
 """
 
 from __future__ import annotations
@@ -30,6 +41,7 @@ from typing import Literal
 from app.agents.llm import classify_injection
 from app.config import settings
 from app.logging_setup import get_logger
+from app.safety.pii import redact_for_llm
 
 logger = get_logger(__name__)
 
@@ -157,7 +169,10 @@ def _classifier_enabled() -> bool:
 
 
 def _classifier_flags_injection(text: str) -> bool:
-    label = _classifier_label(classify_injection(text))
+    """Redact, then ask the classifier. See the module docstring for why the
+    classifier reads the redacted copy and layer 1 reads the raw text."""
+    redacted, _ = redact_for_llm(text)
+    label = _classifier_label(classify_injection(redacted))
     return bool(_INJECTION_LABEL_RE.search(label))
 
 
