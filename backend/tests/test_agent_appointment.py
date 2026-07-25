@@ -182,3 +182,61 @@ def test_irrelevant_intent_is_a_no_op(db, seeded, fake_llm):
     result = appointment.run(_state(intent="status"), db)
 
     assert result == {"completed_steps": ["appointment"]}
+
+
+# --- Replay after a completed cancel / reschedule ----------------------------
+# Same crash window as the booking replay above: the node commits its rows
+# before LangGraph writes the checkpoint saying it ran, so a process killed in
+# between resumes into a node whose work is done and re-executes it from the
+# top.
+
+
+def test_cancel_replay_returns_the_same_success_instead_of_a_not_found_error(
+    db, seeded, fake_llm
+):
+    """Without a guard the second pass finds no active appointment left and
+    turns a cancellation that succeeded into a reported failure."""
+    slot = _free_slots(db)[0]
+    booking = book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
+    state = _state(intent="cancel")
+
+    first = appointment.run(state, db)
+    second = appointment.run(state, db)
+
+    assert first["appointment"] == {"id": booking["id"], "status": "cancelled"}
+    assert second["appointment"] == first["appointment"]
+    assert "error" not in second
+    assert db.get(Appointment, booking["id"]).status == "cancelled"
+    db.refresh(slot)
+    assert slot.status == "free"
+    assert db.query(AuditEvent).filter_by(action="appointment.reused_existing").count() == 1
+
+
+def test_reschedule_replay_keeps_the_slot_it_already_moved_to(db, seeded, fake_llm):
+    """The second pass must hand back the appointment this run already moved,
+    with no second slot swap - and without asking the LLM for another slot.
+
+    The second scripted pick stays queued to prove the node stopped before
+    slot selection rather than that the script ran out.
+    """
+    dept_id = _cardiology_id(db)
+    old_slot, new_slot, spare = _free_slots(db, limit=3)
+    book_appointment(db, patient_id=1, slot_id=old_slot.id, reason="checkup")
+    client = fake_llm(
+        [
+            {"slot_id": new_slot.id, "reason": "prefers later"},
+            {"slot_id": spare.id, "reason": "the re-planned second pass"},
+        ]
+    )
+    state = _state(intent="reschedule", department_id=dept_id)
+
+    first = appointment.run(state, db)
+    second = appointment.run(state, db)
+
+    assert second["appointment"] == first["appointment"]
+    assert second["appointment"]["start_time"] == new_slot.start_time.isoformat()
+    for slot, expected in ((old_slot, "free"), (new_slot, "booked"), (spare, "free")):
+        db.refresh(slot)
+        assert slot.status == expected
+    assert db.query(Appointment).count() == 1
+    assert len(client.chat.completions.calls) == 1

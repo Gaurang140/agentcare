@@ -24,6 +24,7 @@ from app.tools.appointment_tools import (
     appointment_summary,
     book_appointment,
     cancel_appointment,
+    cancelled_summary,
     get_available_slots,
     reschedule_appointment,
 )
@@ -110,33 +111,75 @@ def _book_or_reschedule(
         return book_appointment(
             db, patient_id, slot_id, reason=request_text, workflow_run_id=workflow_id
         )
-    return reschedule_appointment(db, existing_id, slot_id)
+    return reschedule_appointment(db, existing_id, slot_id, workflow_run_id=workflow_id)
 
 
-def _booking_this_run_already_made(db: Session, workflow_id: int | None) -> Appointment | None:
-    """The confirmed appointment this run booked, if it already booked one.
+# --- Replay guards -----------------------------------------------------------
+# A node commits its rows before LangGraph writes the checkpoint saying it ran,
+# so a process that dies in that window resumes into a node whose work is done
+# but unrecorded, and re-executes it from the top. Every one of the three
+# actions needs its own way back out of that, and all three use the same mark:
+# the run's id, stamped on the appointment row by the tool that changed it.
+#
+# Booking and rescheduling leave the row confirmed, so they share one query and
+# the partial unique index on models/appointment.py backs it up - the index
+# makes a second confirmed row for the run impossible, and the query is what
+# keeps the resumed run going instead of failing on a conflict it cannot
+# resolve. Cancelling leaves the row cancelled, which falls outside that index,
+# so it gets its own query below.
 
-    A node commits its rows before LangGraph writes the checkpoint saying it
-    ran, so a process that dies in that window resumes into a node whose work
-    is done but unrecorded, and re-executes it from the top. Booking again
-    there would give the patient a second appointment against a different
-    slot.
 
-    The partial unique index this query reads (models/appointment.py) is the
-    backstop that makes the second booking impossible. Finding the first one
-    and handing it back is what keeps the resumed run going instead of
-    failing on a conflict it has no way to resolve.
-    """
+def _confirmed_appointment_from_this_run(
+    db: Session, workflow_id: int | None
+) -> Appointment | None:
+    """The confirmed appointment this run booked or moved, if it already did."""
     if workflow_id is None:
         return None
     return db.query(Appointment).filter_by(workflow_run_id=workflow_id, status="confirmed").first()
 
 
+def _cancellation_from_this_run(db: Session, workflow_id: int | None) -> Appointment | None:
+    """The appointment this run cancelled, if it already cancelled one.
+
+    Without this the second pass finds no active appointment left to cancel and
+    reports a cancellation that succeeded as a failure.
+    """
+    if workflow_id is None:
+        return None
+    return db.query(Appointment).filter_by(workflow_run_id=workflow_id, status="cancelled").first()
+
+
+def _reuse_existing(
+    db: Session, workflow_id: int | None, appt: Appointment, intent: str, result: dict
+) -> dict:
+    """The shared exit for every replayed action: hand back the result the
+    first pass produced and record that this pass reused it."""
+    write_audit(
+        db,
+        None,
+        "appointment.reused_existing",
+        "appointment",
+        appt.id,
+        {"workflow_run_id": workflow_id},
+    )
+    update = {"appointment": result, "completed_steps": ["appointment"]}
+    _exit_audit(
+        db, workflow_id, {"action": intent, "appointment_id": result["id"], "reused": True}
+    )
+    return update
+
+
 def _handle_cancel(db: Session, workflow_id: int | None, patient_id: int) -> dict:
+    already_cancelled = _cancellation_from_this_run(db, workflow_id)
+    if already_cancelled is not None:
+        return _reuse_existing(
+            db, workflow_id, already_cancelled, "cancel", cancelled_summary(already_cancelled)
+        )
+
     existing = _latest_active_appointment(db, patient_id)
     if existing is None:
         raise NotFoundError("no active appointment to cancel")
-    result = cancel_appointment(db, existing.id)
+    result = cancel_appointment(db, existing.id, workflow_run_id=workflow_id)
     update = {"appointment": result, "completed_steps": ["appointment"]}
     _exit_audit(db, workflow_id, {"action": "cancel", "appointment_id": result["id"]})
     return update
@@ -147,24 +190,11 @@ def _handle_book_or_reschedule(
 ) -> dict:
     patient_id = state["patient_id"]
 
-    already_booked = _booking_this_run_already_made(db, workflow_id)
-    if already_booked is not None:
-        result = appointment_summary(already_booked)
-        write_audit(
-            db,
-            None,
-            "appointment.reused_existing",
-            "appointment",
-            already_booked.id,
-            {"workflow_run_id": workflow_id},
+    already_confirmed = _confirmed_appointment_from_this_run(db, workflow_id)
+    if already_confirmed is not None:
+        return _reuse_existing(
+            db, workflow_id, already_confirmed, intent, appointment_summary(already_confirmed)
         )
-        update = {"appointment": result, "completed_steps": ["appointment"]}
-        _exit_audit(
-            db,
-            workflow_id,
-            {"action": intent, "appointment_id": result["id"], "reused": True},
-        )
-        return update
 
     department_id = state.get("department_id")
     if department_id is None:

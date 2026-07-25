@@ -53,6 +53,14 @@ def appointment_summary(appt: Appointment, slot: AppointmentSlot | None = None) 
     }
 
 
+def cancelled_summary(appt: Appointment) -> dict:
+    """The dict shape the cancel path hands back. Deliberately smaller than
+    `appointment_summary`: a cancelled appointment's slot is free again, so
+    naming a doctor and a time would read as a booking that still stands.
+    """
+    return {"id": appt.id, "status": appt.status}
+
+
 def get_available_slots(
     db: Session,
     department_id: int,
@@ -147,12 +155,23 @@ def book_appointment(
     return appointment_summary(appt, slot)
 
 
-def reschedule_appointment(db: Session, appointment_id: int, new_slot_id: int) -> dict:
+def reschedule_appointment(
+    db: Session, appointment_id: int, new_slot_id: int, workflow_run_id: int | None = None
+) -> dict:
     """Claim new_slot_id, then free the old slot - both in one transaction.
 
     The new slot is claimed first: if that conditional UPDATE affects zero
     rows the function raises before touching the old slot, so a failed
     reschedule never leaves the patient without their original booking.
+
+    Passing workflow_run_id stamps the run that moved the appointment onto the
+    row, the same tie book_appointment writes, so a replayed run recognizes the
+    move it already made instead of swapping slots a second time
+    (agents/appointment.py). The row stays confirmed, so it takes part in the
+    one-booking-per-run index: a run holds one confirmed appointment, and this
+    is it. Passing None leaves whatever stamp the row already carries, which is
+    what the patient's own reschedule route (api/routes_patient.py) wants -
+    that call is not part of any run.
     """
     appt = db.get(Appointment, appointment_id)
     if appt is None:
@@ -175,6 +194,8 @@ def reschedule_appointment(db: Session, appointment_id: int, new_slot_id: int) -
     appt.slot_id = new_slot_id
     appt.doctor_id = new_slot.doctor_id
     appt.status = "confirmed"
+    if workflow_run_id is not None:
+        appt.workflow_run_id = workflow_run_id
     try:
         db.flush()
     except IntegrityError as exc:
@@ -200,8 +221,24 @@ def reschedule_appointment(db: Session, appointment_id: int, new_slot_id: int) -
     return appointment_summary(appt, new_slot)
 
 
-def cancel_appointment(db: Session, appointment_id: int) -> dict:
-    """Free the slot and mark the appointment cancelled."""
+def cancel_appointment(
+    db: Session, appointment_id: int, workflow_run_id: int | None = None
+) -> dict:
+    """Free the slot and mark the appointment cancelled.
+
+    Passing workflow_run_id stamps the run that cancelled onto the row, which
+    is how the appointment node recognizes its own completed cancel on a replay
+    (agents/appointment.py). A cancelled row sits outside the
+    one-booking-per-run index, so the stamp can never collide with a booking
+    holding the same id.
+
+    When a different run booked the appointment, the stamp overwrites that
+    run's id. The audit trail is what keeps the booking run readable: the
+    "appointment.booked" row for this appointment id is still there, alongside
+    the "appointment.cancelled" row written below. Passing None leaves the
+    stamp untouched, which is what the patient's own cancel route
+    (api/routes_patient.py) wants - it is not part of any run.
+    """
     appt = db.get(Appointment, appointment_id)
     if appt is None:
         raise NotFoundError(f"Appointment {appointment_id} not found")
@@ -210,6 +247,8 @@ def cancel_appointment(db: Session, appointment_id: int) -> dict:
         update(AppointmentSlot).where(AppointmentSlot.id == appt.slot_id).values(status="free")
     )
     appt.status = "cancelled"
+    if workflow_run_id is not None:
+        appt.workflow_run_id = workflow_run_id
     db.flush()
 
     write_audit(
@@ -221,7 +260,7 @@ def cancel_appointment(db: Session, appointment_id: int) -> dict:
         {"slot_id": appt.slot_id},
     )
     db.commit()
-    return {"id": appt.id, "status": "cancelled"}
+    return cancelled_summary(appt)
 
 
 def generate_slots_for_doctor(

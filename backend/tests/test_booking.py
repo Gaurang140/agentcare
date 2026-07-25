@@ -205,6 +205,84 @@ def test_rescheduling_into_a_second_confirmed_booking_for_one_run_conflicts(db, 
     assert free_slots[1].status == "free"
 
 
+def test_reschedule_stamps_the_run_and_stays_inside_the_one_booking_per_run_index(db, seeded):
+    """The appointment node's replay guard reads `workflow_run_id`, so a
+    reschedule has to stamp it. A run does exactly one appointment action, so
+    the rescheduled row is the only confirmed row that run holds - and the
+    index still refuses a second one, on sqlite, not in application code.
+    """
+    run_id = _workflow_run_id(db)
+    first_slot = _free_slot(db)
+    booking = book_appointment(db, patient_id=1, slot_id=first_slot.id, reason="checkup")
+    free_slots = (
+        db.query(AppointmentSlot)
+        .filter(AppointmentSlot.status == "free", AppointmentSlot.id != first_slot.id)
+        .order_by(AppointmentSlot.id)
+        .limit(2)
+        .all()
+    )
+
+    moved = reschedule_appointment(
+        db, appointment_id=booking["id"], new_slot_id=free_slots[0].id, workflow_run_id=run_id
+    )
+
+    assert moved["status"] == "confirmed"
+    assert db.get(Appointment, booking["id"]).workflow_run_id == run_id
+
+    with pytest.raises(ConflictError):
+        book_appointment(
+            db, patient_id=1, slot_id=free_slots[1].id, reason="second", workflow_run_id=run_id
+        )
+
+
+def test_cancel_stamps_the_run_and_falls_outside_the_index(db, seeded):
+    """A cancelled row drops out of the partial index, so the run id a cancel
+    stamps can never compete with a booking for the same id."""
+    run_id = _workflow_run_id(db)
+    slot = _free_slot(db)
+    booking = book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
+
+    cancel_appointment(db, appointment_id=booking["id"], workflow_run_id=run_id)
+
+    row = db.get(Appointment, booking["id"])
+    assert row.workflow_run_id == run_id
+    assert row.status == "cancelled"
+    rebooked = book_appointment(
+        db, patient_id=1, slot_id=slot.id, reason="again", workflow_run_id=run_id
+    )
+    assert rebooked["status"] == "confirmed"
+
+
+def test_cancel_without_a_run_leaves_the_booking_run_stamp_alone(db, seeded):
+    """The patient route cancels outside any workflow run (routes_patient.py),
+    so it must not wipe the id of the run that booked the appointment."""
+    run_id = _workflow_run_id(db)
+    slot = _free_slot(db)
+    booking = book_appointment(
+        db, patient_id=1, slot_id=slot.id, reason="checkup", workflow_run_id=run_id
+    )
+
+    cancel_appointment(db, appointment_id=booking["id"])
+
+    assert db.get(Appointment, booking["id"]).workflow_run_id == run_id
+
+
+def test_one_booking_per_run_index_is_declared_on_confirmed_rows_only(db):
+    """The model layer's half of the proof: the predicate both stamps rely on,
+    read off the mapped index rather than assumed. Alembic revision
+    8524b9522086 writes the same predicate on a real database."""
+    index = next(
+        i for i in Appointment.__table__.indexes if i.name == "uq_appointments_workflow_run"
+    )
+
+    assert index.unique
+    assert list(index.columns.keys()) == ["workflow_run_id"]
+    for dialect in ("sqlite", "postgresql"):
+        assert str(index.dialect_options[dialect]["where"]) == (
+            "workflow_run_id IS NOT NULL AND status = 'confirmed'"
+        )
+
+
 def test_an_unrelated_integrity_error_is_not_reported_as_a_slot_conflict(db, seeded):
     """A ConflictError tells the appointment agent to pick another slot and
     try again. Only the one-booking-per-run index means that; anything else
