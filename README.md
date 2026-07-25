@@ -120,7 +120,7 @@ LLM_FALLBACK_BASE_URL=http://localhost:1234/v1
 LLM_FALLBACK_MODEL=your_local_model
 ```
 
-**Honest note on running without a key.** The system still runs. When no model
+**Note on running without a key.** The system still runs. When no model
 is reachable, an agent's structured-output call fails, the node records the
 error instead of raising, and the graph routes the run to staff escalation with
 a full audit trail. That is the designed degradation path, not a crash: nothing

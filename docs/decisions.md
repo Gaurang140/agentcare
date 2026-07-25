@@ -2,7 +2,7 @@
 
 Each decision below is written as a short ADR: Context, Decision, Why (with verified versions,
 dates and costs) and Revisit-when. Every version and price was verified on 2026-07-23 unless
-noted otherwise. Each ADR is tagged with an honest status: **Implemented now** means the code is
+noted otherwise. Each ADR is tagged with a status: **Implemented now** means the code is
 in this repo and runs; **Implemented as committed IaC** means the Terraform (`infra/terraform/`)
 and/or Kubernetes (`infra/k8s/`) source is committed and validates (`tofu validate` /
 `terraform validate`, `kubectl kustomize`), but nothing has been applied against a real GCP
@@ -71,7 +71,7 @@ implemented as committed IaC (`infra/terraform/modules/cloud-sql`, `enable_cloud
 
 **Context.** The app needs a relational core for patients, appointments and the audit trail, and
 the LangGraph checkpointer needs a persistent store too. The deployment runs under the owner's
-one-time GCP trial credit (about €250, roughly 3 months from late July 2026) and needs an honest
+one-time GCP trial credit (about €250, roughly 3 months from late July 2026) and needs a stated
 plan for what happens once that credit lapses.
 
 **Decision.** SQLAlchemy 2.0.51 over SQLite by default locally and Postgres (via
@@ -90,7 +90,7 @@ Firestore and Memorystore are rejected.
   on its own: `db-f1-micro`/`ENTERPRISE` edition is about $8/mo and dev-only with no SLA, and the
   cheapest dedicated-core `db-standard-1` is about $49/mo plus roughly $0.17 to $0.22 per GB-month
   of SSD. Under the trial credit, the `db-f1-micro` instance this Terraform module provisions
-  costs nothing out of pocket; the credit-expiry decision point is called out honestly in
+  costs nothing out of pocket; the credit-expiry decision point is called out in
   `docs/deployment-gcp.md`.
 - Neon free tier: 0.5 GB storage per project, 100 compute-hours per month, auto scale-to-zero after
   5 minutes idle, no credit card, PostgreSQL 14 through 18. It survives dormancy and wakes fast, so
@@ -168,10 +168,10 @@ identically.
   not cut the SSE stream (`infra/k8s/overlays/gcp/backendconfig.yaml`). None of that has a
   first-class equivalent on Cloud Run. There is deliberately no autoscaler: the backend runs its
   APScheduler jobs in-process with no distributed lock, so a second replica would fire every
-  reminder twice, and an honest single replica beats an autoscaler that corrupts the job schedule
+  reminder twice, and a single replica beats an autoscaler that corrupts the job schedule
   under load. Autopilot specifically, not GKE Standard, because it removes
   node-pool sizing and patching entirely: Google manages the nodes and bills per pod resource
-  request instead of per VM. The honest trade-off against Cloud Run is cost at idle: Cloud Run can
+  request instead of per VM. The trade-off against Cloud Run is cost at idle: Cloud Run can
   scale to zero, while the two GKE Autopilot Deployments run continuously and cost roughly
   $15-30/month in pod billing regardless of traffic (`docs/deployment-gcp.md`'s cost table) - a real
   floor Cloud Run would not have, absorbed here by the trial credit and accepted for the fuller
@@ -189,7 +189,7 @@ identically.
   control plane or a Kubernetes dependency that six static modules do not need.
 
 **Revisit when.** Traffic is genuinely low and idle-cost matters more than the platform story (then
-Cloud Run is the honest cheaper answer), a client mandates the Terraform CLI (swap the binary), or
+Cloud Run is the cheaper answer), a client mandates the Terraform CLI (swap the binary), or
 the project grows into a self-service infra platform (then reconsider Pulumi or Crossplane).
 
 ---

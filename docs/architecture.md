@@ -209,7 +209,7 @@ transaction as the change it records.
 
 ## Deployment views
 
-Honest status: the application code and the local container stack are real and run today. The repo
+Status: the application code and the local container stack are implemented and run today. The repo
 has a `backend/Dockerfile`, a `frontend/Dockerfile` and a `docker-compose.yml` at its root. The GCP
 path below is committed as Infrastructure as Code and validates cleanly (`tofu validate` /
 `terraform validate`, `kubectl kustomize`), but nothing has been applied against a real GCP
