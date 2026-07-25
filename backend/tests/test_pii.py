@@ -447,6 +447,32 @@ def test_clean_admin_text_survives_both_passes():
     assert counts == {}
 
 
+def test_german_booking_text_survives_both_passes():
+    """The German half of the test above, on the auto path production takes.
+
+    en_core_web_sm reading German tags "Termin" and "Kardiologie" as LOCATION at
+    0.85, so a booking request would lose the department name before routing
+    ever sees it and `routing.run` would escalate to staff review. Clean German
+    booking prose must come out byte for byte."""
+    text, counts = redact_for_llm("Ich brauche einen Termin in der Kardiologie naechste Woche.")
+    assert text == "Ich brauche einen Termin in der Kardiologie naechste Woche."
+    assert counts == {}
+
+
+def test_german_booking_text_keeps_the_department_while_real_pii_goes():
+    """Same sentence carrying a real phone number: the number is redacted and
+    the two words routing needs survive. Detection on German text must not be
+    the price of the rule above."""
+    text, counts = redact_for_llm(
+        "Ich brauche einen Termin in der Kardiologie, meine Nummer ist 0176 12345678."
+    )
+    assert "[REDACTED_PHONE]" in text
+    assert "12345678" not in text
+    assert "Termin" in text
+    assert "Kardiologie" in text
+    assert counts == {"phone": 1}
+
+
 def test_regex_pass_wins_where_presidio_overlaps():
     """Presidio also recognizes emails. The regex pass ran first, so the value
     is already a token by then: exactly one token, counted exactly once, and

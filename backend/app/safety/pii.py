@@ -32,13 +32,16 @@ bare phone-number shape with no context word at 0.4. 0.5 keeps the first two
 groups and drops the phone-shape guesses, which pass 1 has already had its own
 stricter go at.
 
-Language: pass 2 analyzes with the language the caller names
-(`PatientProfile.preferred_language`, "en" or "de"). With no language it
-analyzes English, and adds a German pass only when the text carries German
-cues (`_GERMAN_HINT_RE`). That gate is deliberate: `de_core_news_sm` reads
-English admin text badly enough to tag "Book", "Insurance card" and "sinus
-rhythm" as person names, so an unconditional German pass would redact half of
-an ordinary English request.
+Language: pass 2 analyzes with exactly one language, never two. The language
+the caller names wins (`PatientProfile.preferred_language`, "en" or "de"). With
+no language, text carrying German cues (`_GERMAN_HINT_RE`) is read with the
+German model and everything else with the English one. The single-model rule is
+deliberate: each small spaCy model reads the other language badly enough to
+invent entities at the same 0.85 score a real name arrives at.
+`de_core_news_sm` tags "Book", "Insurance card" and "sinus rhythm" as person
+names, and `en_core_web_sm` tags "Termin" and "Kardiologie" as locations, which
+would cost a German booking request its department name before routing reads
+it.
 
 Failure containment: the engines are built lazily on first use and held as a
 module-level singleton (construction loads two spaCy models, about a second).
@@ -215,9 +218,11 @@ _PRESIDIO_SCORE_THRESHOLD = 0.5
 _SPACY_MODELS: dict[str, str] = {"en": "en_core_web_sm", "de": "de_core_news_sm"}
 
 # German cues: function words and umlauts that an English request does not
-# carry. One hit is enough to add the German pass (see the module docstring for
-# why the German model is not run unconditionally). Over-triggering is the safe
-# direction: it only adds a second opinion on the same text.
+# carry. One hit sends the text to the German model instead of the English one
+# (see the module docstring for why the two never read the same text). One hit
+# is enough because German prose carries several cues per sentence, and the two
+# entries an English sentence could hit ("die", "hat") are words a booking
+# request does not use.
 _GERMAN_HINT_RE = re.compile(
     r"(?i)(?<!\w)(ich|mein|meine|meinen|meiner|mir|mich|bitte|termin|arzt|"
     r"aerztin|krankenhaus|und|ist|sind|nicht|kein|keine|einen|eine|der|die|das|"
@@ -311,13 +316,14 @@ def reset_engines_for_tests() -> None:
 
 
 def _languages_for(text: str, language: str | None) -> tuple[str, ...]:
-    """Which analyzer languages to run. A caller's language wins; with none,
-    English always runs and German joins it on German-looking text."""
+    """Which analyzer languages to run: exactly one. A caller's language wins;
+    with none, German-cued text goes to the German model and everything else to
+    the English one."""
     named = (language or "").strip().lower()[:2]
     if named in _SPACY_MODELS:
         return (named,)
     if _GERMAN_HINT_RE.search(text):
-        return ("en", "de")
+        return ("de",)
     return ("en",)
 
 
@@ -348,8 +354,8 @@ def _presidio_pass(text: str, language: str | None) -> tuple[str, dict[str, int]
         ]
         if not keep:
             return text, {}
-        # The anonymizer resolves overlaps between the two language passes, so
-        # a name both models found is replaced (and counted) exactly once.
+        # The anonymizer resolves overlaps between recognizers, so a span two
+        # of them reported is replaced (and counted) exactly once.
         anonymized = engines.anonymizer.anonymize(
             text=text, analyzer_results=keep, operators=engines.operators
         )
