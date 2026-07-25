@@ -146,6 +146,70 @@ def test_patient_name_in_the_filename_is_redacted(db, seeded, fake_llm):
     assert "mustermann" not in prompt.lower()
 
 
+_ENGLISH_BODY = (
+    "ECG report. Patient: Erika Mustermann, resident in Munich. Sinus rhythm, "
+    "no further action. Insurance card on file. Book the follow-up appointment "
+    "with the care team."
+)
+
+
+def test_german_cue_in_the_filename_does_not_switch_an_english_body(db, seeded, fake_llm):
+    """The filename and the body are redacted in one pass, so the language the
+    NER pass runs with is pinned from the body alone. A German word in the
+    filename must not send an English report to the German model, which reads
+    "Sinus rhythm" and "Book the" as person names."""
+    doc = _store_doc(db, filename="befund_der_untersuchung.pdf", text=_ENGLISH_BODY)
+    client = fake_llm([{"document_type": "ecg_report", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    prompt = _prompt_of(client)
+    assert "Sinus rhythm, no further action" in prompt
+    assert "Book the follow-up appointment" in prompt
+    # The body's real PII still goes, and the filename still reaches the model.
+    assert "Mustermann" not in prompt
+    assert "[REDACTED_NAME]" in prompt
+    assert "Filename: befund der untersuchung.pdf" in prompt
+
+
+def test_single_german_stopword_in_the_filename_does_not_switch_the_body(db, seeded, fake_llm):
+    """One stopword is all the language heuristic needs, and a spaced filename
+    hands it several. Same pin, the smallest cue."""
+    doc = _store_doc(db, filename="ecg-und-labor.pdf", text=_ENGLISH_BODY)
+    client = fake_llm([{"document_type": "ecg_report", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    prompt = _prompt_of(client)
+    assert "Sinus rhythm, no further action" in prompt
+    assert "Book the follow-up appointment" in prompt
+    assert "Mustermann" not in prompt
+
+
+def test_german_body_is_still_read_with_the_german_model(db, seeded, fake_llm):
+    """The other direction is unchanged: the body decides, so a German report
+    keeps its German-model catches and its classification vocabulary."""
+    doc = _store_doc(
+        db,
+        filename="report_2.pdf",
+        text=(
+            "Impfpass und Befund der Untersuchung. Patient: Erika Mustermann, "
+            "wohnhaft in Muenchen. Bitte einen Termin in der Kardiologie "
+            "vereinbaren. Die Untersuchung ergab einen normalen Sinusrhythmus."
+        ),
+    )
+    client = fake_llm([{"document_type": "other", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    prompt = _prompt_of(client)
+    assert "Mustermann" not in prompt
+    assert "[REDACTED_NAME]" in prompt
+    assert "[REDACTED_LOCATION]" in prompt
+    assert "Kardiologie" in prompt
+    assert "Untersuchung" in prompt
+
+
 def test_ordinary_filename_reaches_the_prompt_unchanged(db, seeded, fake_llm):
     doc = _store_doc(db, filename="impfpass.pdf", text="Impfpass")
     client = fake_llm([{"document_type": "other", "confidence": 0.9}])

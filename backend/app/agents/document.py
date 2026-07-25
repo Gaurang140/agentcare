@@ -25,11 +25,18 @@ reason: it is a string the uploading client chose and it lands in the
 classification prompt. It is normalized first (invisible characters out,
 whitespace collapsed, capped), then screened, then redacted along with the
 body in one pass over the assembled prompt (see `_redacted_prompt` for why
-the two are not redacted separately). A filename that the guard blocks leaves
-the document typed "other" and writes the same
+the two are not redacted separately, and `_body_language` for the one
+decision the merge is not allowed to make). A filename that the guard blocks
+leaves the document typed "other" and writes the same
 "safety.injection_blocked_document" row the body path writes, with a
 `"field": "filename"` marker so a reader can tell the two apart. Only the
 copy in the prompt changes; `PatientDocument.filename` keeps the original.
+
+The body and the two filename readings are screened as one group
+(`screen_injection_group`), not one call each: the deterministic layer still
+reads every one of them separately, so a block still names the poisoned part,
+while the optional classifier reads them joined and a document costs one
+round trip to it instead of three.
 """
 
 from __future__ import annotations
@@ -46,14 +53,19 @@ from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import PatientDocument
-from app.safety.injection_guard import InjectionResult, screen_injection
-from app.safety.pii import redact_for_llm
+from app.safety.injection_guard import InjectionResult, screen_injection_group
+from app.safety.pii import _languages_for as _pii_languages_for, redact_for_llm
 from app.tools.audit_tools import write_audit
 from app.tools.document_tools import check_required_documents
 
 logger = get_logger(__name__)
 
 _UNKNOWN_TYPE = "other"
+
+# Markers for the "field" key of a blocked-document audit row. The body has no
+# marker of its own on purpose (see `_blocked_field`).
+_FILENAME_FIELD = "filename"
+_WHOLE_DOCUMENT_FIELD = "filename_and_text"
 
 # A classification the model is not sure about is a guess, and a wrong
 # document_type quietly changes what the department counts as missing. Under
@@ -74,6 +86,27 @@ def _classification_prompt(filename: str, extracted_text: str) -> str:
     return f"Filename: {filename}\nExtracted text (may be empty): {extracted_text}"
 
 
+def _body_language(extracted_text: str) -> str:
+    """The one language pass 2 reads the assembled prompt with, decided by the
+    document body alone.
+
+    `redact_for_llm` decides for itself from whatever string it is handed, and
+    the string it is handed here is the filename plus the body. That gives the
+    filename a vote: one German word in a name, spaced into three by
+    `_spaced_filename`, is enough to send an English report to the German
+    model. Measured on `befund_der_untersuchung.pdf` over an English body,
+    "Sinus rhythm" and "Book the" come back as `[REDACTED_NAME]`, which is the
+    cross-language failure `safety/pii.py`'s single-model rule exists to
+    prevent, reached through the filename instead of through the body. The
+    body is the text that says what language the document is in, so the body
+    is what the decision reads.
+
+    Same heuristic `redact_for_llm` would apply on its own, imported rather
+    than copied so the two can never drift apart.
+    """
+    return _pii_languages_for(extracted_text, None)[0]
+
+
 def _redacted_prompt(filename: str, extracted_text: str) -> tuple[str, dict[str, int]]:
     """Redact the assembled prompt in one pass, rather than the filename and
     the extracted text separately.
@@ -85,8 +118,14 @@ def _redacted_prompt(filename: str, extracted_text: str) -> tuple[str, dict[str,
     the strongest classification signal it has, while inside the prompt it
     stays a filename. A patient name in the filename is still caught either
     way.
+
+    The one thing the merge must not decide is the language, so that is pinned
+    explicitly from the body (see `_body_language`).
     """
-    return redact_for_llm(_classification_prompt(filename, extracted_text))
+    return redact_for_llm(
+        _classification_prompt(filename, extracted_text),
+        language=_body_language(extracted_text),
+    )
 
 
 # --- Filename handling ------------------------------------------------------
@@ -130,18 +169,37 @@ def _spaced_filename(normalized: str) -> str:
     return _WHITESPACE_RE.sub(" ", _SEPARATOR_RE.sub(" ", normalized)).strip()
 
 
-def _screen_filename(normalized: str, spaced: str) -> InjectionResult:
-    """Screen both readings of the name, since neither covers the other: the
-    spaced one is what makes `ignore_previous_instructions.txt` match a
-    pattern, and the literal one is what still carries a chat-template token
-    like `<|im_start|>`, which the spaced reading would break apart. The
-    second screen is skipped when the two strings are identical, which is the
-    common case (`impfpass.pdf`).
+def _document_readings(extracted_text: str, normalized: str, spaced: str) -> list[str]:
+    """Everything one document contributes to its prompt, in screening order.
+
+    The body comes first, so a poisoned body still blocks on the body and
+    keeps the unmarked audit payload it had before filenames were screened at
+    all. Then the literal filename, then its separator-spaced reading, since
+    neither of those covers the other: the spaced one is what makes
+    `ignore_previous_instructions.txt` match a pattern, and the literal one is
+    what still carries a chat-template token like `<|im_start|>`, which the
+    spaced reading breaks apart. The spaced reading is dropped when it is the
+    same string, which is the common case (`impfpass.pdf`).
     """
-    result = screen_injection(normalized)
-    if result.action == "block" or spaced == normalized:
-        return result
-    return screen_injection(spaced)
+    readings = [extracted_text, normalized]
+    if spaced != normalized:
+        readings.append(spaced)
+    return readings
+
+
+def _blocked_field(reading_index: int | None) -> str | None:
+    """Which part of the document a block names, from the reading the guard
+    blocked on.
+
+    Reading 0 is the body, and a body block carries no marker at all - that
+    absence is what an existing audit consumer reads. The rest are the
+    filename. `None` comes back from a layer 2 block, which judged every
+    reading as one text and so names no single part; it gets its own marker
+    rather than silently reading as a body block.
+    """
+    if reading_index is None:
+        return _WHOLE_DOCUMENT_FIELD
+    return None if reading_index == 0 else _FILENAME_FIELD
 
 
 def _block_document(
@@ -198,16 +256,13 @@ def run(state: AgentState, db: Session) -> dict:
             if doc is None or doc.document_type != _UNKNOWN_TYPE:
                 continue
 
-            injection = screen_injection(doc.extracted_text or "")
-            if injection.action == "block":
-                _block_document(db, doc, injection)
-                continue
-
             normalized_name = _normalize_filename(doc.filename)
             spaced_name = _spaced_filename(normalized_name)
-            name_injection = _screen_filename(normalized_name, spaced_name)
-            if name_injection.action == "block":
-                _block_document(db, doc, name_injection, field="filename")
+            injection, blocked_reading = screen_injection_group(
+                _document_readings(doc.extracted_text or "", normalized_name, spaced_name)
+            )
+            if injection.action == "block":
+                _block_document(db, doc, injection, field=_blocked_field(blocked_reading))
                 continue
 
             prompt, counts = _redacted_prompt(spaced_name, doc.extracted_text or "")

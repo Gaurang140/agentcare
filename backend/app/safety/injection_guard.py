@@ -29,12 +29,19 @@ tokens and leaves phrasing alone, and phrasing is the only thing an
 injection classifier judges. No audit row is written here - `screen_injection`
 has no database session, and the agent call sites already audit the
 redactions they perform on their own way to the model.
+
+`screen_injection_group` is the same guard for a caller holding several
+strings bound for one prompt: layer 1 still reads each of them, layer 2 reads
+all of them in a single call. The difference is cost, not coverage - layer 1
+is a local function and layer 2 is a network round trip - so batching keeps a
+document at one classifier call instead of one per string it contributes.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -176,24 +183,58 @@ def _classifier_flags_injection(text: str) -> bool:
     return bool(_INJECTION_LABEL_RE.search(label))
 
 
-def screen_injection(text: str) -> InjectionResult:
-    """Screen `text` for prompt-injection attempts before it reaches a model.
+def screen_injection_group(readings: Sequence[str]) -> tuple[InjectionResult, int | None]:
+    """Screen several strings that end up in the same prompt as one unit.
 
-    Layer 1 always runs and wins outright on a match. Layer 2 only runs when
-    both `settings.llm_api_key` and `settings.injection_guard_model` are
-    set; if it raises, the error is logged and the result falls back to
-    layer 1's own (clean, by construction - layer 1 already returned above
-    otherwise) verdict, so a classifier outage never blocks a request.
+    A caller with more than one string to screen (`agents/document.py` has
+    three for every document: the extracted text, the filename and the
+    filename read as words) would otherwise pay for one classifier round trip
+    per string. The two layers are priced differently, so they are batched
+    differently:
+
+    - Layer 1 runs on every reading, in order, unchanged. It is a local pure
+      function, so screening three strings costs the same as screening one,
+      and neither filename reading covers the other.
+    - Layer 2 runs at most once, over every reading joined by newlines. It
+      judges phrasing, and phrasing does not change because it arrives in one
+      string instead of three.
+
+    Returns the verdict and the index of the reading layer 1 blocked on. The
+    index is None when nothing blocked, and also when layer 2 blocked: layer 2
+    read the readings as one text, so no single one of them is identifiable
+    there.
+
+    Layer 2 only runs when both `settings.llm_api_key` and
+    `settings.injection_guard_model` are set; if it raises, the error is
+    logged and the result falls back to layer 1's own (clean, by construction
+    - layer 1 already returned above otherwise) verdict, so a classifier
+    outage never blocks a request.
     """
-    deterministic_matches = _deterministic_matches(text)
-    if deterministic_matches:
-        return InjectionResult(action="block", matched=deterministic_matches, via="deterministic")
+    for index, text in enumerate(readings):
+        deterministic_matches = _deterministic_matches(text)
+        if deterministic_matches:
+            result = InjectionResult(
+                action="block", matched=deterministic_matches, via="deterministic"
+            )
+            return result, index
 
     if _classifier_enabled():
         try:
-            if _classifier_flags_injection(text):
-                return InjectionResult(action="block", matched=["classifier"], via="classifier")
+            if _classifier_flags_injection("\n".join(readings)):
+                blocked = InjectionResult(action="block", matched=["classifier"], via="classifier")
+                return blocked, None
         except Exception as exc:  # noqa: BLE001 - classifier errors must never block
             logger.warning("injection_classifier_failed_falling_back", error=str(exc))
 
-    return InjectionResult(action="allow", matched=[], via="none")
+    return InjectionResult(action="allow", matched=[], via="none"), None
+
+
+def screen_injection(text: str) -> InjectionResult:
+    """Screen `text` for prompt-injection attempts before it reaches a model.
+
+    Layer 1 always runs and wins outright on a match; layer 2 is optional and
+    runs after it. The one-string form of `screen_injection_group`, which
+    holds the layer ordering both callers share.
+    """
+    result, _ = screen_injection_group([text])
+    return result
