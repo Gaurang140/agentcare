@@ -36,7 +36,9 @@ The body and the two filename readings are screened as one group
 (`screen_injection_group`), not one call each: the deterministic layer still
 reads every one of them separately, so a block still names the poisoned part,
 while the optional classifier reads them joined and a document costs one
-round trip to it instead of three.
+round trip to it instead of three. That classifier copy is redacted too, so
+it gets the same pinned language the classification prompt gets - the merge
+is not allowed to decide the language on either path.
 """
 
 from __future__ import annotations
@@ -87,8 +89,12 @@ def _classification_prompt(filename: str, extracted_text: str) -> str:
 
 
 def _body_language(extracted_text: str) -> str:
-    """The one language pass 2 reads the assembled prompt with, decided by the
-    document body alone.
+    """The one language every redaction of this document runs with, decided by
+    the document body alone.
+
+    Both places that redact read it: the classification prompt
+    (`_redacted_prompt`) and the injection guard's own copy for its classifier,
+    which merges the same readings and so has the same problem.
 
     `redact_for_llm` decides for itself from whatever string it is handed, and
     the string it is handed here is the filename plus the body. That gives the
@@ -256,16 +262,18 @@ def run(state: AgentState, db: Session) -> dict:
             if doc is None or doc.document_type != _UNKNOWN_TYPE:
                 continue
 
+            extracted_text = doc.extracted_text or ""
             normalized_name = _normalize_filename(doc.filename)
             spaced_name = _spaced_filename(normalized_name)
             injection, blocked_reading = screen_injection_group(
-                _document_readings(doc.extracted_text or "", normalized_name, spaced_name)
+                _document_readings(extracted_text, normalized_name, spaced_name),
+                language=_body_language(extracted_text),
             )
             if injection.action == "block":
                 _block_document(db, doc, injection, field=_blocked_field(blocked_reading))
                 continue
 
-            prompt, counts = _redacted_prompt(spaced_name, doc.extracted_text or "")
+            prompt, counts = _redacted_prompt(spaced_name, extracted_text)
             _merge_counts(pii_counts, counts)
             result = chat_json(system, prompt, DocumentOutput)
             if result.confidence < _CONFIDENCE_THRESHOLD:

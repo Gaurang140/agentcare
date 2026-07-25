@@ -32,9 +32,15 @@ redactions they perform on their own way to the model.
 
 `screen_injection_group` is the same guard for a caller holding several
 strings bound for one prompt: layer 1 still reads each of them, layer 2 reads
-all of them in a single call. The difference is cost, not coverage - layer 1
-is a local function and layer 2 is a network round trip - so batching keeps a
-document at one classifier call instead of one per string it contributes.
+all of them in a single call. Layer 1 is a local function and layer 2 is a
+network round trip, so batching keeps a document at one classifier call
+instead of one per string it contributes. For layer 1 that is cost only; for
+layer 2 coverage shifts, since one label over joined text is not the same as
+one label per part, and a classifier has a fixed input window. Two things
+follow from that and both live in `screen_injection_group`: the join puts the
+short readings first so a long one cannot push them out of the window, and
+the caller names the redaction language rather than letting the merged string
+decide it.
 """
 
 from __future__ import annotations
@@ -175,15 +181,39 @@ def _classifier_enabled() -> bool:
     return bool(settings.llm_api_key) and bool(settings.injection_guard_model)
 
 
-def _classifier_flags_injection(text: str) -> bool:
+def _classifier_flags_injection(text: str, language: str | None = None) -> bool:
     """Redact, then ask the classifier. See the module docstring for why the
-    classifier reads the redacted copy and layer 1 reads the raw text."""
-    redacted, _ = redact_for_llm(text)
+    classifier reads the redacted copy and layer 1 reads the raw text.
+
+    `language` is the caller's, forwarded straight to `redact_for_llm`. With
+    None the redactor decides from the text it is handed, which is the right
+    default for a single string and the wrong one for a joined group (see
+    `screen_injection_group`).
+    """
+    redacted, _ = redact_for_llm(text, language=language)
     label = _classifier_label(classify_injection(redacted))
     return bool(_INJECTION_LABEL_RE.search(label))
 
 
-def screen_injection_group(readings: Sequence[str]) -> tuple[InjectionResult, int | None]:
+def _classifier_input(readings: Sequence[str]) -> str:
+    """The readings as one string for layer 2, shortest first.
+
+    Layer 2 has a fixed input window (512 tokens for the default prompt-guard
+    model) and the readings are not the same size: a document's body is capped
+    at 1500 characters for a PDF and not capped at all for a `.txt`, while its
+    filename readings are two short strings. In caller order the short ones sit
+    behind the long one and a long enough body is all it takes for the model to
+    never read them. The join order carries no meaning of its own - layer 1
+    iterates the readings separately and keeps the caller's order, which is
+    where the blocked index comes from - so the short readings go first.
+    `sorted` is stable, so readings of the same length keep the caller's order.
+    """
+    return "\n".join(sorted(readings, key=len))
+
+
+def screen_injection_group(
+    readings: Sequence[str], language: str | None = None
+) -> tuple[InjectionResult, int | None]:
     """Screen several strings that end up in the same prompt as one unit.
 
     A caller with more than one string to screen (`agents/document.py` has
@@ -195,9 +225,18 @@ def screen_injection_group(readings: Sequence[str]) -> tuple[InjectionResult, in
     - Layer 1 runs on every reading, in order, unchanged. It is a local pure
       function, so screening three strings costs the same as screening one,
       and neither filename reading covers the other.
-    - Layer 2 runs at most once, over every reading joined by newlines. It
-      judges phrasing, and phrasing does not change because it arrives in one
-      string instead of three.
+    - Layer 2 runs at most once, over the readings joined by newlines
+      (shortest first, see `_classifier_input`). It judges phrasing, and
+      phrasing does not change because it arrives in one string instead of
+      three.
+
+    `language` is the redaction language for layer 2's copy, forwarded to
+    `redact_for_llm`. A caller with several readings should pass it: the
+    readings are merged before they are redacted, so with None the merged
+    string decides, and one German word in a filename is then enough to send
+    an English body to the German spaCy model, which rewrites the phrasing
+    layer 2 exists to judge as a name. The caller knows which reading is the
+    text and which are labels for it; this function does not.
 
     Returns the verdict and the index of the reading layer 1 blocked on. The
     index is None when nothing blocked, and also when layer 2 blocked: layer 2
@@ -205,11 +244,18 @@ def screen_injection_group(readings: Sequence[str]) -> tuple[InjectionResult, in
     there.
 
     Layer 2 only runs when both `settings.llm_api_key` and
-    `settings.injection_guard_model` are set; if it raises, the error is
-    logged and the result falls back to layer 1's own (clean, by construction
-    - layer 1 already returned above otherwise) verdict, so a classifier
-    outage never blocks a request.
+    `settings.injection_guard_model` are set, and never for an empty group;
+    if it raises, the error is logged and the result falls back to layer 1's
+    own (clean, by construction - layer 1 already returned above otherwise)
+    verdict, so a classifier outage never blocks a request.
+
+    Raises TypeError for a bare `str`, which satisfies `Sequence[str]` and
+    would otherwise be screened one character at a time. `screen_injection` is
+    the one-string form.
     """
+    if isinstance(readings, str):
+        raise TypeError("screen_injection_group takes a sequence of strings; use screen_injection")
+
     for index, text in enumerate(readings):
         deterministic_matches = _deterministic_matches(text)
         if deterministic_matches:
@@ -218,9 +264,9 @@ def screen_injection_group(readings: Sequence[str]) -> tuple[InjectionResult, in
             )
             return result, index
 
-    if _classifier_enabled():
+    if readings and _classifier_enabled():
         try:
-            if _classifier_flags_injection("\n".join(readings)):
+            if _classifier_flags_injection(_classifier_input(readings), language=language):
                 blocked = InjectionResult(action="block", matched=["classifier"], via="classifier")
                 return blocked, None
         except Exception as exc:  # noqa: BLE001 - classifier errors must never block
