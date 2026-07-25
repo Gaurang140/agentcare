@@ -26,20 +26,26 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       securityContext:
+        # Pod-level PodSecurityContext takes only the fields listed in the API
+        # schema; readOnlyRootFilesystem is not one of them and lives on each
+        # container's SecurityContext instead (a strict `kubectl apply`
+        # rejects unknown fields here).
         # Matches the `appuser` (uid 1000) created in backend/Dockerfile.
         runAsNonRoot: true
         runAsUser: 1000
-        # NOT read-only: docker-entrypoint.sh writes the SQLite app db and
-        # checkpoints.db next to the app, and local-mode file uploads land
-        # under ./uploads inside the container. Demo mode only - a
-        # Postgres + GCS deployment (DATABASE_URL non-sqlite, STORAGE_BACKEND=gcs)
-        # could tighten this to true, but the default env here still points
-        # at sqlite/local storage until GCS_BUCKET and a Postgres DATABASE_URL
-        # are set in the Secret.
-        readOnlyRootFilesystem: false
       containers:
         - name: backend
           image: agentcare-backend:latest
+          securityContext:
+            # NOT read-only: docker-entrypoint.sh writes the SQLite app db and
+            # checkpoints.db next to the app, and local-mode file uploads land
+            # under ./uploads inside the container. Demo mode only - a
+            # Postgres + GCS deployment (DATABASE_URL non-sqlite, STORAGE_BACKEND=gcs)
+            # could tighten this to true, but the default env here still points
+            # at sqlite/local storage until GCS_BUCKET and a Postgres DATABASE_URL
+            # are set in the Secret.
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
           ports:
             - name: http
               containerPort: 8000

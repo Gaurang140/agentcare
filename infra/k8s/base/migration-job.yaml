@@ -26,12 +26,16 @@ spec:
     spec:
       restartPolicy: Never
       securityContext:
+        # readOnlyRootFilesystem is a container field, not a pod one - see the
+        # note in backend.yaml. Same entrypoint, same sqlite writes.
         runAsNonRoot: true
         runAsUser: 1000
-        readOnlyRootFilesystem: false
       containers:
         - name: migrate
           image: agentcare-backend:latest
+          securityContext:
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
           args: ["python", "-c", "print('migrate+seed done')"]
           envFrom:
             - configMapRef:
