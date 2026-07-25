@@ -4,13 +4,21 @@ Booking and rescheduling claim a slot with a single conditional UPDATE
 (`WHERE status = 'free'`) so two concurrent requests for the same slot can
 never both succeed - the loser's UPDATE affects zero rows and raises
 ConflictError, never a lost-update race.
+
+Cancelling and rescheduling claim the appointment row the same way
+(`WHERE status IN ('pending', 'confirmed')`, see _claim_active_appointment).
+Without that, a cancel or a reschedule that arrives twice acts on an
+appointment that already gave its slot back, and since the slot is rebookable
+in between, the second one frees a slot another patient now holds. The guard
+lives in the tools rather than in the agent, so the patient routes in
+api/routes_patient.py are covered by the same rule.
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -30,10 +38,44 @@ _SLOT_MINUTES = 30
 # stays an IntegrityError rather than becoming a retryable slot conflict.
 _RUN_INDEX_MARKERS = ("uq_appointments_workflow_run", "appointments.workflow_run_id")
 
+# The statuses that still hold a slot. Anything else - today only "cancelled" -
+# has already given its slot back, so it must not be moved or freed again.
+# patient_tools.py and agents/appointment.py read "active" the same way.
+_ACTIVE_STATUSES = ("pending", "confirmed")
+
 
 def _is_one_booking_per_run_violation(exc: IntegrityError) -> bool:
     message = str(exc.orig)
     return any(marker in message for marker in _RUN_INDEX_MARKERS)
+
+
+def _claim_active_appointment(db: Session, appointment_id: int, new_status: str) -> int:
+    """Move an appointment out of an active status with one conditional UPDATE.
+
+    The same shape as the slot claim in book_appointment, and for the same
+    reason: reading the status and then writing it leaves a window where a
+    second request sees the row still active and acts on it too. A cancel that
+    arrives twice would free the slot twice, and the slot is rebookable in
+    between, so the second free hands another patient's confirmed slot back to
+    the pool. Zero rows affected means the row was already cancelled (or gone),
+    which is a conflict rather than a silent no-op.
+
+    Returns the slot id the appointment holds, re-read after the claim won:
+    a concurrent reschedule may have moved the row since the caller loaded it,
+    and freeing the slot it used to point at would strand the new one.
+    """
+    claimed = db.execute(
+        update(Appointment)
+        .where(Appointment.id == appointment_id, Appointment.status.in_(_ACTIVE_STATUSES))
+        .values(status=new_status)
+    )
+    if claimed.rowcount == 0:
+        raise ConflictError(f"Appointment {appointment_id} is not active")
+
+    slot_id = db.execute(
+        select(Appointment.slot_id).where(Appointment.id == appointment_id)
+    ).scalar_one()
+    return slot_id
 
 
 def appointment_summary(appt: Appointment, slot: AppointmentSlot | None = None) -> dict:
@@ -164,6 +206,11 @@ def reschedule_appointment(
     rows the function raises before touching the old slot, so a failed
     reschedule never leaves the patient without their original booking.
 
+    Only an active appointment can be moved. Rescheduling a cancelled one
+    would free whatever slot it still points at - by now possibly another
+    patient's - and resurrect the row as confirmed, so it raises ConflictError
+    and releases the slot it had just claimed.
+
     Passing workflow_run_id stamps the run that moved the appointment onto the
     row, the same tie book_appointment writes, so a replayed run recognizes the
     move it already made instead of swapping slots a second time
@@ -185,7 +232,16 @@ def reschedule_appointment(
     if claimed.rowcount == 0:
         raise ConflictError("Slot is no longer available")
 
-    old_slot_id = appt.slot_id
+    try:
+        old_slot_id = _claim_active_appointment(db, appointment_id, "confirmed")
+    except ConflictError:
+        # Same rollback as the IntegrityError path below: the claim on the new
+        # slot is released rather than left held by a reschedule that never
+        # happened. A cancelled appointment has already given its old slot
+        # back, so moving it would free whoever holds that slot now.
+        db.rollback()
+        raise
+
     db.execute(
         update(AppointmentSlot).where(AppointmentSlot.id == old_slot_id).values(status="free")
     )
@@ -193,7 +249,6 @@ def reschedule_appointment(
     new_slot = db.get(AppointmentSlot, new_slot_id)
     appt.slot_id = new_slot_id
     appt.doctor_id = new_slot.doctor_id
-    appt.status = "confirmed"
     if workflow_run_id is not None:
         appt.workflow_run_id = workflow_run_id
     try:
@@ -226,6 +281,10 @@ def cancel_appointment(
 ) -> dict:
     """Free the slot and mark the appointment cancelled.
 
+    Only an active appointment can be cancelled; cancelling one that is
+    already cancelled raises ConflictError instead of freeing its old slot a
+    second time.
+
     Passing workflow_run_id stamps the run that cancelled onto the row, which
     is how the appointment node recognizes its own completed cancel on a replay
     (agents/appointment.py). A cancelled row sits outside the
@@ -243,10 +302,8 @@ def cancel_appointment(
     if appt is None:
         raise NotFoundError(f"Appointment {appointment_id} not found")
 
-    db.execute(
-        update(AppointmentSlot).where(AppointmentSlot.id == appt.slot_id).values(status="free")
-    )
-    appt.status = "cancelled"
+    slot_id = _claim_active_appointment(db, appointment_id, "cancelled")
+    db.execute(update(AppointmentSlot).where(AppointmentSlot.id == slot_id).values(status="free"))
     if workflow_run_id is not None:
         appt.workflow_run_id = workflow_run_id
     db.flush()
@@ -257,7 +314,7 @@ def cancel_appointment(
         "appointment.cancelled",
         "appointment",
         appt.id,
-        {"slot_id": appt.slot_id},
+        {"slot_id": slot_id},
     )
     db.commit()
     return cancelled_summary(appt)

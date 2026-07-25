@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app.auth.security import hash_password
 from app.db.seed import seed
 from app.main import app
-from app.models import Department, Reminder, User
+from app.models import Appointment, AppointmentSlot, Department, Reminder, User
 from app.tools.appointment_tools import book_appointment, get_available_slots
 
 _SLOT_WINDOW_DAYS = 14
@@ -82,6 +82,36 @@ def test_appointment_list_reschedule_and_cancel_round_trip(patient_client, db_se
     cancel_resp = patient_client.post(f"/api/appointments/{appt_id}/cancel")
     assert cancel_resp.status_code == 200, cancel_resp.text
     assert cancel_resp.json()["status"] == "cancelled"
+
+
+def test_replayed_cancel_over_http_cannot_free_another_patients_slot(patient_client, db_session):
+    """The whole corruption sequence through the routes the patients actually
+    call: book, cancel, someone else takes the freed slot, then the first
+    cancel arrives again (double-clicked button, retried request). The second
+    cancel has to come back 409 with the new holder's booking untouched.
+    """
+    dept_id = _cardiology_id(db_session)
+    user = db_session.query(User).filter_by(email="patient@example.com").first()
+
+    today = date.today()
+    slots = get_available_slots(
+        db_session, dept_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS), limit=5
+    )
+    slot_id = slots[0]["slot_id"]
+
+    booked = book_appointment(db_session, user.id, slot_id, "checkup")
+    assert patient_client.post(f"/api/appointments/{booked['id']}/cancel").status_code == 200
+
+    # Anyone can take the slot now that it is free again.
+    rebooked = book_appointment(db_session, user.id, slot_id, "someone else's booking")
+
+    replay = patient_client.post(f"/api/appointments/{booked['id']}/cancel")
+
+    assert replay.status_code == 409, replay.text
+    slot = db_session.get(AppointmentSlot, slot_id)
+    db_session.refresh(slot)
+    assert slot.status == "booked"
+    assert db_session.get(Appointment, rebooked["id"]).status == "confirmed"
 
 
 def test_reschedule_and_cancel_denied_for_non_owner(patient_client, db_session):

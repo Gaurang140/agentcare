@@ -155,6 +155,53 @@ def test_cancelled_slot_can_be_rebooked(db, seeded):
     assert db.get(Appointment, first["id"]).status == "cancelled"
 
 
+def test_cancelling_an_already_cancelled_appointment_leaves_the_new_holder_alone(db, seeded):
+    """A cancel request that arrives twice - a double-clicked button, a retried
+    HTTP call - must not free the slot a second time. Between the two the slot
+    is rebookable, so the second cancel would hand another patient's confirmed
+    slot back to the pool while that patient still holds the appointment.
+    """
+    slot = _free_slot(db)
+    first = book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
+    cancel_appointment(db, appointment_id=first["id"])
+    second = book_appointment(db, patient_id=2, slot_id=slot.id, reason="checkup")
+
+    with pytest.raises(ConflictError):
+        cancel_appointment(db, appointment_id=first["id"])
+
+    db.refresh(slot)
+    assert slot.status == "booked"
+    assert db.get(Appointment, second["id"]).status == "confirmed"
+
+
+def test_rescheduling_a_cancelled_appointment_does_not_free_the_new_holders_slot(db, seeded):
+    """The same stale request against the reschedule path. Moving a cancelled
+    appointment would free whatever slot it still points at - now another
+    patient's - and resurrect the cancelled row as confirmed.
+    """
+    old_slot = _free_slot(db)
+    first = book_appointment(db, patient_id=1, slot_id=old_slot.id, reason="checkup")
+    cancel_appointment(db, appointment_id=first["id"])
+    second = book_appointment(db, patient_id=2, slot_id=old_slot.id, reason="checkup")
+
+    target = (
+        db.query(AppointmentSlot)
+        .filter(AppointmentSlot.status == "free", AppointmentSlot.id != old_slot.id)
+        .first()
+    )
+    assert target is not None
+
+    with pytest.raises(ConflictError):
+        reschedule_appointment(db, appointment_id=first["id"], new_slot_id=target.id)
+
+    db.refresh(old_slot)
+    db.refresh(target)
+    assert old_slot.status == "booked"
+    assert target.status == "free", "the failed reschedule must release the slot it claimed"
+    assert db.get(Appointment, first["id"]).status == "cancelled"
+    assert db.get(Appointment, second["id"]).status == "confirmed"
+
+
 def test_one_run_cannot_hold_two_confirmed_bookings(db, seeded):
     slot = _free_slot(db)
     run_id = _workflow_run_id(db)
@@ -173,36 +220,34 @@ def test_one_run_cannot_hold_two_confirmed_bookings(db, seeded):
 
 
 def test_rescheduling_into_a_second_confirmed_booking_for_one_run_conflicts(db, seeded):
-    """Cancelled rows fall outside the one-booking-per-run index, so a run
-    that cancelled and rebooked can reach the index through the back door:
-    rescheduling the cancelled appointment sets it confirmed again, which
-    would give the run two live bookings. That has to come back as a
-    conflict, not as a raw IntegrityError out of the flush.
+    """The one-booking-per-run index fires inside the flush, and rescheduling
+    stamps the run onto the row it moves. So moving a second appointment into
+    a run that already booked one has to come back as a conflict, not as a raw
+    IntegrityError. (A cancelled appointment cannot reach this at all any more:
+    the status guard in the tool refuses it before the flush.)
     """
-    first_slot = _free_slot(db)
     run_id = _workflow_run_id(db)
-    first = book_appointment(
-        db, patient_id=1, slot_id=first_slot.id, reason="checkup", workflow_run_id=run_id
-    )
-    cancel_appointment(db, appointment_id=first["id"])
-
     free_slots = (
         db.query(AppointmentSlot)
-        .filter(AppointmentSlot.status == "free", AppointmentSlot.id != first_slot.id)
+        .filter(AppointmentSlot.status == "free")
         .order_by(AppointmentSlot.id)
-        .limit(2)
+        .limit(3)
         .all()
     )
-    assert len(free_slots) == 2
+    assert len(free_slots) == 3
+
     book_appointment(
-        db, patient_id=1, slot_id=free_slots[0].id, reason="rebooked", workflow_run_id=run_id
+        db, patient_id=1, slot_id=free_slots[0].id, reason="checkup", workflow_run_id=run_id
     )
+    other = book_appointment(db, patient_id=2, slot_id=free_slots[1].id, reason="checkup")
 
     with pytest.raises(ConflictError):
-        reschedule_appointment(db, appointment_id=first["id"], new_slot_id=free_slots[1].id)
+        reschedule_appointment(
+            db, appointment_id=other["id"], new_slot_id=free_slots[2].id, workflow_run_id=run_id
+        )
 
-    db.refresh(free_slots[1])
-    assert free_slots[1].status == "free"
+    db.refresh(free_slots[2])
+    assert free_slots[2].status == "free"
 
 
 def test_reschedule_stamps_the_run_and_stays_inside_the_one_booking_per_run_index(db, seeded):
