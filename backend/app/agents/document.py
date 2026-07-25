@@ -19,10 +19,22 @@ prompt, since extracted text is still patient-submitted content on its way
 to the LLM provider. Counts are summed across every document processed in
 one `run()` call and reported in a single "safety.pii_redacted" audit row,
 not one row per document.
+
+The filename goes through the same two gates as the body, and for the same
+reason: it is a string the uploading client chose and it lands in the
+classification prompt. It is normalized first (invisible characters out,
+whitespace collapsed, capped), then screened, then redacted along with the
+body in one pass over the assembled prompt (see `_redacted_prompt` for why
+the two are not redacted separately). A filename that the guard blocks leaves
+the document typed "other" and writes the same
+"safety.injection_blocked_document" row the body path writes, with a
+`"field": "filename"` marker so a reader can tell the two apart. Only the
+copy in the prompt changes; `PatientDocument.filename` keeps the original.
 """
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel
@@ -34,7 +46,7 @@ from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import PatientDocument
-from app.safety.injection_guard import screen_injection
+from app.safety.injection_guard import InjectionResult, screen_injection
 from app.safety.pii import redact_for_llm
 from app.tools.audit_tools import write_audit
 from app.tools.document_tools import check_required_documents
@@ -60,6 +72,91 @@ class DocumentOutput(BaseModel):
 
 def _classification_prompt(filename: str, extracted_text: str) -> str:
     return f"Filename: {filename}\nExtracted text (may be empty): {extracted_text}"
+
+
+def _redacted_prompt(filename: str, extracted_text: str) -> tuple[str, dict[str, int]]:
+    """Redact the assembled prompt in one pass, rather than the filename and
+    the extracted text separately.
+
+    Same function, same boundary, and it is what actually leaves the process.
+    The reason to redact them together is pass 2: NER over a bare filename has
+    no context to read, and it guesses. Measured on this stack,
+    `insurance.txt` on its own comes back as a location and the document loses
+    the strongest classification signal it has, while inside the prompt it
+    stays a filename. A patient name in the filename is still caught either
+    way.
+    """
+    return redact_for_llm(_classification_prompt(filename, extracted_text))
+
+
+# --- Filename handling ------------------------------------------------------
+# A filename is whatever the uploading client put in the multipart part. It
+# can carry control characters, zero-width characters and bidi overrides
+# (which hide what the name actually reads as), any amount of whitespace and
+# any length, so it is normalized before anything reads it.
+# Control characters (tab, newline and the rest of C0, plus DEL) become a
+# space: they separate what is around them, so deleting them would glue two
+# words into one the pattern layer no longer recognizes.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+# Zero-width and bidi characters are deleted instead. They carry no width at
+# all, so they are the ones used to break a word up ("ig<zwsp>nore") or to
+# reverse how a name reads.
+_ZERO_WIDTH_RE = re.compile(
+    "[\u200b-\u200f"  # zero-width space/joiners and directional marks
+    "\u202a-\u202e\u2066-\u2069"  # bidi overrides and isolates
+    "\u2060-\u2064\ufeff]"  # word joiner, invisible operators, BOM
+)
+_WHITESPACE_RE = re.compile(r"\s+")
+# "_" and "-" are how filenames separate words.
+_SEPARATOR_RE = re.compile(r"[_-]+")
+# Long enough for any real document name, short enough that a filename can
+# never be the bulk of the prompt.
+_MAX_FILENAME_CHARS = 120
+
+
+def _normalize_filename(filename: str) -> str:
+    cleaned = _CONTROL_RE.sub(" ", _ZERO_WIDTH_RE.sub("", filename or ""))
+    return _WHITESPACE_RE.sub(" ", cleaned).strip()[:_MAX_FILENAME_CHARS]
+
+
+def _spaced_filename(normalized: str) -> str:
+    """The filename read as words: `ignore_previous_instructions.txt` becomes
+    `ignore previous instructions.txt`.
+
+    Both the guard's pattern layer and the PII redactor work on word
+    boundaries, and "_" and "-" are word characters, so neither of them sees
+    anything at all in the packed form a real filename comes in as.
+    """
+    return _WHITESPACE_RE.sub(" ", _SEPARATOR_RE.sub(" ", normalized)).strip()
+
+
+def _screen_filename(normalized: str, spaced: str) -> InjectionResult:
+    """Screen both readings of the name, since neither covers the other: the
+    spaced one is what makes `ignore_previous_instructions.txt` match a
+    pattern, and the literal one is what still carries a chat-template token
+    like `<|im_start|>`, which the spaced reading would break apart. The
+    second screen is skipped when the two strings are identical, which is the
+    common case (`impfpass.pdf`).
+    """
+    result = screen_injection(normalized)
+    if result.action == "block" or spaced == normalized:
+        return result
+    return screen_injection(spaced)
+
+
+def _block_document(
+    db: Session, doc: PatientDocument, injection: InjectionResult, field: str | None = None
+) -> None:
+    """Leave the document typed "other" and record why. `field` names the
+    poisoned part; the body path passes none, so its payload is unchanged."""
+    doc.document_type = _UNKNOWN_TYPE
+    db.flush()
+    payload = {"matched": injection.matched, "via": injection.via}
+    if field is not None:
+        payload["field"] = field
+    write_audit(
+        db, None, "safety.injection_blocked_document", "patient_document", doc.id, payload
+    )
 
 
 def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
@@ -103,23 +200,19 @@ def run(state: AgentState, db: Session) -> dict:
 
             injection = screen_injection(doc.extracted_text or "")
             if injection.action == "block":
-                doc.document_type = _UNKNOWN_TYPE
-                db.flush()
-                write_audit(
-                    db,
-                    None,
-                    "safety.injection_blocked_document",
-                    "patient_document",
-                    doc.id,
-                    {"matched": injection.matched, "via": injection.via},
-                )
+                _block_document(db, doc, injection)
                 continue
 
-            redacted_text, counts = redact_for_llm(doc.extracted_text or "")
+            normalized_name = _normalize_filename(doc.filename)
+            spaced_name = _spaced_filename(normalized_name)
+            name_injection = _screen_filename(normalized_name, spaced_name)
+            if name_injection.action == "block":
+                _block_document(db, doc, name_injection, field="filename")
+                continue
+
+            prompt, counts = _redacted_prompt(spaced_name, doc.extracted_text or "")
             _merge_counts(pii_counts, counts)
-            result = chat_json(
-                system, _classification_prompt(doc.filename, redacted_text), DocumentOutput
-            )
+            result = chat_json(system, prompt, DocumentOutput)
             if result.confidence < _CONFIDENCE_THRESHOLD:
                 write_audit(
                     db,

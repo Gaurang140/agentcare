@@ -102,6 +102,85 @@ def test_reports_missing_required_documents_for_department(db, seeded, fake_llm)
     assert dr["missing"] == ["blood_test"]
 
 
+def _prompt_of(client, index: int = 0) -> str:
+    """The user message of the index-th classification call."""
+    return client.chat.completions.calls[index]["messages"][1]["content"]
+
+
+def test_filename_pii_is_redacted_before_it_reaches_the_prompt(db, seeded, fake_llm):
+    """The filename is patient-supplied text on its way to the provider, so
+    it crosses the same PII boundary the extracted text does. The stored row
+    keeps the original."""
+    doc = _store_doc(db, filename="scan-erika@example.com.pdf", text="ECG report")
+    client = fake_llm([{"document_type": "ecg_report", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    prompt = _prompt_of(client)
+    assert "[REDACTED_EMAIL]" in prompt
+    assert "erika@example.com" not in prompt
+
+    db.refresh(doc)
+    assert doc.filename == "scan-erika@example.com.pdf"
+
+    audit = (
+        db.query(AuditEvent)
+        .filter_by(action="safety.pii_redacted", entity_type="workflow_run", entity_id=1)
+        .first()
+    )
+    assert audit is not None
+    assert audit.metadata_json["counts"]["email"] == 1
+
+
+def test_patient_name_in_the_filename_is_redacted(db, seeded, fake_llm):
+    """The common real case: whoever scanned the document named it after the
+    patient. Underscores are read as word separators, so the NER pass sees a
+    name where the raw string shows one token."""
+    doc = _store_doc(db, filename="max_mustermann_ekg.pdf", text="ECG report, sinus rhythm")
+    client = fake_llm([{"document_type": "ecg_report", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    prompt = _prompt_of(client)
+    assert "[REDACTED_NAME]" in prompt
+    assert "mustermann" not in prompt.lower()
+
+
+def test_ordinary_filename_reaches_the_prompt_unchanged(db, seeded, fake_llm):
+    doc = _store_doc(db, filename="impfpass.pdf", text="Impfpass")
+    client = fake_llm([{"document_type": "other", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    assert "Filename: impfpass.pdf\n" in _prompt_of(client)
+
+
+def test_filename_is_normalized_before_use(db, seeded, fake_llm):
+    """Zero-width and control characters go, whitespace collapses, word
+    separators become spaces so the pattern layer can read the words, and the
+    result is capped."""
+    doc = _store_doc(db, filename="  blood_test\u200b\treport-2.pdf ", text="lab values")
+    client = fake_llm([{"document_type": "blood_test", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    assert "Filename: blood test report 2.pdf\n" in _prompt_of(client)
+
+
+def test_overlong_filename_is_capped(db, seeded, fake_llm):
+    """A filename can never be the bulk of the prompt, and what is past the
+    cap never reaches the model."""
+    doc = _store_doc(db, filename="befund_" * 40 + "ende.pdf", text="lab values")
+    client = fake_llm([{"document_type": "blood_test", "confidence": 0.9}])
+
+    document.run(_state(uploaded_document_ids=[doc.id]), db)
+
+    prompt = _prompt_of(client)
+    filename_line = prompt.splitlines()[0]
+    assert len(filename_line) <= len("Filename: ") + 120
+    assert "ende.pdf" not in prompt
+
+
 def test_no_uploaded_documents_still_reports_required_documents(db, seeded, fake_llm):
     dept_id = _cardiology_id(db)
     client = fake_llm([])
