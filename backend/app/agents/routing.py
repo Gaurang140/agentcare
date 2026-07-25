@@ -17,7 +17,7 @@ from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language, staff_review_response
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
-from app.safety.pii import redact_for_llm
+from app.safety.pii import redact_for_llm, resolve_language
 from app.tools.audit_tools import write_audit
 from app.tools.department_tools import find_department, list_departments
 from app.tools.escalation_tools import create_escalation
@@ -71,15 +71,18 @@ def _redact_request_text(
     write one "safety.pii_redacted" audit row (counts only, no raw PII) when
     anything was found.
 
-    The patient's stored language goes with it. Without it the redactor works
-    the language out of the text, and a short German request that carries none
-    of its cue words is read with the English model, which mistakes ordinary
-    German administrative nouns for names and locations (safety/pii.py). One
-    indexed read of the profile row per node call, the same read
-    agents/safety.py makes.
+    The language is settled first, cue-first: a German cue in the request
+    decides, and the patient's stored preference breaks the tie when the
+    request carries none (`safety/pii.py::resolve_language`, the same
+    precedence every other call site uses). The preference cannot outrank the
+    text because `preferred_language` defaults to "en" for every patient who
+    never chose German, and the English model reads "Termin" and the
+    department name as locations. Reading the profile still costs one indexed
+    read per node call, the same read agents/safety.py makes.
     """
     redacted, counts = redact_for_llm(
-        request_text, language=patient_language(db, patient_id)
+        request_text,
+        language=resolve_language(request_text, patient_language(db, patient_id)),
     )
     if counts:
         write_audit(

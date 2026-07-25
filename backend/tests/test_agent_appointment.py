@@ -185,10 +185,34 @@ def test_irrelevant_intent_is_a_no_op(db, seeded, fake_llm):
 
 
 # --- Redaction language ------------------------------------------------------
-# The booking prompt carries the patient's own request text, which is short and
-# often carries no German cue at all ("Termin 4711 bitte verschieben" does,
-# "4711" does not). The stored preference is the only signal there, the same
-# way the routing and coordinator nodes read it.
+# The booking prompt carries the patient's own request text. A German cue in it
+# decides ("Termin 4711 bitte verschieben" carries one, "4711" does not), and
+# the stored preference breaks the tie when there is no cue - the same
+# precedence the routing and coordinator nodes use
+# (safety/pii.py::resolve_language).
+
+
+def test_german_request_from_an_english_preferring_patient_runs_german(
+    db, seeded, fake_llm, redaction_language
+):
+    """Patient 1 is stored as "en". A German cue in the request outranks that,
+    so the booking prompt keeps "Termin" instead of losing it to the English
+    model as a location."""
+    seen = redaction_language(appointment)
+    dept_id = _cardiology_id(db)
+    target = _free_slots(db)[0]
+    fake_llm([{"slot_id": target.id, "reason": "earliest match"}])
+
+    appointment.run(
+        _state(
+            patient_id=1,
+            department_id=dept_id,
+            request_text="Ich brauche einen Termin in der Kardiologie",
+        ),
+        db,
+    )
+
+    assert seen == ["de"]
 
 
 def test_booking_redaction_runs_with_the_patient_language(

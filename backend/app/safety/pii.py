@@ -33,9 +33,12 @@ groups and drops the phone-shape guesses, which pass 1 has already had its own
 stricter go at.
 
 Language: pass 2 analyzes with exactly one language, never two. The language
-the caller names wins (`PatientProfile.preferred_language`, "en" or "de"). With
-no language, text carrying German cues (`_GERMAN_HINT_RE`) is read with the
-German model and everything else with the English one. The single-model rule is
+the caller names wins. With no language, text carrying German cues
+(`_GERMAN_HINT_RE`) is read with the German model and everything else with the
+English one. A caller holding a patient's stored `preferred_language` does not
+hand it over raw: it runs `resolve_language` first, which puts a cue in the
+text ahead of the stored preference and keeps that one precedence in one place
+(see that function for why evidence outranks the setting). The single-model rule is
 deliberate: each small spaCy model reads the other language badly enough to
 invent entities at the same 0.85 score a real name arrives at.
 `de_core_news_sm` tags "Book", "Insurance card" and "sinus rhythm" as person
@@ -327,6 +330,38 @@ def _languages_for(text: str, language: str | None) -> tuple[str, ...]:
     return ("en",)
 
 
+def resolve_language(text: str, preferred: str | None) -> str:
+    """The one language to analyze `text` with: a positive cue in the text
+    wins, the caller's stored preference breaks a no-cue tie, and this module's
+    own fallback has the last word.
+
+    Evidence beats a stored preference because `preferred_language` is a
+    response-language setting that defaults to "en" for every patient who never
+    chose otherwise, while a German cue in the text is near-certain evidence of
+    what the text actually is. Handing it to an English-pinned analyzer costs a
+    German booking request "Termin" and its department name, which is the
+    cross-language failure the single-model rule above exists to prevent.
+
+    Every call site that has a stored preference reads this: the request text
+    the routing, coordinator and appointment nodes redact, and the document
+    node's body plus filename. Neither of the two languages is named here - the
+    cue reading is what `_languages_for` answers with no language, and the same
+    reading of an empty string is its no-cue fallback, so comparing the two
+    tells a cue from the fallback and this function never restates which
+    languages have a model.
+
+    The remaining trade-off, measured and accepted: this module has a
+    German-positive cue test and no English-positive one, so English text reads
+    as a no-cue tie and a German-preferring patient's English text goes to the
+    German model, which returns "Sinus rhythm" and "Book the" as person names.
+    Over-redaction costs prompt quality, not privacy.
+    """
+    cued = _languages_for(text, None)[0]
+    if cued != _languages_for("", None)[0]:
+        return cued
+    return _languages_for(text, preferred)[0]
+
+
 def _presidio_pass(text: str, language: str | None) -> tuple[str, dict[str, int]]:
     """Run the analyzer over pass 1's output and replace what it finds.
 
@@ -375,8 +410,9 @@ def redact_for_llm(text: str, language: str | None = None) -> tuple[str, dict[st
     nodes call it (`agents/routing.py`, `agents/coordinator.py`,
     `agents/appointment.py`, `agents/document.py`).
 
-    `language` is the patient's `preferred_language` ("en" or "de") when the
-    caller has it. Anything else, including None, lets the function decide
+    `language` is the one language to analyze with ("en" or "de"), already
+    settled by `resolve_language` at every call site that holds a patient's
+    stored preference. Anything else, including None, lets the function decide
     from the text.
     """
     redacted, counts = _redactor.redact(text)

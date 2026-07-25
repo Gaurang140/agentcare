@@ -40,17 +40,16 @@ round trip to it instead of three. That classifier copy is redacted too, so
 it gets the same pinned language the classification prompt gets - the merge
 is not allowed to decide the language on either path.
 
-That pinned language is settled in this order: a cue in the document body
-wins, the patient's profile row (`agents/responses.py::patient_language`)
-breaks the tie when the body carries no cue, and English is the last
-fallback. A document is written by whoever wrote it, not by the patient, so
-what the body says about itself outranks what the clinic recorded about the
-patient - the opposite of the request text the routing and coordinator nodes
-redact, which is the patient's own words. The trade-off is measured and
-accepted: an English report uploaded by a German-preferring patient carries
-no cue either way and so goes to the German model, which over-redacts a word
-or two of the English body. Over-redaction costs prompt quality, not
-privacy.
+That pinned language is settled by the rule every call site shares
+(`safety/pii.py::resolve_language`): a cue in the text wins, the patient's
+profile row (`agents/responses.py::patient_language`) breaks the tie when
+there is no cue, and English is the last fallback. What this node decides is
+which text the rule reads, and that is the document body on its own, never
+the filename-plus-body string the prompt is built from (see
+`_document_language`). The trade-off is measured and accepted: an English
+report uploaded by a German-preferring patient carries no cue either way and
+so goes to the German model, which over-redacts a word or two of the English
+body. Over-redaction costs prompt quality, not privacy.
 """
 
 from __future__ import annotations
@@ -69,7 +68,7 @@ from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import PatientDocument
 from app.safety.injection_guard import InjectionResult, screen_injection_group
-from app.safety.pii import _languages_for as _pii_languages_for, redact_for_llm
+from app.safety.pii import redact_for_llm, resolve_language
 from app.tools.audit_tools import write_audit
 from app.tools.document_tools import check_required_documents
 
@@ -102,53 +101,25 @@ def _classification_prompt(filename: str, extracted_text: str) -> str:
 
 
 def _document_language(preferred: str | None, extracted_text: str) -> str:
-    """The one language every redaction of this document runs with, in this
-    order: a cue in the document body wins, the patient's stored preference
-    breaks the tie when the body carries no cue, and `safety/pii.py`'s own
-    fallback has the last word.
+    """The one language every redaction of this document runs with: the shared
+    cue-first rule (`safety/pii.py::resolve_language`), read over the document
+    body alone.
 
-    The body outranks the profile here and nowhere else. A booking request is
-    the patient's own words, so their stored preference is the best thing to
-    read it with. A document is a second author: a clinic letter arrives in the
-    language whoever wrote it used, and the patient's preference says nothing
-    about that. Reading a German report with the English model costs it
-    "Termin", which comes back as `[REDACTED_LOCATION]`, and the department
-    name with it.
-
-    Both places that redact read the result: the classification prompt
-    (`_redacted_prompt`) and the injection guard's own copy for its classifier,
-    which merges the same readings and so has the same problem.
-
-    Neither of them may work the language out for itself, because the string
-    each is handed is the filename plus the body. That would give the filename
-    a vote: one German word in a name, spaced into three by `_spaced_filename`,
+    What this function adds is which text the rule reads, not the rule itself.
+    Both places that redact take the result: the classification prompt
+    (`_redacted_prompt`) and the injection guard's own copy for its classifier.
+    Neither may work the language out for itself, because the string each is
+    handed is the filename plus the body, and that would give the filename a
+    vote: one German word in a name, spaced into three by `_spaced_filename`,
     is enough to send an English report to the German model. Measured on
     `befund_der_untersuchung.pdf` over an English body, "Sinus rhythm" and
     "Book the" come back as `[REDACTED_NAME]`, which is the cross-language
     failure `safety/pii.py`'s single-model rule exists to prevent, reached
-    through the filename instead of through the body. The body is the text
-    that says what language the document is in, so the body is what the
-    fallback reads - never the merge.
-
-    Both halves run through the same helper `redact_for_llm` would apply on its
-    own, imported rather than copied, so the two can never drift apart and this
-    module never restates which languages have a model. Handing that helper no
-    language is how the cue reading is asked for; the same reading of an empty
-    string is what the helper answers with when there is no cue at all, so
-    comparing the two is what tells a cue from the fallback without naming
-    either language here.
-
-    The remaining trade-off, measured and accepted: `safety/pii.py` has a
-    German-positive cue test and no English-positive one, so an English body
-    reads as a no-cue tie and a German-preferring patient's English report goes
-    to the German model, which returns "Sinus rhythm" and "Book the" as
-    `[REDACTED_NAME]`. Closing that needs an English cue set or a body-length
-    threshold. Over-redaction costs prompt quality, not privacy.
+    through the filename instead of through the body. The body is the text that
+    says what language the document is in, so the body is what the rule reads -
+    never the merge.
     """
-    from_body = _pii_languages_for(extracted_text, None)[0]
-    if from_body != _pii_languages_for("", None)[0]:
-        return from_body
-    return _pii_languages_for(extracted_text, preferred)[0]
+    return resolve_language(extracted_text, preferred)
 
 
 def _redacted_prompt(

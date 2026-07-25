@@ -19,7 +19,7 @@ from app.agents.state import AgentState
 from app.exceptions import ConflictError, NotFoundError
 from app.logging_setup import get_logger
 from app.models import Appointment
-from app.safety.pii import redact_for_llm
+from app.safety.pii import redact_for_llm, resolve_language
 from app.tools.appointment_tools import (
     appointment_summary,
     book_appointment,
@@ -211,13 +211,14 @@ def _handle_book_or_reschedule(
 
     # The raw request_text stays in the DB (appointment reason below); only
     # the copy embedded in the LLM prompt is redacted, same boundary as the
-    # routing/coordinator/document nodes. The patient's stored language goes
-    # with it, the same one indexed read those nodes make: a booking request is
-    # short and often carries none of the cue words the redactor would
-    # otherwise have to work the language out from.
+    # routing/coordinator/document nodes. The language is settled cue-first
+    # (safety/pii.py::resolve_language): a German cue in the request decides,
+    # and the patient's stored preference breaks the tie for a short booking
+    # request that carries none.
     request_text = state.get("request_text", "")
     llm_request_text, pii_counts = redact_for_llm(
-        request_text, language=patient_language(db, patient_id)
+        request_text,
+        language=resolve_language(request_text, patient_language(db, patient_id)),
     )
     if pii_counts:
         write_audit(

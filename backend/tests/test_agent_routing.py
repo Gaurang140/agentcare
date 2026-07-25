@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.agents import routing
 from app.models import Escalation
+from app.safety.pii import resolve_language
 
 
 def _state(**overrides) -> dict:
@@ -138,12 +139,46 @@ def test_unknown_department_name_from_llm_escalates(db, seeded, fake_llm):
 
 
 # --- Redaction language ------------------------------------------------------
-# The patient's stored preferred_language is what the redactor's NER pass runs
-# with. Without it the pass falls back to reading cues out of the text, and a
-# short German request that happens to carry none is read with the English
-# model (safety/pii.py explains what that costs).
+# One precedence, the same one every other call site uses
+# (safety/pii.py::resolve_language): a German cue in the request wins, the
+# patient's stored preferred_language breaks the tie when the request carries
+# no cue, and English is the last fallback. The preference cannot outvote the
+# text because it defaults to "en" for every patient who never chose German,
+# and the English model reads "Termin" as a location (safety/pii.py explains
+# what that costs).
 
 _CUE_FREE_REQUEST = "cancel booking 4711"
+_GERMAN_REQUEST = "Ich brauche einen Termin in der Kardiologie"
+
+
+def test_german_request_from_an_english_preferring_patient_runs_german(
+    db, seeded, fake_llm, redaction_language
+):
+    """Patient 1 (Max) is stored as "en", the column default every patient who
+    never chose German carries. His German booking request still goes to the
+    German model, so "Termin" and the department name reach this node."""
+    seen = redaction_language(routing)
+    fake_llm([{"intent": "book", "department": "Cardiology", "confidence": 0.9, "reason": "clear"}])
+
+    routing.run(_state(patient_id=1, request_text=_GERMAN_REQUEST), db)
+
+    assert seen == ["de"]
+
+
+def test_english_request_from_a_german_preferring_patient_keeps_the_preference(
+    db, seeded, fake_llm, redaction_language
+):
+    """The documented, accepted limitation: safety/pii.py has a German-positive
+    cue set and no English-positive one, so English text reads as a no-cue tie
+    and patient 2's stored "de" takes it."""
+    seen = redaction_language(routing)
+    fake_llm([{"intent": "reschedule", "department": "Cardiology", "confidence": 0.9, "reason": "clear"}])
+
+    routing.run(
+        _state(patient_id=2, request_text="Can I reschedule my appointment to next week?"), db
+    )
+
+    assert seen == ["de"]
 
 
 def test_german_preference_pins_the_redaction_language(
@@ -164,13 +199,15 @@ def test_unknown_patient_leaves_the_language_to_the_redactor(
     db, seeded, fake_llm, redaction_language
 ):
     """No profile row means no stored preference, and the redactor's own
-    detection stays the fallback rather than being replaced by a default."""
+    reading of the text stays the fallback rather than being replaced by a
+    default of this node's own."""
     seen = redaction_language(routing)
     fake_llm([{"intent": "cancel", "department": None, "confidence": 0.9, "reason": "clear"}])
 
     routing.run(_state(patient_id=999, request_text=_CUE_FREE_REQUEST), db)
 
-    assert seen == [None]
+    assert seen == [resolve_language(_CUE_FREE_REQUEST, None)]
+    assert seen == ["en"]
 
 
 def test_routing_llm_failure_returns_error_not_raise(db, seeded, fake_llm):

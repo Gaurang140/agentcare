@@ -17,7 +17,7 @@ from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
-from app.safety.pii import redact_for_llm
+from app.safety.pii import redact_for_llm, resolve_language
 from app.tools.audit_tools import write_audit
 
 logger = get_logger(__name__)
@@ -68,11 +68,13 @@ def _redact_request_text(
     write one "safety.pii_redacted" audit row (counts only, no raw PII) when
     anything was found.
 
-    The patient's stored language goes with it, same boundary and same reason
-    as the routing node (see `agents/routing.py::_redact_request_text`).
+    The language is settled cue-first, with the patient's stored preference
+    breaking a no-cue tie: same boundary and same reason as the routing node
+    (see `agents/routing.py::_redact_request_text`).
     """
     redacted, counts = redact_for_llm(
-        request_text, language=patient_language(db, patient_id)
+        request_text,
+        language=resolve_language(request_text, patient_language(db, patient_id)),
     )
     if counts:
         write_audit(

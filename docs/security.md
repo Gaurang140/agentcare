@@ -93,10 +93,10 @@ and adds spaCy NER for `PERSON` and `LOCATION` above a 0.5 score threshold, as
 `[REDACTED_NAME]` and `[REDACTED_LOCATION]`. A span that overlaps a token pass 1
 already wrote is dropped, so nothing is redacted twice. Exactly one language model
 runs per call: `en_core_web_sm` or `de_core_news_sm`, never both, because the
-English model reading German tags "Termin" and "Kardiologie" as locations. The
-patient's stored `preferred_language` pins it at the request-text call sites, and
-for a document the body's own German cues decide with that preference as the
-tie-break. A failed engine build or a failed analysis logs one structlog warning
+English model reading German tags "Termin" and "Kardiologie" as locations. One
+rule picks it everywhere (`safety/pii.py::resolve_language`): a German cue in the
+text picks the German model, and the patient's stored `preferred_language` breaks
+a no-cue tie. A failed engine build or a failed analysis logs one structlog warning
 and returns the pass-1 result, so the boundary degrades to the regex layer rather
 than failing the request. Presidio's German `DE_*` recognizers stay disabled, which
 is Presidio's own default: they cover tax id, passport and id card, none of which

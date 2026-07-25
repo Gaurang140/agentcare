@@ -13,7 +13,7 @@ from presidio_analyzer import RecognizerResult
 from app.agents import appointment, coordinator, document, routing
 from app.models import AppointmentSlot, AuditEvent, Department, Doctor, PatientDocument
 from app.safety import pii
-from app.safety.pii import PIIRedactor, redact_for_llm
+from app.safety.pii import PIIRedactor, redact_for_llm, resolve_language
 
 # --- PIIRedactor: one category at a time ------------------------------------
 
@@ -126,6 +126,49 @@ def test_redact_for_llm_is_the_same_shared_pipeline():
     text, counts = redact_for_llm("email jane.doe@example.com")
     assert text == "email [REDACTED_EMAIL]"
     assert counts == {"email": 1}
+
+
+# --- resolve_language: which model reads the text ----------------------------
+# One precedence for every caller: a positive cue in the text wins, the stored
+# preference breaks a no-cue tie, English is the last fallback. No engines
+# needed - this is the regex cue test and nothing else.
+
+_GERMAN_CUED = "Ich brauche einen Termin in der Kardiologie"
+_NO_CUE = "cancel booking 4711"
+
+
+def test_resolve_language_german_cue_beats_an_english_preference():
+    """The reason this function exists: preferred_language defaults to "en"
+    for every patient who never chose otherwise, and the English model reads
+    "Termin" as a location."""
+    assert resolve_language(_GERMAN_CUED, "en") == "de"
+
+
+def test_resolve_language_german_cue_agrees_with_a_german_preference():
+    assert resolve_language(_GERMAN_CUED, "de") == "de"
+
+
+def test_resolve_language_english_text_under_a_german_preference_keeps_it():
+    """The documented, accepted limitation: this module has a German-positive
+    cue test and no English-positive one, so English text reads as a no-cue
+    tie and the stored preference takes it. Over-redaction, never a leak."""
+    assert resolve_language("Can I reschedule my appointment to next week?", "de") == "de"
+
+
+def test_resolve_language_no_cue_falls_to_the_preference():
+    assert resolve_language(_NO_CUE, "de") == "de"
+    assert resolve_language(_NO_CUE, "en") == "en"
+
+
+def test_resolve_language_no_cue_and_no_preference_falls_back_to_english():
+    assert resolve_language(_NO_CUE, None) == "en"
+
+
+def test_resolve_language_ignores_a_language_with_no_model():
+    """A preference this module has no spaCy model for is not a language it
+    can run, so it falls through to the same fallback as no preference."""
+    assert resolve_language(_NO_CUE, "fr") == "en"
+    assert resolve_language(_GERMAN_CUED, "fr") == "de"
 
 
 # --- Node wiring: routing, coordinator, appointment, document ----------------
