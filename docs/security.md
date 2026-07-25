@@ -7,6 +7,21 @@ booking, document coordination, reminders and follow-up. It never diagnoses, nev
 never doses. That boundary is enforced in code, not left to prompt wording, and it is the first
 thing every safety control below is built to protect.
 
+## Trust boundary
+
+Every field that reaches a prompt is treated as untrusted input, whoever wrote it. That means the
+patient's request text, a document's extracted text, the document's filename and the
+staff-authored agent rules. Request text and extracted text both cross the injection guard and
+the PII redactor before they are embedded in a prompt. Filenames cross the same two gates rather
+than riding along as metadata: they are normalized first (control characters, zero-width and bidi
+characters, whitespace, a 120-character cap), screened in two readings and redacted in the same
+pass as the document body. Agent rules are the one field a human inside the system writes, and
+they are handled as input too: RBAC-gated CRUD at `/api/staff/agent-rules`, every change audited
+and a rule retired by flipping `active` rather than by deleting it, so any instruction steering an
+agent is traceable to the account that added it. Nothing that is stored is rewritten by any of
+this. Screening and redaction apply to the copy heading for the model, never to the database row
+and never to what the patient is shown.
+
 ## The three safety layers
 
 Safety is defense in depth. Two of the three layers are deterministic and cannot be talked out of
@@ -31,21 +46,30 @@ their decision by a model.
    forbidden pattern (states a diagnosis, an explicit dosage like "take 5mg" or a treatment
    recommendation) with a fixed referral to the care team. Because it swaps whole sentences, nothing
    medically specific leaks around the edge of a regex match. A model that claims `safe: true` over a
-   poisoned sentence does not get to publish it.
+   poisoned sentence does not get to publish it. The patterns cover English and German, and the text
+   is normalized before matching (NFKC, zero-width characters removed, whitespace collapsed), so an
+   invisible character cannot carry a forbidden phrase past a regex. Administrative objects are
+   exempted by name in both languages, so an appointment confirmation is not mistaken for a
+   diagnosis: a 31-sentence probe across both languages comes back with no false positives and no
+   false negatives.
 
 ## Prompt injection
 
-`backend/app/safety/injection_guard.py::screen_injection`, called on the patient's request
-text (`workflow_service.create_run`) and on a document's extracted text
-(`agents/document.py`), both before that text reaches a prompt. Layer 1, always on: EN/German
-regex for known injection phrasing ("ignore previous instructions", "vergiss alle
+`backend/app/safety/injection_guard.py`: `screen_injection` for a single string
+(`workflow_service.create_run`, the patient's request text) and `screen_injection_group` for a
+document's three readings (`agents/document.py`: the extracted text, the literal filename and the
+filename with `_` and `-` read as spaces), all before that text reaches a prompt. Layer 1, always
+on: EN/German regex for known injection phrasing ("ignore previous instructions", "vergiss alle
 Anweisungen"), a 120+ character base64-looking run, and role markers (`assistant:`,
-`<|im_start|>`, `[INST]`). Layer 2, optional: a classifier
-(`agents/llm.py::classify_injection`, default `meta-llama/llama-prompt-guard-2-86m` on Groq)
-used only when `LLM_API_KEY` and `INJECTION_GUARD_MODEL` are set; a classifier failure logs
+`<|im_start|>`, `[INST]`). It reads the readings in order and reports which one blocked. Layer 2,
+optional: a classifier (`agents/llm.py::classify_injection`, default
+`meta-llama/llama-prompt-guard-2-86m` on Groq) used only when `LLM_API_KEY` and
+`INJECTION_GUARD_MODEL` are set; it reads a PII-redacted copy of the text, costs at most one call
+per document because the readings reach it joined into one input, and a classifier failure logs
 and falls back to layer 1, never blocks on its own. A blocked request escalates as `safety`;
-a blocked document is left typed `other` and the run continues. Model Armor is the
-GCP-native scale path for layer 2, documented but not built here.
+a blocked document is left typed `other` and the run continues, with the audit row naming the
+reading that blocked. Model Armor is the GCP-native scale path for layer 2, documented but not
+built here (`docs/decisions.md` ADR-15).
 
 ## PII boundary
 
@@ -55,21 +79,35 @@ always keeps what a patient actually typed or uploaded (`WorkflowRun.request_tex
 that text on its way into an LLM prompt, never to what is stored and never to what
 the patient is shown back.
 
-Five regex categories, each replaced with its own `[REDACTED_...]` token: email,
-phone (international `+49...`, German national `0...` and a generic 3-3-4
-fallback), IBAN (`DE`-specific and a generic international pattern), German health
-insurance number (one letter plus 9 digits) and date-of-birth-like dates. The date
-rule is deliberately two-part: a date next to a birth-context word ("born", "geb",
-"dob") redacts at any year, while a bare, unlabelled date only redacts inside a
-1900-2015 year window, so an ordinary "book me for 15.08.2026" appointment ask
-survives untouched.
+Two passes over the outbound copy. Pass 1 is five regex categories, each replaced
+with its own `[REDACTED_...]` token: email, phone (international `+49...`, German
+national `0...` and a generic 3-3-4 fallback), IBAN (`DE`-specific and a generic
+international pattern), German health insurance number (one letter plus 9 digits)
+and date-of-birth-like dates. The date rule is deliberately two-part: a date next
+to a birth-context word ("born", "geb", "dob") redacts at any year, while a bare,
+unlabelled date only redacts inside a 1900-2015 year window, so an ordinary "book
+me for 15.08.2026" appointment ask survives untouched.
 
-Wired at the three points a chat_json call embeds patient-submitted text directly:
-`agents/routing.py` and `agents/coordinator.py` (`request_text`), and
-`agents/document.py` (a document's `extracted_text`, after the injection guard has
-already cleared it). Each call writes one `safety.pii_redacted` audit row per node
-invocation when anything was found, carrying only the category counts, never the
-raw values. `agents/safety.py` composes its LLM-bound draft from freshly queried
+Pass 2 runs Microsoft Presidio (`presidio-analyzer` 2.2.364) over pass 1's output
+and adds spaCy NER for `PERSON` and `LOCATION` above a 0.5 score threshold, as
+`[REDACTED_NAME]` and `[REDACTED_LOCATION]`. A span that overlaps a token pass 1
+already wrote is dropped, so nothing is redacted twice. Exactly one language model
+runs per call: `en_core_web_sm` or `de_core_news_sm`, never both, because the
+English model reading German tags "Termin" and "Kardiologie" as locations. The
+patient's stored `preferred_language` pins it at the request-text call sites, and
+for a document the body's own German cues decide with that preference as the
+tie-break. A failed engine build or a failed analysis logs one structlog warning
+and returns the pass-1 result, so the boundary degrades to the regex layer rather
+than failing the request. Presidio's German `DE_*` recognizers stay disabled, which
+is Presidio's own default: they cover tax id, passport and id card, none of which
+this app handles.
+
+Wired at the four points a chat_json call embeds patient-submitted text directly:
+`agents/routing.py`, `agents/coordinator.py` and `agents/appointment.py`
+(`request_text`), and `agents/document.py` (the filename plus a document's
+`extracted_text`, in one pass, after the injection guard has already cleared them).
+Each call writes one `safety.pii_redacted` audit row per node invocation when
+anything was found, carrying only the category counts, never the raw values. `agents/safety.py` composes its LLM-bound draft from freshly queried
 database rows, not from patient-submitted text, so it never calls `redact_for_llm`
 and the `final_response` shown to the patient is never redacted either way.
 
@@ -131,7 +169,7 @@ enforce.
   Identity Federation (see `docs/decisions.md`, ADR-12).
 - PII posture: seed data is obviously synthetic, the app carries no real patient data and the
   administrative-only boundary means the system never records or emits clinical judgments about a
-  person. The redacting logger, the "PII boundary" subsection below (redaction before any text
+  person. The redacting logger, the "PII boundary" section above (redaction before any text
   reaches the LLM provider) and the single-identity `patient_id = users.id` design keep the
   personal surface small and auditable.
 

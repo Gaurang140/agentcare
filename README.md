@@ -22,6 +22,15 @@ sees it: an emergency phrase escalates instantly with zero model calls, and a
 request for medical advice is refused politely. That gate is enforced in code,
 not just in prompts.
 
+Safety is layered, and the deterministic screens decide first and alone. What
+clears them passes a prompt-injection guard and a PII redaction pass (regex
+families plus Microsoft Presidio NER in English and German) that rewrites only
+the copy heading for the model, while the database keeps what the patient
+actually typed, and a final deterministic sanitizer replaces any sentence in
+the answer that reads as a diagnosis, a dosage or a treatment recommendation.
+Guardrail libraries beyond Presidio were evaluated and either turned down or
+deferred, with the reasons in [docs/decisions.md](docs/decisions.md) ADR-15.
+
 ## What it does
 
 The core journey is seven steps:
@@ -363,13 +372,15 @@ diagram is [docs/architecture.mmd](docs/architecture.mmd).
 cd backend && ../.venv/bin/python -m pytest -q
 ```
 
-242 tests pass. They cover the agents (each with an injected fake model, no
-network and no keys), the tools and deterministic safety guardrails (including
-the prompt-injection guard and the PII redaction boundary), procedural agent
-rules and the bilingual safety response, the data model, RBAC on staff and
-patient-data routes, the SSE timeline, the scheduler jobs and a full fake-LLM
-end-to-end graph run in `test_graph_e2e.py`, including the pause-and-approve
-path from `waiting_approval` through to the booked appointment. Linting is
+317 tests pass. They cover the agents (each with an injected fake model, no
+network and no keys), the tools and deterministic safety guardrails (the
+prompt-injection guard including document filenames, the PII redaction boundary
+in both languages and the English and German output sanitizer), replay-safe
+booking, cancel and reschedule, procedural agent rules and the bilingual safety
+response, the data model, RBAC on staff and patient-data routes, the SSE
+timeline, the scheduler jobs and a full fake-LLM end-to-end graph run in
+`test_graph_e2e.py`, including the pause-and-approve path from
+`waiting_approval` through to the booked appointment. Linting is
 `ruff check backend`.
 
 ## Stack at a glance
@@ -399,7 +410,7 @@ agentcare/
   backend/            FastAPI + LangGraph service
     app/              config, models, auth, safety, tools, agents, services, api
     alembic/          migration environment and versions
-    tests/            242 pytest tests (unit, RBAC, fake-LLM end-to-end)
+    tests/            317 pytest tests (unit, RBAC, fake-LLM end-to-end)
     Dockerfile
   frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
     app/              login, register, patient portal, staff portal
