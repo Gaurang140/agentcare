@@ -26,8 +26,8 @@ Safety is layered, and the deterministic screens decide first and alone. What
 clears them passes a prompt-injection guard and a PII redaction pass (regex
 families plus Microsoft Presidio NER in English and German) that rewrites only
 the copy heading for the model, while the database keeps what the patient
-actually typed, and a final deterministic sanitizer replaces any sentence in
-the answer that reads as a diagnosis, a dosage or a treatment recommendation.
+actually typed. A final deterministic sanitizer replaces any sentence in the
+answer that reads as a diagnosis, a dosage or a treatment recommendation.
 Guardrail libraries beyond Presidio were evaluated and either turned down or
 deferred, with the reasons in [docs/decisions.md](docs/decisions.md) ADR-15.
 

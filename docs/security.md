@@ -107,7 +107,8 @@ Wired at the four points a chat_json call embeds patient-submitted text directly
 (`request_text`), and `agents/document.py` (the filename plus a document's
 `extracted_text`, in one pass, after the injection guard has already cleared them).
 Each call writes one `safety.pii_redacted` audit row per node invocation when
-anything was found, carrying only the category counts, never the raw values. `agents/safety.py` composes its LLM-bound draft from freshly queried
+anything was found, carrying only the category counts, never the raw values.
+`agents/safety.py` composes its LLM-bound draft from freshly queried
 database rows, not from patient-submitted text, so it never calls `redact_for_llm`
 and the `final_response` shown to the patient is never redacted either way.
 

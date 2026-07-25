@@ -532,19 +532,20 @@ Prompt Guard 2** as a required dependency.
   precisely the model independence this project requires, so the option is viable and stays
   open. It was not built because correctness outranked a new runtime framework before the
   deadline. The same window instead fixed the optional injection classifier reading unredacted
-  patient text, an unscreened document filename, a reminder batch that could half-write, cancel
-  and reschedule that were not replay-safe, and a missing German output sanitizer. Rails layered
-  over unfixed versions of those would have been a second opinion on top of a broken first one.
-  The design is on record for whoever picks it up: an `RAILS_ENABLED` setting defaulting to off,
+  patient text, an unscreened document filename and a reminder batch that could half-write. It
+  also made cancel and reschedule replay-safe and added the missing German output sanitizer.
+  Rails layered over unfixed versions of those would have been a second opinion on top of a
+  broken first one.
+  The design is on record for whoever picks it up: a `RAILS_ENABLED` setting defaulting to off,
   an input rail after the deterministic screens and an output rail where the final response is
   composed, a block following the existing injection-guard shape (localized staff-review reply,
-  `safety` escalation, an audit row carrying rail name and category only), and fail-open with
+  `safety` escalation, an audit row carrying rail name and category only) and fail-open with
   evidence, meaning one `rails_unavailable` warning plus a `safety.rails_skipped` audit row
   whenever the rails runtime errors.
 - **Model Armor, the deployed-path layer.** It is GCP-native and screens prompts and responses
   as a service call: available in `europe-west3` (the region this deployment already uses for EU
-  data residency), with EU residency controls, multilingual detection covering English and
-  German, and a free tier of 2 million screened tokens per month. Its place is between the
+  data residency), with EU residency controls, English and German detection and a free tier of
+  2 million screened tokens per month. Its place is between the
   deterministic screens and the LLM once the app actually runs on GCP, never as a local
   dependency, because it is a network call and the local no-key path has to keep working with no
   network at all. `docs/security.md` names it as the scale path for the optional injection
@@ -566,7 +567,7 @@ Prompt Guard 2** as a required dependency.
   prevent.
 
 Related: ADR-12 (the GCP security lineup, including Secret Manager and Workload Identity
-Federation), ADR-13 (the regex PII boundary this extends, and Cloud DLP as its managed
+Federation), ADR-13 (the regex PII boundary this extends and Cloud DLP as its managed
 alternative) and `docs/security.md` for how the layers sit in the request path.
 
 **Revisit when.** Rails: the deterministic layer plus Presidio stops covering a failure class

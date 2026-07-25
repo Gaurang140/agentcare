@@ -484,7 +484,8 @@ credential.
 
 **`tofu apply` fails reading the `default` network** - the Cloud SQL module looks up a VPC named
 `default` for private service access. If an org policy disabled auto-creation of the default
-network, pass a network name through the module's `network_name` variable instead.
+network, set `network_name` on the `cloud_sql` module block in `infra/terraform/main.tf` (the
+root module does not forward it, so `-var` on the command line will not reach it).
 
 **The migration Job fails with a connection or authentication error** - the Cloud SQL database
 or user from Step 5 does not exist, or `DATABASE_URL` in the Secret does not match the password
@@ -608,7 +609,7 @@ non-empty bucket instead of quietly deleting whatever a patient uploaded during 
 failure is the feature. Empty it deliberately first if you actually want it gone:
 
 ```bash
-gsutil -m rm -r gs://BUCKET_NAME/**
+gcloud storage rm --recursive gs://BUCKET_NAME/**
 ```
 
 It is not reversible.
