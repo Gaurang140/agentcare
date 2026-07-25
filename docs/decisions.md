@@ -482,3 +482,97 @@ new container image.
 conditions, rule conflict resolution, versioned rollout to a subset of traffic) - at that point
 LangGraph's own `PostgresStore` or a rules engine is the right next step, evaluated on its current
 state at that time rather than assumed now.
+
+---
+
+## ADR-15: Guardrail layering - Presidio adopted, NeMo Guardrails deferred, provider-locked options rejected
+
+**Status:** Presidio implemented now (`backend/app/safety/pii.py`, pinned in the root
+`requirements.txt`). NeMo Guardrails evaluated and deferred: no code, no dependency and no
+setting for it in this repo. Google Model Armor designed for the deployed path, not applied.
+AWS Bedrock Guardrails and LLM Guard rejected. Every version and date below was verified on
+2026-07-25.
+
+**Context.** Model independence is a hard requirement here. The operator selects any
+OpenAI-compatible endpoint through `.env` alone (Groq, LM Studio, a llama.cpp server), so
+nothing in the security path may depend on one provider's hosted service. The deterministic
+layer in `backend/app/safety/` is and stays the first gate: the emergency screen, the medical
+refusal and the injection guard decide before any model call, and the output sanitizer decides
+after. ADR-13 already put a regex PII boundary in front of every prompt and named Presidio as
+the upgrade. This ADR records which guardrail libraries join that stack, on what terms, and
+which ones were turned down.
+
+**Decision.** Adopt **Microsoft Presidio** for NER-based PII detection at the prompt boundary.
+**Defer NVIDIA NeMo Guardrails 0.23.0**, recorded as viable and unbuilt. Document **Google Model
+Armor** as the GCP-native screening layer for the deployed path only. Reject **AWS Bedrock
+Guardrails**, **LLM Guard** by Protect AI and any Groq-hosted **Llama Guard 4** or **Llama
+Prompt Guard 2** as a required dependency.
+
+**Why.**
+
+- **Presidio, adopted.** `presidio-analyzer` and `presidio-anonymizer` are pinned at 2.2.364,
+  the 2.2.x line still shipping releases through June 2026. It runs in-process on spaCy with no
+  LLM call, no cloud service and no key, so it costs the no-key demo path nothing and adds no
+  provider. What shipped: pass 1 is the unchanged regex family set (email, phone, IBAN, German
+  health insurance number, date-of-birth shapes), pass 2 is spaCy NER through
+  `en_core_web_sm` / `de_core_news_sm` 3.8.0 for `PERSON` and `LOCATION`, above a 0.5 score
+  threshold, with spans that overlap a pass-1 token dropped. Exactly one language runs per call:
+  a German cue in the text picks the German model, and the patient's stored
+  `preferred_language` breaks a no-cue tie, because reading German text with the English model
+  redacted "Termin" and "Kardiologie" as locations and would have sent ordinary German bookings
+  to staff. A failed engine build or a failed analysis logs one structlog warning and returns
+  the pass-1 result, so the layer degrades to exactly what ADR-13 described. Presidio's German
+  `DE_*` recognizers stay at their shipped default of disabled: they cover tax id, passport and
+  id card, which this app never handles, and the health insurance number already has its own
+  regex family. Cost of the choice: about 27 MB of model wheels plus spaCy's compiled
+  dependencies in the image, a roughly one second engine build on the first call and about
+  2.5 ms per warm call.
+- **NeMo Guardrails, deferred rather than built.** 0.23.0 (released 2026-07-01) configures its
+  model with `engine: openai` plus `parameters.base_url` and `parameters.api_key`, which is
+  precisely the model independence this project requires, so the option is viable and stays
+  open. It was not built because correctness outranked a new runtime framework before the
+  deadline. The same window instead fixed the optional injection classifier reading unredacted
+  patient text, an unscreened document filename, a reminder batch that could half-write, cancel
+  and reschedule that were not replay-safe, and a missing German output sanitizer. Rails layered
+  over unfixed versions of those would have been a second opinion on top of a broken first one.
+  The design is on record for whoever picks it up: an `RAILS_ENABLED` setting defaulting to off,
+  an input rail after the deterministic screens and an output rail where the final response is
+  composed, a block following the existing injection-guard shape (localized staff-review reply,
+  `safety` escalation, an audit row carrying rail name and category only), and fail-open with
+  evidence, meaning one `rails_unavailable` warning plus a `safety.rails_skipped` audit row
+  whenever the rails runtime errors.
+- **Model Armor, the deployed-path layer.** It is GCP-native and screens prompts and responses
+  as a service call: available in `europe-west3` (the region this deployment already uses for EU
+  data residency), with EU residency controls, multilingual detection covering English and
+  German, and a free tier of 2 million screened tokens per month. Its place is between the
+  deterministic screens and the LLM once the app actually runs on GCP, never as a local
+  dependency, because it is a network call and the local no-key path has to keep working with no
+  network at all. `docs/security.md` names it as the scale path for the optional injection
+  classifier for the same reason.
+- **AWS Bedrock Guardrails, rejected.** A managed service tied to one provider's runtime. It
+  contradicts the model-independence requirement directly, and the deployment target here is
+  GCP, so it would also mean a second cloud account for one control.
+- **LLM Guard by Protect AI, rejected.** Its scanners are transformer models, so the dependency
+  footprint is torch-scale on a 16 GB development target, which AGENTS.md rules out. Its release
+  cadence is also unclear enough that pinning it for a security-path component is a poor trade
+  against Presidio, which does the PII job in-process at a fraction of the weight.
+- **Llama Guard 4 and Llama Prompt Guard 2 on Groq, rejected as a required dependency, kept as
+  an option.** Pointing a guard at a hosted safety model is a reasonable thing for an operator to
+  do, and the injection guard already supports it: layer 2 calls
+  `INJECTION_GUARD_MODEL` (default `meta-llama/llama-prompt-guard-2-86m`) and runs only when
+  that and `LLM_API_KEY` are both set, falling back to the deterministic layer 1 on any failure.
+  Making it mandatory is the part that is wrong: it would tie the security layer to one hosted
+  provider and break the no-key demo path, which is the exact failure mode this ADR exists to
+  prevent.
+
+Related: ADR-12 (the GCP security lineup, including Secret Manager and Workload Identity
+Federation), ADR-13 (the regex PII boundary this extends, and Cloud DLP as its managed
+alternative) and `docs/security.md` for how the layers sit in the request path.
+
+**Revisit when.** Rails: the deterministic layer plus Presidio stops covering a failure class
+the test suite can name, and there is time to run a new framework in front of real traffic.
+Model Armor: the first real GCP deploy, where it becomes a configuration change rather than a
+new dependency. Presidio: a larger German model fits the machine budget (the small model
+over-tags German function words as names, which over-redacts and costs prompt quality, not
+privacy), or Cloud DLP's managed detectors beat maintaining a local pattern list once the app
+runs on GCP.
