@@ -405,18 +405,25 @@ Five things, and skipping any of them is a real hole:
 
 ## Part 4 - GCP deployment, end to end
 
-> **Honest status note.** Nothing in this repository has applied any of what follows: there
-> are no GCP credentials in this environment and none were created to write it. Every
-> command below is taken from the committed Terraform, the kustomize manifests and
-> `.github/workflows/deploy.yml`, and the manual gaps are called out where they exist, but
-> the first real deploy still needs a GCP project with billing enabled. Treat this as a
-> validated plan, not as a transcript of a run that happened.
+> **Status: validated configuration, not yet applied to a GCP project.** Nothing in this
+> repository has applied any of what follows: there are no GCP credentials in this
+> environment and none were created to write it. Every command below is taken from the
+> committed Terraform, the kustomize manifests and `.github/workflows/deploy.yml`, but the
+> first real deploy still needs a GCP project with billing enabled. Three steps are left to
+> you on purpose and are marked where they appear: the Cloud SQL database and its user, the
+> `agentcare-secrets` Kubernetes Secret and the Workload Identity binding for the pods. Read
+> this as a validated plan, not as a transcript of a run that happened.
 
 The target shape: Artifact Registry for images, a GCS bucket for patient documents, IAM
 including Workload Identity Federation for GitHub Actions, a GKE Autopilot cluster and a
 Cloud SQL for PostgreSQL 17 instance. Terraform (OpenTofu-compatible HCL) is in
 `infra/terraform/`, the Kubernetes side is a kustomize base plus a `gcp` overlay in
 `infra/k8s/`.
+
+[docs/deployment-gcp.md](deployment-gcp.md) is the same path written as a numbered procedure,
+with the monitoring, end-to-end test, troubleshooting and cost sections this part does not
+repeat. It is the procedure; this part explains what each command does and why it is there.
+Keep both open, or pick the one that matches how you work.
 
 ### Authenticate the gcloud CLI
 
