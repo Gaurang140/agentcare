@@ -27,9 +27,10 @@ kind of accidental prefix collision.
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass
 from typing import Literal
+
+from app.safety.text_normalize import fold_confusables
 
 Action = Literal["allow", "escalate_emergency", "refuse_medical"]
 
@@ -198,13 +199,6 @@ _OUTPUT_FORBIDDEN_COMPILED = [
 # sentence can be swapped out whole, not surgically edited).
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
-# Zero-width space, the two joiners and the byte-order mark. They render as
-# nothing at all, so a forbidden phrase can be broken across one of them
-# ("ha<zwsp>ve arrhythmia") and still read normally to the patient while
-# matching none of the patterns above.
-_ZERO_WIDTH_RE = re.compile("[\u200b-\u200d\ufeff]")
-_WHITESPACE_RE = re.compile(r"\s+")
-
 
 def _normalize_output(text: str) -> str:
     """Fold an agent response into one shape before the forbidden patterns
@@ -219,9 +213,11 @@ def _normalize_output(text: str) -> str:
     Output path only. `screen_request` keeps its own matching semantics, which
     its own tests define; this is a rewrite of what the agent produced, not of
     what the patient wrote.
+
+    The fold itself lives in safety/text_normalize.py because the injection
+    guard needs the same one on the way in.
     """
-    folded = unicodedata.normalize("NFKC", text)
-    return _WHITESPACE_RE.sub(" ", _ZERO_WIDTH_RE.sub("", folded)).strip()
+    return fold_confusables(text)
 
 
 def _find_matches(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> list[str]:

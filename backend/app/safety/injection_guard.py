@@ -55,6 +55,7 @@ from app.agents.llm import classify_injection
 from app.config import settings
 from app.logging_setup import get_logger
 from app.safety.pii import redact_for_llm
+from app.safety.text_normalize import fold_confusables
 
 logger = get_logger(__name__)
 
@@ -136,10 +137,26 @@ _BASE64_RUN_RE = re.compile(r"[A-Za-z0-9+/]{120,}={0,2}")
 
 
 def _deterministic_matches(text: str) -> list[str]:
-    matched = [label for label, pattern in _INJECTION_PATTERNS if pattern.search(text)]
-    matched += [label for label, pattern in _ROLE_MARKER_PATTERNS if pattern.search(text)]
-    if _BASE64_RUN_RE.search(text):
-        matched.append("base64-looking run")
+    """Every pattern against the raw text, then against its folded reading.
+
+    Both, not one: the fold (safety/text_normalize.py) is what catches a
+    zero-width character dropped inside a phrase or a full-width spelling of
+    it, and folding is lossy, so the raw text stays the first reading. A label
+    is reported once however many readings produced it, which keeps the list
+    the same as before for text no fold changes.
+    """
+    readings = [text]
+    folded = fold_confusables(text)
+    if folded != text:
+        readings.append(folded)
+
+    matched: list[str] = []
+    for reading in readings:
+        for label, pattern in (*_INJECTION_PATTERNS, *_ROLE_MARKER_PATTERNS):
+            if label not in matched and pattern.search(reading):
+                matched.append(label)
+        if "base64-looking run" not in matched and _BASE64_RUN_RE.search(reading):
+            matched.append("base64-looking run")
     return matched
 
 
