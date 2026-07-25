@@ -27,6 +27,7 @@ kind of accidental prefix collision.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Literal
 
@@ -112,6 +113,17 @@ OUTPUT_FORBIDDEN_PATTERNS = [
     r"\bdiagnosis is\b",  # "the diagnosis is ..."
     r"\btake \d+ ?mg\b",  # explicit dosage instruction, e.g. "take 5mg" / "take 500 mg"
     r"\bi recommend (taking|stopping)\b",  # prescriptive treatment recommendation
+    # The same four shapes in German. The clinic is German, so a model can
+    # state a diagnosis or a dosage in German just as readily, and until these
+    # existed the output sanitizer only guarded one of the two languages the
+    # rest of this module handles. The umlauts are spelled into the character
+    # class because a German noun can open with one ("Ödem") and `[a-z]` does
+    # not cover them.
+    r"\bsie haben (wahrscheinlich |vermutlich )?[a-zäöü]",  # states a diagnosis as fact ("Sie haben X")
+    r"\bdiagnose (ist|lautet)\b",  # "die Diagnose ist ..." / "Ihre Diagnose lautet ..."
+    r"\bnehmen sie \d+ ?mg\b",  # explicit dosage instruction, e.g. "Nehmen Sie 5 mg"
+    # prescriptive treatment recommendation
+    r"\bich empfehle (die einnahme|das absetzen|einzunehmen|abzusetzen)\b",
 ]
 
 
@@ -140,6 +152,31 @@ _OUTPUT_FORBIDDEN_COMPILED = [
 # sentence's own trailing punctuation attached (needed so a replaced
 # sentence can be swapped out whole, not surgically edited).
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+# Zero-width space, the two joiners and the byte-order mark. They render as
+# nothing at all, so a forbidden phrase can be broken across one of them
+# ("ha<zwsp>ve arrhythmia") and still read normally to the patient while
+# matching none of the patterns above.
+_ZERO_WIDTH_RE = re.compile("[\u200b-\u200d\ufeff]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_output(text: str) -> str:
+    """Fold an agent response into one shape before the forbidden patterns
+    read it: Unicode NFKC, zero-width characters removed, runs of whitespace
+    collapsed to a single space.
+
+    NFKC is what makes a compatibility spelling of a word the same string as
+    the plain one, and it also folds the exotic space characters (non-breaking
+    space and friends) onto an ordinary space, which the collapse then joins
+    with any other run of whitespace.
+
+    Output path only. `screen_request` keeps its own matching semantics, which
+    its own tests define; this is a rewrite of what the agent produced, not of
+    what the patient wrote.
+    """
+    folded = unicodedata.normalize("NFKC", text)
+    return _WHITESPACE_RE.sub(" ", _ZERO_WIDTH_RE.sub("", folded)).strip()
 
 
 def _find_matches(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> list[str]:
@@ -179,13 +216,17 @@ def screen_request(text: str) -> ScreenResult:
 def sanitize_agent_output(text: str) -> tuple[str, bool]:
     """Rewrite any sentence in an agent response that reads like medical advice.
 
-    Splits the text on sentence-ending punctuation, checks each sentence
-    against OUTPUT_FORBIDDEN_PATTERNS, and replaces whole offending
-    sentences (never a partial substring) with a fixed, safe sentence, so
-    nothing medically specific can leak through around the edges of a regex
-    match. Sentences with no match are returned untouched.
+    Normalizes the text first (`_normalize_output`), then splits it on
+    sentence-ending punctuation, checks each sentence against
+    OUTPUT_FORBIDDEN_PATTERNS, and replaces whole offending sentences (never a
+    partial substring) with a fixed, safe sentence, so nothing medically
+    specific can leak through around the edges of a regex match. Sentences
+    with no match are returned untouched, in their normalized form: the
+    normalization is what the patterns read, so it is also what ships, and an
+    invisible character that survived into a clean sentence is gone either
+    way.
     """
-    sentences = _SENTENCE_SPLIT_RE.split(text.strip())
+    sentences = _SENTENCE_SPLIT_RE.split(_normalize_output(text))
     flagged = False
     rewritten: list[str] = []
     for sentence in sentences:
