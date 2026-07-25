@@ -137,6 +137,42 @@ def test_unknown_department_name_from_llm_escalates(db, seeded, fake_llm):
     assert result["escalation_id"] is not None
 
 
+# --- Redaction language ------------------------------------------------------
+# The patient's stored preferred_language is what the redactor's NER pass runs
+# with. Without it the pass falls back to reading cues out of the text, and a
+# short German request that happens to carry none is read with the English
+# model (safety/pii.py explains what that costs).
+
+_CUE_FREE_REQUEST = "cancel booking 4711"
+
+
+def test_german_preference_pins_the_redaction_language(
+    db, seeded, fake_llm, redaction_language
+):
+    """Patient 2 (Erika) prefers German. This request carries no German cue
+    word at all, so the stored preference is the only thing that can put it on
+    the German model."""
+    seen = redaction_language(routing)
+    fake_llm([{"intent": "cancel", "department": None, "confidence": 0.9, "reason": "clear"}])
+
+    routing.run(_state(patient_id=2, request_text=_CUE_FREE_REQUEST), db)
+
+    assert seen == ["de"]
+
+
+def test_unknown_patient_leaves_the_language_to_the_redactor(
+    db, seeded, fake_llm, redaction_language
+):
+    """No profile row means no stored preference, and the redactor's own
+    detection stays the fallback rather than being replaced by a default."""
+    seen = redaction_language(routing)
+    fake_llm([{"intent": "cancel", "department": None, "confidence": 0.9, "reason": "clear"}])
+
+    routing.run(_state(patient_id=999, request_text=_CUE_FREE_REQUEST), db)
+
+    assert seen == [None]
+
+
 def test_routing_llm_failure_returns_error_not_raise(db, seeded, fake_llm):
     # RuntimeError isn't a retried transport error, so chat_json propagates
     # it on the first call - routing.run must still not raise.

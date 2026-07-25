@@ -245,6 +245,59 @@ def test_overlong_filename_is_capped(db, seeded, fake_llm):
     assert "ende.pdf" not in prompt
 
 
+# --- Redaction language ------------------------------------------------------
+# The body's own cues decide only when nothing better is known. A stored
+# preferred_language is better: it is what the clinic recorded for this
+# patient, and it holds for a short body that carries no cue at all.
+
+
+def test_patient_language_pins_the_classification_redaction(
+    db, seeded, fake_llm, redaction_language
+):
+    """Patient 2 (Erika) prefers German. This body is short and carries no
+    German cue, so detection alone would put it on the English model."""
+    seen = redaction_language(document)
+    doc = _store_doc(db, patient_id=2, filename="report.pdf", text="ECG report")
+    fake_llm([{"document_type": "ecg_report", "confidence": 0.9}])
+
+    document.run(_state(patient_id=2, uploaded_document_ids=[doc.id]), db)
+
+    assert seen == ["de"]
+
+
+def test_patient_language_pins_the_injection_guard_copy_too(db, seeded, fake_llm, monkeypatch):
+    """The guard redacts its own copy of the same readings, so it has to run
+    with the same language the classification prompt runs with."""
+    seen: list[str | None] = []
+    real_screen = document.screen_injection_group
+
+    def _spy(readings, language=None):
+        seen.append(language)
+        return real_screen(readings, language=language)
+
+    monkeypatch.setattr(document, "screen_injection_group", _spy)
+    doc = _store_doc(db, patient_id=2, filename="report.pdf", text="ECG report")
+    fake_llm([{"document_type": "ecg_report", "confidence": 0.9}])
+
+    document.run(_state(patient_id=2, uploaded_document_ids=[doc.id]), db)
+
+    assert seen == ["de"]
+
+
+def test_without_a_stored_preference_the_body_still_decides(
+    db, seeded, fake_llm, redaction_language
+):
+    """No profile row, so the body's own cues stay the fallback - unchanged
+    from before the preference was threaded through."""
+    seen = redaction_language(document)
+    doc = _store_doc(db, patient_id=999, filename="report.pdf", text=_ENGLISH_BODY)
+    fake_llm([{"document_type": "ecg_report", "confidence": 0.9}])
+
+    document.run(_state(patient_id=999, uploaded_document_ids=[doc.id]), db)
+
+    assert seen == ["en"]
+
+
 def test_no_uploaded_documents_still_reports_required_documents(db, seeded, fake_llm):
     dept_id = _cardiology_id(db)
     client = fake_llm([])

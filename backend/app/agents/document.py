@@ -25,7 +25,7 @@ reason: it is a string the uploading client chose and it lands in the
 classification prompt. It is normalized first (invisible characters out,
 whitespace collapsed, capped), then screened, then redacted along with the
 body in one pass over the assembled prompt (see `_redacted_prompt` for why
-the two are not redacted separately, and `_body_language` for the one
+the two are not redacted separately, and `_document_language` for the one
 decision the merge is not allowed to make). A filename that the guard blocks
 leaves the document typed "other" and writes the same
 "safety.injection_blocked_document" row the body path writes, with a
@@ -39,6 +39,16 @@ while the optional classifier reads them joined and a document costs one
 round trip to it instead of three. That classifier copy is redacted too, so
 it gets the same pinned language the classification prompt gets - the merge
 is not allowed to decide the language on either path.
+
+That pinned language comes from the patient's own profile row
+(`agents/responses.py::patient_language`) whenever the clinic has one on
+file, and from the document body only as the fallback. The body's cues are a
+guess about the text; the profile is what the clinic recorded about the
+patient, and it still holds for a body too short to carry a cue at all. The
+trade-off is measured and accepted: an English report uploaded by a
+German-preferring patient is then read with the German model, which
+over-redacts a word or two of the English body. Over-redaction costs prompt
+quality, not privacy.
 """
 
 from __future__ import annotations
@@ -52,6 +62,7 @@ from sqlalchemy.orm import Session
 from app.agents.prompts import DOCUMENT
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
+from app.agents.responses import patient_language
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import PatientDocument
@@ -88,32 +99,36 @@ def _classification_prompt(filename: str, extracted_text: str) -> str:
     return f"Filename: {filename}\nExtracted text (may be empty): {extracted_text}"
 
 
-def _body_language(extracted_text: str) -> str:
-    """The one language every redaction of this document runs with, decided by
-    the document body alone.
+def _document_language(preferred: str | None, extracted_text: str) -> str:
+    """The one language every redaction of this document runs with: the
+    patient's stored preference when `safety/pii.py` has a model for it, the
+    document body's own cues otherwise.
 
-    Both places that redact read it: the classification prompt
+    Both places that redact read the result: the classification prompt
     (`_redacted_prompt`) and the injection guard's own copy for its classifier,
     which merges the same readings and so has the same problem.
 
-    `redact_for_llm` decides for itself from whatever string it is handed, and
-    the string it is handed here is the filename plus the body. That gives the
-    filename a vote: one German word in a name, spaced into three by
-    `_spaced_filename`, is enough to send an English report to the German
-    model. Measured on `befund_der_untersuchung.pdf` over an English body,
-    "Sinus rhythm" and "Book the" come back as `[REDACTED_NAME]`, which is the
-    cross-language failure `safety/pii.py`'s single-model rule exists to
-    prevent, reached through the filename instead of through the body. The
-    body is the text that says what language the document is in, so the body
-    is what the decision reads.
+    Neither of them may work the language out for itself, because the string
+    each is handed is the filename plus the body. That would give the filename
+    a vote: one German word in a name, spaced into three by `_spaced_filename`,
+    is enough to send an English report to the German model. Measured on
+    `befund_der_untersuchung.pdf` over an English body, "Sinus rhythm" and
+    "Book the" come back as `[REDACTED_NAME]`, which is the cross-language
+    failure `safety/pii.py`'s single-model rule exists to prevent, reached
+    through the filename instead of through the body. The body is the text
+    that says what language the document is in, so the body is what the
+    fallback reads - never the merge.
 
-    Same heuristic `redact_for_llm` would apply on its own, imported rather
-    than copied so the two can never drift apart.
+    Both halves run through the same helper `redact_for_llm` would apply on its
+    own, imported rather than copied, so the two can never drift apart and this
+    module never restates which languages have a model.
     """
-    return _pii_languages_for(extracted_text, None)[0]
+    return _pii_languages_for(extracted_text, preferred)[0]
 
 
-def _redacted_prompt(filename: str, extracted_text: str) -> tuple[str, dict[str, int]]:
+def _redacted_prompt(
+    filename: str, extracted_text: str, language: str
+) -> tuple[str, dict[str, int]]:
     """Redact the assembled prompt in one pass, rather than the filename and
     the extracted text separately.
 
@@ -125,12 +140,11 @@ def _redacted_prompt(filename: str, extracted_text: str) -> tuple[str, dict[str,
     stays a filename. A patient name in the filename is still caught either
     way.
 
-    The one thing the merge must not decide is the language, so that is pinned
-    explicitly from the body (see `_body_language`).
+    The one thing the merge must not decide is the language, so `language` is
+    passed in already settled (see `_document_language`).
     """
     return redact_for_llm(
-        _classification_prompt(filename, extracted_text),
-        language=_body_language(extracted_text),
+        _classification_prompt(filename, extracted_text), language=language
     )
 
 
@@ -254,6 +268,8 @@ def run(state: AgentState, db: Session) -> dict:
         patient_id = state["patient_id"]
         doc_ids = state.get("uploaded_document_ids") or []
         system = build_system_prompt(db, "document", DOCUMENT)
+        # One indexed read of the profile row per run(), not one per document.
+        preferred_language = patient_language(db, patient_id)
 
         classified: list[dict] = []
         pii_counts: dict[str, int] = {}
@@ -265,15 +281,16 @@ def run(state: AgentState, db: Session) -> dict:
             extracted_text = doc.extracted_text or ""
             normalized_name = _normalize_filename(doc.filename)
             spaced_name = _spaced_filename(normalized_name)
+            language = _document_language(preferred_language, extracted_text)
             injection, blocked_reading = screen_injection_group(
                 _document_readings(extracted_text, normalized_name, spaced_name),
-                language=_body_language(extracted_text),
+                language=language,
             )
             if injection.action == "block":
                 _block_document(db, doc, injection, field=_blocked_field(blocked_reading))
                 continue
 
-            prompt, counts = _redacted_prompt(spaced_name, extracted_text)
+            prompt, counts = _redacted_prompt(spaced_name, extracted_text, language)
             _merge_counts(pii_counts, counts)
             result = chat_json(system, prompt, DocumentOutput)
             if result.confidence < _CONFIDENCE_THRESHOLD:

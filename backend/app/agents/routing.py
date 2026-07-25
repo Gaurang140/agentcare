@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.agents.prompts import ROUTING
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
-from app.agents.responses import staff_review_response
+from app.agents.responses import patient_language, staff_review_response
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.safety.pii import redact_for_llm
@@ -64,11 +64,23 @@ def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
     db.commit()
 
 
-def _redact_request_text(db: Session, workflow_id: int | None, request_text: str) -> str:
+def _redact_request_text(
+    db: Session, workflow_id: int | None, patient_id: int | None, request_text: str
+) -> str:
     """Redact `request_text` before it is embedded in the routing prompt;
     write one "safety.pii_redacted" audit row (counts only, no raw PII) when
-    anything was found."""
-    redacted, counts = redact_for_llm(request_text)
+    anything was found.
+
+    The patient's stored language goes with it. Without it the redactor works
+    the language out of the text, and a short German request that carries none
+    of its cue words is read with the English model, which mistakes ordinary
+    German administrative nouns for names and locations (safety/pii.py). One
+    indexed read of the profile row per node call, the same read
+    agents/safety.py makes.
+    """
+    redacted, counts = redact_for_llm(
+        request_text, language=patient_language(db, patient_id)
+    )
     if counts:
         write_audit(
             db,
@@ -111,7 +123,9 @@ def run(state: AgentState, db: Session) -> dict:
     workflow_id = state.get("workflow_id")
     try:
         departments = list_departments(db)
-        request_text = _redact_request_text(db, workflow_id, state.get("request_text", ""))
+        request_text = _redact_request_text(
+            db, workflow_id, state.get("patient_id"), state.get("request_text", "")
+        )
         system = build_system_prompt(db, "routing", ROUTING)
         result = chat_json(
             system,

@@ -1,9 +1,14 @@
-"""Deterministic patient-facing templates in the patient's preferred language.
+"""Deterministic patient-facing templates in the patient's preferred language,
+plus the one lookup that reads that language off the profile row.
 
 The LLM-composed finalize path handles language inside the safety agent's
 prompt; these templates cover the paths that must work with no model at all
 (escalations). Escalation *reasons* stay English: they are staff-facing and
 live on the Escalation row, not in the patient response.
+
+`patient_language` is the same lookup without a template attached, for the
+nodes that need the language itself rather than a sentence in it (the PII
+redaction boundary, see its own docstring).
 """
 
 from __future__ import annotations
@@ -65,6 +70,26 @@ def _localized(db: Session, patient_id: int | None, templates: dict[str, str]) -
         if profile is not None and profile.preferred_language in templates:
             return templates[profile.preferred_language]
     return templates["en"]
+
+
+def patient_language(db: Session, patient_id: int | None) -> str | None:
+    """The patient's stored `preferred_language`, or None when there is no
+    profile row to read one from.
+
+    Written for `safety/pii.py::redact_for_llm`, which takes the language as a
+    hint and works the language out of the text itself whenever it is handed
+    None or a language it has no model for. Returning None rather than a
+    default is the point of the function: defaulting to "en" here would put
+    the English model on German text from a patient who never set a
+    preference, which is worse than the detection it would be replacing.
+
+    Different contract from `agents/safety.py::_preferred_language`, which
+    answers "which language do we write back in" and so has to name one.
+    """
+    if patient_id is None:
+        return None
+    profile = db.query(PatientProfile).filter_by(user_id=patient_id).first()
+    return profile.preferred_language if profile else None
 
 
 def staff_review_response(db: Session, patient_id: int | None) -> str:

@@ -302,3 +302,27 @@ def fake_llm() -> Generator:
 
     yield _make
     set_llm_client_for_tests(None)
+
+
+@pytest.fixture()
+def redaction_language(monkeypatch):
+    """Factory: swap one agent module's `redact_for_llm` for a stub that
+    records the `language` it was called with, and hand back the list those
+    calls append to.
+
+    What these tests assert is the argument the node passes, not what the
+    redactor then does with it, so the stub returns the text unchanged and no
+    counts - and the Presidio engines stay out of it entirely.
+    """
+
+    def _capture(module) -> list[str | None]:
+        seen: list[str | None] = []
+
+        def _fake(text: str, language: str | None = None) -> tuple[str, dict[str, int]]:
+            seen.append(language)
+            return text, {}
+
+        monkeypatch.setattr(module, "redact_for_llm", _fake)
+        return seen
+
+    return _capture
