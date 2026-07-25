@@ -40,15 +40,17 @@ round trip to it instead of three. That classifier copy is redacted too, so
 it gets the same pinned language the classification prompt gets - the merge
 is not allowed to decide the language on either path.
 
-That pinned language comes from the patient's own profile row
-(`agents/responses.py::patient_language`) whenever the clinic has one on
-file, and from the document body only as the fallback. The body's cues are a
-guess about the text; the profile is what the clinic recorded about the
-patient, and it still holds for a body too short to carry a cue at all. The
-trade-off is measured and accepted: an English report uploaded by a
-German-preferring patient is then read with the German model, which
-over-redacts a word or two of the English body. Over-redaction costs prompt
-quality, not privacy.
+That pinned language is settled in this order: a cue in the document body
+wins, the patient's profile row (`agents/responses.py::patient_language`)
+breaks the tie when the body carries no cue, and English is the last
+fallback. A document is written by whoever wrote it, not by the patient, so
+what the body says about itself outranks what the clinic recorded about the
+patient - the opposite of the request text the routing and coordinator nodes
+redact, which is the patient's own words. The trade-off is measured and
+accepted: an English report uploaded by a German-preferring patient carries
+no cue either way and so goes to the German model, which over-redacts a word
+or two of the English body. Over-redaction costs prompt quality, not
+privacy.
 """
 
 from __future__ import annotations
@@ -100,9 +102,18 @@ def _classification_prompt(filename: str, extracted_text: str) -> str:
 
 
 def _document_language(preferred: str | None, extracted_text: str) -> str:
-    """The one language every redaction of this document runs with: the
-    patient's stored preference when `safety/pii.py` has a model for it, the
-    document body's own cues otherwise.
+    """The one language every redaction of this document runs with, in this
+    order: a cue in the document body wins, the patient's stored preference
+    breaks the tie when the body carries no cue, and `safety/pii.py`'s own
+    fallback has the last word.
+
+    The body outranks the profile here and nowhere else. A booking request is
+    the patient's own words, so their stored preference is the best thing to
+    read it with. A document is a second author: a clinic letter arrives in the
+    language whoever wrote it used, and the patient's preference says nothing
+    about that. Reading a German report with the English model costs it
+    "Termin", which comes back as `[REDACTED_LOCATION]`, and the department
+    name with it.
 
     Both places that redact read the result: the classification prompt
     (`_redacted_prompt`) and the injection guard's own copy for its classifier,
@@ -121,8 +132,22 @@ def _document_language(preferred: str | None, extracted_text: str) -> str:
 
     Both halves run through the same helper `redact_for_llm` would apply on its
     own, imported rather than copied, so the two can never drift apart and this
-    module never restates which languages have a model.
+    module never restates which languages have a model. Handing that helper no
+    language is how the cue reading is asked for; the same reading of an empty
+    string is what the helper answers with when there is no cue at all, so
+    comparing the two is what tells a cue from the fallback without naming
+    either language here.
+
+    The remaining trade-off, measured and accepted: `safety/pii.py` has a
+    German-positive cue test and no English-positive one, so an English body
+    reads as a no-cue tie and a German-preferring patient's English report goes
+    to the German model, which returns "Sinus rhythm" and "Book the" as
+    `[REDACTED_NAME]`. Closing that needs an English cue set or a body-length
+    threshold. Over-redaction costs prompt quality, not privacy.
     """
+    from_body = _pii_languages_for(extracted_text, None)[0]
+    if from_body != _pii_languages_for("", None)[0]:
+        return from_body
     return _pii_languages_for(extracted_text, preferred)[0]
 
 

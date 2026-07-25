@@ -184,6 +184,43 @@ def test_irrelevant_intent_is_a_no_op(db, seeded, fake_llm):
     assert result == {"completed_steps": ["appointment"]}
 
 
+# --- Redaction language ------------------------------------------------------
+# The booking prompt carries the patient's own request text, which is short and
+# often carries no German cue at all ("Termin 4711 bitte verschieben" does,
+# "4711" does not). The stored preference is the only signal there, the same
+# way the routing and coordinator nodes read it.
+
+
+def test_booking_redaction_runs_with_the_patient_language(
+    db, seeded, fake_llm, redaction_language
+):
+    """Patient 2 (Erika) prefers German, so the redaction of her booking
+    request runs with the German model rather than the redactor's own guess."""
+    seen = redaction_language(appointment)
+    dept_id = _cardiology_id(db)
+    target = _free_slots(db)[0]
+    fake_llm([{"slot_id": target.id, "reason": "earliest match"}])
+
+    appointment.run(_state(patient_id=2, department_id=dept_id), db)
+
+    assert seen == ["de"]
+
+
+def test_english_preference_reaches_the_booking_redaction_too(
+    db, seeded, fake_llm, redaction_language
+):
+    """The other stored preference reaches it as well, so the assertion above
+    is about the language being threaded, not about a German default."""
+    seen = redaction_language(appointment)
+    dept_id = _cardiology_id(db)
+    target = _free_slots(db)[0]
+    fake_llm([{"slot_id": target.id, "reason": "earliest match"}])
+
+    appointment.run(_state(patient_id=1, department_id=dept_id), db)
+
+    assert seen == ["en"]
+
+
 # --- Replay after a completed cancel / reschedule ----------------------------
 # Same crash window as the booking replay above: the node commits its rows
 # before LangGraph writes the checkpoint saying it ran, so a process killed in

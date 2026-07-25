@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.agents.prompts import APPOINTMENT
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
-from app.agents.responses import staff_review_response
+from app.agents.responses import patient_language, staff_review_response
 from app.agents.state import AgentState
 from app.exceptions import ConflictError, NotFoundError
 from app.logging_setup import get_logger
@@ -211,9 +211,14 @@ def _handle_book_or_reschedule(
 
     # The raw request_text stays in the DB (appointment reason below); only
     # the copy embedded in the LLM prompt is redacted, same boundary as the
-    # routing/coordinator/document nodes.
+    # routing/coordinator/document nodes. The patient's stored language goes
+    # with it, the same one indexed read those nodes make: a booking request is
+    # short and often carries none of the cue words the redactor would
+    # otherwise have to work the language out from.
     request_text = state.get("request_text", "")
-    llm_request_text, pii_counts = redact_for_llm(request_text)
+    llm_request_text, pii_counts = redact_for_llm(
+        request_text, language=patient_language(db, patient_id)
+    )
     if pii_counts:
         write_audit(
             db,
