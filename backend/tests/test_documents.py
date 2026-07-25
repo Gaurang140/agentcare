@@ -94,3 +94,24 @@ def test_extract_text_returns_empty_for_unknown_extension():
 
 def test_extract_text_handles_invalid_pdf_bytes_gracefully():
     assert extract_text("broken.pdf", b"not a real pdf") == ""
+
+
+def test_gcs_backend_is_wired_and_importable(monkeypatch):
+    """The gcp overlay sets STORAGE_BACKEND=gcs; the pinned dependency and the
+    adapter wiring must hold without real credentials (Client is stubbed)."""
+    from google.cloud import storage as gcs_sdk  # the pin, not a mock
+
+    from app import config as config_module
+    from app.services import storage as storage_module
+
+    class _StubClient:
+        def bucket(self, name):
+            return {"bucket": name}
+
+    monkeypatch.setattr(gcs_sdk, "Client", _StubClient)
+    monkeypatch.setattr(config_module.settings, "storage_backend", "gcs")
+    monkeypatch.setattr(config_module.settings, "gcs_bucket", "agentcare-test-bucket")
+
+    backend = storage_module.get_storage()
+    assert isinstance(backend, storage_module.GCSStorage)
+    assert backend.bucket_name == "agentcare-test-bucket"

@@ -361,12 +361,12 @@ the pods' requests. Read the migration Job's log before anything else if the bac
 unhealthy: a backend that cannot reach its database looks identical from the outside to a dozen
 other problems.
 
-**One known gap in this path.** The overlay sets `STORAGE_BACKEND: gcs`, and
-`google-cloud-storage` is deliberately not in `requirements.txt`, so `GCSStorage` raises a
-clear `AppError` naming the missing package the first time a patient uploads a document
-(`backend/app/services/storage.py`). Everything that does not touch document storage works.
-Closing it means adding the package to `requirements.txt`, rebuilding the image and completing
-Step 8 so the pod carries the bucket-scoped identity.
+**Document storage on this path.** The overlay sets `STORAGE_BACKEND: gcs` and
+`google-cloud-storage` is pinned in `requirements.txt`, so the image carries the adapter
+(`backend/app/services/storage.py`). Two things must still line up before the first upload
+works: `GCS_BUCKET` in the overlay must name the bucket Terraform created, and Step 8 must be
+complete so the pod carries the bucket-scoped identity. Until both hold, uploads fail with a
+403 while everything that does not touch document storage keeps working.
 
 Then find the address:
 
@@ -510,8 +510,9 @@ namespace default service account because Step 8 was skipped. Confirm with
 `kubectl get pod <name> -o jsonpath='{.spec.serviceAccountName}'`; if it says `default`, the
 binding is missing.
 
-**Document upload fails with "google-cloud-storage is not installed"** - the known gap in Step
-9. The overlay selects the GCS backend, the package is not pinned in `requirements.txt`.
+**Document upload fails with "google-cloud-storage is not installed"** - the image was built
+from an edited `requirements.txt`. The committed file pins the package; rebuild from a clean
+checkout.
 
 **The SSE workflow timeline dies after 30 seconds** - the `BackendConfig` annotation did not
 land on the backend Service, so the load balancer applies its own default. Check both objects:
