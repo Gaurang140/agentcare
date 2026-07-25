@@ -26,3 +26,89 @@ jobs:
 
       - name: run tests
         run: cd backend && pytest -q
+
+  # The three jobs below pin the current action majors, which run on the
+  # runner's node24. The backend job above keeps the pins it already had.
+
+  frontend:
+    # The backend job never builds the frontend, so a type error or a lint
+    # failure in frontend/ only ever surfaced in the Docker build.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: set up node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: install dependencies
+        run: npm ci
+
+      - name: lint
+        run: npm run lint
+
+      - name: build
+        run: npm run build
+
+  migrations:
+    # An empty database migrated all the way to head. The test suite cannot
+    # catch a broken revision: it builds its schema straight off the models
+    # with Base.metadata.create_all and never runs a migration at all.
+    runs-on: ubuntu-latest
+    env:
+      # Sqlite needs no service container. The revisions are written to run on
+      # both backends (backend/alembic/env.py sets render_as_batch), and that
+      # env.py reads this variable through app.config.settings.
+      DATABASE_URL: sqlite:///./ci-migrations.db
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: set up python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          # requirements.txt pulls presidio and two spaCy model wheels (about
+          # 27 MB), so this job downloads a lot without the cache.
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: install dependencies
+        run: pip install -r requirements.txt
+
+      - name: migrate an empty database to head
+        run: cd backend && alembic upgrade head
+
+      - name: report the revision reached
+        run: cd backend && alembic current
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # gitleaks comments its findings on the pull request
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # gitleaks reads git history, not just the checked-out tree: a
+          # credential that was committed and then removed is still a leaked
+          # credential.
+          fetch-depth: 0
+
+      - name: gitleaks
+        # Pinned to the tagged release commit rather than the moving major
+        # tag. Default rule set, no repo config file: the point is the
+        # upstream rules, and a local config is a place to quietly allow
+        # something through.
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Only organization-owned repositories need a (free) license key.
+          # This one is personal, so the empty value is expected and the scan
+          # runs either way.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
