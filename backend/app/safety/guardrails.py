@@ -104,12 +104,54 @@ MEDICAL_ADVICE_KEYWORDS = [
     "was soll ich einnehmen",  # extension: DE synonym ("what should I take")
 ]
 
+# The administrative objects a "you have X" / "Sie haben X" sentence is
+# allowed to name. Everything an administrative assistant tells a patient they
+# have is on this list: an appointment, a document, a reminder, a card, a
+# message, a request. Nothing on it is a condition, so the exemption below can
+# never let a diagnosis through, and a determiner in front of one buys it
+# nothing ("Sie haben eine Infektion" is still a diagnosis).
+_ADMIN_OBJECTS_EN = (
+    r"appointments?|documents?|reminders?|insurance card|messages?|requests?"
+)
+_ADMIN_OBJECTS_DE = (
+    r"termin(e|en)?|dokument(e|en)?|unterlagen|erinnerung(en)?|"
+    r"versichertenkarte|nachricht(en)?|anfrage(n)?"
+)
+# What can stand between "have"/"haben" and that object: articles, possessives,
+# negations, small counts and the two adverbs a count sentence opens with. Up
+# to two of them, which covers "noch keinen Termin" and "bereits zwei
+# Dokumente".
+_DETERMINERS_EN = r"an|a|your|no|one|two|three|several|some"
+_DETERMINERS_DE = (
+    r"einen|eine|ein|ihren|ihre|ihr|keinen|keine|kein|noch|bereits|"
+    r"zwei|drei|mehrere|die|der|das|den"
+)
+
+
+def _admin_object_exemption(determiners: str, objects: str) -> str:
+    """A negative lookahead that spares a sentence naming one of the
+    administrative objects, with up to two determiners in front of it."""
+    return rf"(?!(({determiners}) ){{0,2}}({objects})\b)"
+
+
 # Regexes (not plain keywords): each one describes a shape of sentence that
 # states a diagnosis, a dosage, or a treatment recommendation outright. A
-# leading `\b` keeps them from matching mid-word; the rest is the brief's
-# patterns verbatim.
+# leading `\b` keeps them from matching mid-word.
+#
+# The two diagnosis-as-fact shapes carry the exemption above. Without it they
+# read every sentence that opens "You have " / "Sie haben " as a diagnosis,
+# which is also the most ordinary way either language states an appointment, a
+# document count or a missing item. The sanitizer replaces a whole sentence
+# rather than editing it, so a model composing "Sie haben einen Termin am
+# Montag um 10 Uhr." lost the patient their confirmation and got a medical
+# refusal in its place. Measured over 25 sentences: 12 false positives before
+# the exemption (7 German, 5 English), 0 after, with every block case still
+# blocked.
 OUTPUT_FORBIDDEN_PATTERNS = [
-    r"\byou (probably |likely )?have [a-z]",  # states a diagnosis as fact ("you have X")
+    # states a diagnosis as fact ("you have X"), administrative objects aside
+    r"\byou (probably |likely )?have "
+    + _admin_object_exemption(_DETERMINERS_EN, _ADMIN_OBJECTS_EN)
+    + r"[a-z]",
     r"\bdiagnosis is\b",  # "the diagnosis is ..."
     r"\btake \d+ ?mg\b",  # explicit dosage instruction, e.g. "take 5mg" / "take 500 mg"
     r"\bi recommend (taking|stopping)\b",  # prescriptive treatment recommendation
@@ -119,7 +161,10 @@ OUTPUT_FORBIDDEN_PATTERNS = [
     # rest of this module handles. The umlauts are spelled into the character
     # class because a German noun can open with one ("Ödem") and `[a-z]` does
     # not cover them.
-    r"\bsie haben (wahrscheinlich |vermutlich )?[a-zäöü]",  # states a diagnosis as fact ("Sie haben X")
+    # states a diagnosis as fact ("Sie haben X"), administrative objects aside
+    r"\bsie haben (wahrscheinlich |vermutlich )?"
+    + _admin_object_exemption(_DETERMINERS_DE, _ADMIN_OBJECTS_DE)
+    + r"[a-zäöü]",
     r"\bdiagnose (ist|lautet)\b",  # "die Diagnose ist ..." / "Ihre Diagnose lautet ..."
     r"\bnehmen sie \d+ ?mg\b",  # explicit dosage instruction, e.g. "Nehmen Sie 5 mg"
     # prescriptive treatment recommendation

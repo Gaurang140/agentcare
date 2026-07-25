@@ -111,6 +111,91 @@ def test_clean_german_confirmation_passes_through_untouched():
     assert text == original
 
 
+# --- Administrative "you have" / "Sie haben" sentences --------------------------
+# Both diagnosis-as-fact patterns read the most ordinary way either language
+# has of stating an appointment, a document count or a missing item. A real
+# model composing the final response writes exactly those sentences, and the
+# sanitizer replaces a whole sentence rather than editing it, so a match there
+# costs the patient their answer. The exemption is the administrative
+# vocabulary only, so a diagnosis carrying an article is still rewritten.
+
+
+def test_english_appointment_confirmation_is_not_rewritten():
+    original = "You have an appointment on Monday at 10:00 with Dr. Weber."
+    text, flagged = sanitize_agent_output(original)
+    assert flagged is False
+    assert text == original
+
+
+def test_german_appointment_confirmation_is_not_rewritten():
+    original = "Sie haben einen Termin am Montag um 10 Uhr."
+    text, flagged = sanitize_agent_output(original)
+    assert flagged is False
+    assert text == original
+
+
+def test_administrative_english_counts_pass_through():
+    for original in (
+        "You have two documents on file.",
+        "You have a reminder scheduled for Tuesday.",
+        "You have no appointments booked.",
+        "You have one appointment and two documents.",
+    ):
+        text, flagged = sanitize_agent_output(original)
+        assert flagged is False, original
+        assert text == original
+
+
+def test_administrative_german_counts_pass_through():
+    for original in (
+        "Sie haben zwei Dokumente eingereicht.",
+        "Sie haben Ihre Versichertenkarte noch nicht hochgeladen.",
+        "Sie haben noch keinen Termin.",
+        "Sie haben eine Erinnerung fuer Dienstag.",
+        "Sie haben Termine am Montag und Dienstag.",
+        "Sie haben bereits zwei Dokumente hochgeladen.",
+    ):
+        text, flagged = sanitize_agent_output(original)
+        assert flagged is False, original
+        assert text == original
+
+
+def test_german_diagnosis_with_an_article_is_still_rewritten():
+    """The exemption covers administrative nouns, never a condition, so an
+    article in front of one buys it nothing."""
+    for original, leaked in (
+        ("Sie haben Bluthochdruck.", "Bluthochdruck"),
+        ("Sie haben vermutlich eine Herzerkrankung.", "Herzerkrankung"),
+        ("Sie haben Diabetes Typ 2.", "Diabetes"),
+        ("Sie haben eine Infektion.", "Infektion"),
+        ("Sie haben keine Grippe, aber Asthma.", "Asthma"),
+    ):
+        text, flagged = sanitize_agent_output(original)
+        assert flagged, original
+        assert leaked not in text
+
+
+def test_english_diagnosis_with_an_article_is_still_rewritten():
+    for original, leaked in (
+        ("You have high blood pressure.", "blood pressure"),
+        ("You likely have a heart condition.", "heart condition"),
+        ("You have an infection.", "infection"),
+    ):
+        text, flagged = sanitize_agent_output(original)
+        assert flagged, original
+        assert leaked not in text
+
+
+def test_no_sentence_fragment_leaks_beside_a_confirmation():
+    """The splitter breaks on the period in "Dr. ", so a flagged confirmation
+    used to ship the refusal line with "Weber." still attached to it."""
+    text, flagged = sanitize_agent_output(
+        "You have an appointment on Monday at 10:00 with Dr. Weber."
+    )
+    assert flagged is False
+    assert "Weber." in text
+
+
 # --- Normalization before output matching ------------------------------------
 
 
