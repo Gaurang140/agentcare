@@ -289,9 +289,11 @@ def _invoke_graph(
     config: dict[str, Any] = {
         "configurable": {"thread_id": workflow_run.thread_id, "db": db},
         # Operational cap on the coordinator loop. LangGraph's own default is
-        # far higher (10007); a real run takes about 7 supersteps, so a graph
-        # that keeps bouncing back to the coordinator is a bug and should stop
-        # early rather than burn LLM calls until the default trips.
+        # far higher; a real run takes about 7 supersteps, so a graph that
+        # keeps bouncing back to the coordinator is a bug and should stop
+        # early rather than burn LLM calls until the default trips. The exact
+        # default is deliberately not quoted here: it is the library's number
+        # to change, and this cap does not depend on what it is.
         "recursion_limit": 50,
     }
 
