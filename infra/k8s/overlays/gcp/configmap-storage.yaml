@@ -1,0 +1,20 @@
+# Storage override for the gcp overlay, merged onto the base ConfigMap.
+#
+# The base ships STORAGE_BACKEND: "local", which writes uploads to the pod's
+# own filesystem under UPLOAD_DIR (backend/app/services/storage.py,
+# LocalStorage). Nothing in infra/k8s/base/backend.yaml mounts a volume there,
+# so on GKE every uploaded document is gone the moment the pod is rescheduled,
+# restarted or rolled. On a cluster the bucket is the storage instead, which is
+# what the terraform in infra/terraform/ provisions and what the backend's
+# Workload Identity service account is granted access to.
+#
+# GCS_BUCKET is a placeholder, the same convention secret.example.yaml and the
+# image entries in kustomization.yaml use: replace it before applying. The real
+# name comes out of terraform as the `documents_bucket_name` output.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentcare-config
+data:
+  STORAGE_BACKEND: "gcs"
+  GCS_BUCKET: "REPLACE_ME"
