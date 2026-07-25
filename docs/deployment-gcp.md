@@ -32,7 +32,7 @@ Terraform (`infra/terraform/`, five modules) provisions:
 | Cloud SQL | PostgreSQL 17 instance `agentcare-postgres`, `db-f1-micro` on the ENTERPRISE edition, private IP only, created when `enable_cloud_sql` is true (the default) |
 
 Defaults you inherit unless you override them: `region` and `gcs_location` are `europe-west3`
-for EU data residency, `enable_cloud_sql` is `true`, and the Cloud SQL module peers the
+for EU data residency, `enable_cloud_sql` is `true` and the Cloud SQL module peers the
 project's `default` VPC network for private service access. `project_id` and
 `github_repository` have no defaults on purpose.
 
@@ -90,8 +90,9 @@ kustomize version
 ```
 
 `kubectl` carries kustomize's engine already, which covers rendering (`kubectl kustomize`) and
-applying (`kubectl apply -k`). The standalone binary is needed only for `kustomize edit set
-image` in Step 9; CI installs it at 5.8.1 (`.github/workflows/deploy.yml`).
+applying (`kubectl apply -k`). The standalone binary is needed only for
+`kustomize edit set image` in Step 9; CI installs it at 5.8.1
+(`.github/workflows/deploy.yml`).
 
 Plain Terraform runs the same files: substitute `terraform` for `tofu` in every command below.
 The HCL, the state format and the provider protocol are identical at these versions.
@@ -501,12 +502,13 @@ the image it tried to pull. Re-run the `kustomize edit set image` in Step 9, or 
 platform flag.
 
 **`kubectl apply -k` fails on the Job** - a leftover `backend-migrate` from the previous deploy.
-Job specs are immutable, so delete it first: `kubectl delete job backend-migrate
---ignore-not-found`.
+Job specs are immutable, so delete it first:
+`kubectl delete job backend-migrate --ignore-not-found`.
 
 **GCS writes fail with a 403, or Secret Manager reads fail** - the pods are running under the
-namespace default service account because Step 8 was skipped. Confirm with `kubectl get pod
-<name> -o jsonpath='{.spec.serviceAccountName}'`; if it says `default`, the binding is missing.
+namespace default service account because Step 8 was skipped. Confirm with
+`kubectl get pod <name> -o jsonpath='{.spec.serviceAccountName}'`; if it says `default`, the
+binding is missing.
 
 **Document upload fails with "google-cloud-storage is not installed"** - the known gap in Step
 9. The overlay selects the GCS backend, the package is not pinned in `requirements.txt`.

@@ -60,7 +60,7 @@ their decision by a model.
 document's three readings (`agents/document.py`: the extracted text, the literal filename and the
 filename with `_` and `-` read as spaces), all before that text reaches a prompt. Layer 1, always
 on: EN/German regex for known injection phrasing ("ignore previous instructions", "vergiss alle
-Anweisungen"), a 120+ character base64-looking run, and role markers (`assistant:`,
+Anweisungen"), a 120+ character base64-looking run and role markers (`assistant:`,
 `<|im_start|>`, `[INST]`). It reads the readings in order and reports which one blocked. Layer 2,
 optional: a classifier (`agents/llm.py::classify_injection`, default
 `meta-llama/llama-prompt-guard-2-86m` on Groq) used only when `LLM_API_KEY` and
