@@ -20,54 +20,140 @@ diagnoses, prescribes or doses, and every medical decision stays with a
 clinician.** A deterministic guardrail screens each request before any model
 sees it: an emergency phrase escalates instantly with zero model calls, and a
 request for medical advice is refused politely. That gate is enforced in code,
-not just in prompts.
+not just in prompts. The full trust-boundary walkthrough is in
+[docs/security.md](docs/security.md).
 
-Safety is layered, and the deterministic screens decide first and alone. What
-clears them passes a prompt-injection guard and a PII redaction pass (regex
-families plus Microsoft Presidio NER in English and German) that rewrites only
-the copy heading for the model, while the database keeps what the patient
-actually typed. A final deterministic sanitizer replaces any sentence in the
-answer that reads as a diagnosis, a dosage or a treatment recommendation.
-The full trust-boundary walkthrough is in [docs/security.md](docs/security.md).
-Guardrail libraries beyond Presidio were evaluated and either turned down or
-deferred, with the reasons in [docs/decisions.md](docs/decisions.md) ADR-15.
+- [How a request runs](#how-a-request-runs)
+- [What it uses](#what-it-uses)
+- [Project structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Setup - follow in order](#setup---follow-in-order)
+- [Try the safety boundary](#try-the-safety-boundary)
+- [Kill-and-resume demo](#kill-and-resume-demo)
+- [Staff approval that resumes the run](#staff-approval-that-resumes-the-run)
+- [The agents](#the-agents)
+- [LLM configuration](#llm-configuration)
+- [Tests and evaluation](#tests-and-evaluation)
+- [Full architecture](#full-architecture)
+- [Configuration reference](#configuration-reference)
+- [Deployment](#deployment)
 
-## What it does
+## How a request runs
 
-The core journey is seven steps:
+```mermaid
+flowchart TD
+    REQ["Patient request: text + documents"] --> GATE1["Deterministic screen, EN + DE
+    (raw and confusable-folded readings)"]
+    GATE1 -->|"emergency phrase"| EMG["Instant localized guidance,
+    emergency escalation, zero model calls"]
+    GATE1 -->|"medical-advice ask"| REF["Polite refusal, zero model calls"]
+    GATE1 -->|"admin request"| GATE2["Injection guard +
+    Presidio PII redaction (EN/DE)"]
+    GATE2 -->|"flagged"| BLK["Blocked, safety escalation to staff"]
+    GATE2 -->|"clean"| SUP
 
-1. **Registration** - a patient signs up and logs in (JWT session cookie).
-2. **Intent** - a deterministic safety screen runs first, then the coordinator reads what the patient actually wants.
-3. **Routing** - the routing agent maps the request to a department (Cardiology, Dermatology, Orthopedics, General Medicine or Radiology).
-4. **Booking** - the appointment agent finds a free slot and claims it with a conflict-safe update, so two patients can never win the same slot.
-5. **Documents** - the document agent checks which files the department requires and classifies any upload, flagging a duplicate in the audit trail.
-6. **Confirmation and reminders** - the follow-up agent confirms the appointment and schedules reminders.
-7. **Follow-up** - a post-visit task is queued for after the appointment date.
+    subgraph SUP["LangGraph supervisor loop - checkpointed after every step"]
+        CO["coordinator
+        (decides the next step)"]
+        CO --> RT["routing"] --> CO
+        CO --> AP["appointment"] --> CO
+        CO --> DOC["document"] --> CO
+        CO --> FU["followup"] --> CO
+        CO --> SF["safety_finalize
+        (review + sanitize)"]
+        CO --> ESC["escalate
+        (interrupt, waits for staff)"]
+    end
 
-Every mutation and every agent step writes an `AuditEvent`. A live Server-Sent
-Events timeline plus a Prometheus `/metrics` endpoint make a run observable
-while it happens.
-
-## Quickstart A: one command (Docker)
-
-Docker Desktop running, then:
-
-```bash
-docker compose up --build
+    RT --> TOOLS["SQL tools - every mutation writes an AuditEvent"]
+    AP --> TOOLS
+    DOC --> TOOLS
+    FU --> TOOLS
+    TOOLS --> DB[("SQLite / Postgres")]
+    SUP <--> CP[("Checkpointer:
+    SqliteSaver / PostgresSaver")]
+    ESC -->|"staff decision resumes the same thread"| CO
+    SF --> OUT["Final answer in the patient's
+    language, deterministically sanitized"]
+    CO -.->|"structured output via chat_json"| LLM["LangChain chat model
+    (backend/llm.yaml profile)"]
 ```
 
-To see real agent bookings, put a (free) Groq key in `.env` first - compose
-passes `LLM_API_KEY` from the repo-root `.env` into the backend container:
+Three properties make this a real agentic system rather than a chat wrapper:
+the supervisor re-decides after every specialist instead of following a fixed
+script; every step is checkpointed, so a killed backend resumes mid-run with
+`invoke(None, config)` on the same thread; and a human approval is a LangGraph
+`interrupt()` resumed with `Command(resume=...)`, not a status flag.
+
+## What it uses
+
+| Component | Role |
+|---|---|
+| FastAPI + SQLAlchemy 2 + Alembic | API, RBAC enforced in backend dependencies, SQL persistence and migrations |
+| LangGraph 1.2.9 | Explicit `StateGraph`: supervisor loop, checkpointers, `interrupt()` HITL, crash-resume |
+| LangChain (`init_chat_model`) | Provider-agnostic chat models from [backend/llm.yaml](backend/llm.yaml) profiles; env vars win |
+| Groq `openai/gpt-oss-120b` | Default model (free tier, strict `json_schema` structured output) |
+| Presidio + spaCy EN/DE | PII redaction of every model-bound copy; the database keeps the original |
+| Deterministic guardrails | Emergency/medical screen, output sanitizer, injection guard - all pure code, always on |
+| Next.js 16 + shadcn/ui | Patient portal and staff console, same-origin `/api` proxy, httpOnly cookies |
+| Prometheus + Grafana | `/metrics` scrape and a provisioned dashboard in the compose stack |
+| Langfuse (optional) | Per-workflow tracing, inert until both keys are set |
+| Google Model Armor (optional) | Cloud second opinion in the injection guard's layer-2 slot on the GCP path |
+| Terraform + GKE + kustomize | Full GCP path, committed and validated, not yet applied to a live project |
+
+## Project structure
+
+```
+agentcare/
+  backend/            FastAPI + LangGraph service
+    app/              config, models, auth, safety, tools, agents, services, api
+    alembic/          migration environment and versions
+    tests/            416 pytest tests (unit, RBAC, fake-LLM end-to-end)
+    llm.yaml          named model profiles for the LangChain factory
+    Dockerfile
+  frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
+    app/              login, register, patient portal, staff console
+    components/       shared UI
+    proxy.ts          cookie gate (UX only)
+  docs/               index, architecture, decisions, security, demo script, runbook
+  evals/              two-phase eval harness + committed baseline results
+  infra/              terraform modules + k8s kustomize base and gcp overlay
+  monitoring/         prometheus.yml, grafana provisioning and dashboard
+  scripts/            seed_demo.py
+  docker-compose.yml
+  requirements.txt
+  .env.example
+```
+
+## Prerequisites
+
+| Tool | Needed for | Check |
+|---|---|---|
+| Docker Desktop | Quickstart A (full stack) | `docker --version` |
+| Python 3.12 | Quickstart B, tests | `python3.12 --version` |
+| Node 22+ | Quickstart B frontend | `node --version` |
+| Groq API key (free, no card) | live agent bookings | [console.groq.com](https://console.groq.com) |
+
+Everything runs without the Groq key too: the safety demos are fully
+deterministic, and a keyless booking parks on staff escalation by design.
+
+## Setup - follow in order
+
+### 1. Clone and configure
 
 ```bash
 cp .env.example .env   # then set LLM_API_KEY=your_groq_key
 ```
 
-Without a key the stack still runs: the safety demos below work fully, and a
-normal booking parks on staff escalation instead of booking (the designed
-keyless degradation, see "LLM configuration").
+### 2a. Quickstart A: one command (Docker)
 
-Open http://localhost:3000 and log in.
+```bash
+docker compose up --build
+```
+
+Compose passes `LLM_API_KEY` from the repo-root `.env` into the backend
+container. The backend migrates and seeds synthetic demo data on startup.
+Open http://localhost:3000 and log in:
 
 | Role | Email | Password |
 |---|---|---|
@@ -75,18 +161,10 @@ Open http://localhost:3000 and log in.
 | Patient (German) | `erika@agentcare-demo.com` | `demo1234` |
 | Staff | `staff@agentcare-demo.com` | `demo1234` |
 
-The compose stack also starts:
+The stack also starts Grafana at http://localhost:3001 (`admin` / `admin`,
+pre-provisioned AgentCare dashboard) and Prometheus at http://localhost:9090.
 
-- **Grafana** at http://localhost:3001 (login `admin` / `admin`) with a pre-provisioned AgentCare dashboard.
-- **Prometheus** at http://localhost:9090, scraping the backend `/metrics` endpoint.
-
-The backend migrates and seeds the synthetic demo data on startup, so the
-database is ready the moment the containers are healthy.
-
-## Quickstart B: no Docker
-
-Python 3.12 and Node 22. Backend commands run from `backend/`; the seed runs
-from the repo root.
+### 2b. Quickstart B: no Docker
 
 ```bash
 # 0. create the virtualenv (Python 3.12 - newer majors may miss pinned wheels)
@@ -105,7 +183,7 @@ cd .. && .venv/bin/python scripts/seed_demo.py
 cd backend && ../.venv/bin/python -m uvicorn app.main:app --reload
 ```
 
-In a second terminal, start the frontend:
+In a second terminal:
 
 ```bash
 cd frontend
@@ -117,44 +195,8 @@ Open http://localhost:3000 and log in with the demo accounts above. The
 frontend proxies `/api/*` to the backend on port 8000, so the session cookie
 rides along same-origin.
 
-Every command in this README, plus the full path from localhost to GCP with
-each flag explained, lives in [docs/runbook.md](docs/runbook.md).
-
-## LLM configuration
-
-Models are built through langchain's `init_chat_model` factory from named
-profiles in [backend/llm.yaml](backend/llm.yaml) (`groq` is the default;
-`local` targets an OpenAI-compatible local server; `vertex` reaches Google
-Cloud Vertex AI after `pip install langchain-google-vertexai`). Environment
-variables always win over the file, so the quick path is unchanged - put your
-key in `.env`:
-
-```bash
-cp .env.example .env
-# then set:
-LLM_API_KEY=your_groq_key
-# optional overrides (defaults come from backend/llm.yaml):
-# LLM_PROFILE=local        # pick another profile by name
-# LLM_MODEL=...            # override a single field of the active profile
-```
-
-Editing `llm.yaml` (model, timeout, retry count, temperature) applies on the
-next request, no restart; a malformed file logs a warning and falls back to
-the env defaults. An optional local fallback (LM Studio, no key) is tried
-once if the primary endpoint exhausts its retries:
-
-```bash
-LLM_FALLBACK_BASE_URL=http://localhost:1234/v1
-LLM_FALLBACK_MODEL=your_local_model
-```
-
-**Note on running without a key.** The system still runs. When no model
-is reachable, an agent's structured-output call fails, the node records the
-error instead of raising, and the graph routes the run to staff escalation with
-a full audit trail. That is the designed degradation path, not a crash: nothing
-medical is ever guessed, and the run waits for a human to pick it up. The
-emergency and medical-refusal responses need no model at all, so those two
-safety behaviors work with an empty key.
+Every command here, plus the full path from localhost to GCP with each flag
+explained, lives in [docs/runbook.md](docs/runbook.md).
 
 ## Try the safety boundary
 
@@ -230,7 +272,12 @@ home) and watch what happens.
    die 112 an"), because responses follow each patient's
    `preferred_language`. The same request from the English demo patient
    answers in English. Escalations and confirmations are localized the same
-   way (`backend/app/agents/responses.py`).
+   way (`backend/app/agents/responses.py`). Patients change their language on
+   the portal's Profile page and the very next run follows it.
+
+The screens also read a confusable-folded copy of the text, so a zero-width
+character inside "prescribe" or a Cyrillic "ѕ" in an emergency phrase cannot
+slip past the keyword match while rendering identically on screen.
 
 ## Kill-and-resume demo
 
@@ -268,26 +315,16 @@ a case to a human it stops inside the `escalate` node on LangGraph's
 `interrupt()`: the run is checkpointed mid-graph, its status becomes
 `waiting_approval` and nothing else happens until a staff member decides.
 
-What the decision does depends on the case.
-
 - **Approve an uncertainty case** and the run carries on from where it stopped.
   The reviewer's note becomes guidance the coordinator and routing agents read,
-  and the request the patient made actually completes. An ambiguous booking
-  that stopped before a department was resolved comes back with an appointment
-  on it.
+  and the request the patient made actually completes.
 - **Reject**, or approve a case whose agent had already failed, and the run
-  closes on a deterministic message in the patient's language. There is nothing
-  to carry on with, so a human takes the case by hand.
+  closes on a deterministic message in the patient's language.
 
-The reviewer's note never reaches the patient. It lives on
-`Escalation.resolution_note` for staff and steers the agents through state the
-patient projection does not expose. What the patient reads is either the answer
-the resumed run produced or the template above.
-
-Staff decide at `POST /api/staff/escalations/{id}/resolve`, which records the
-decision and hands it to the paused run in the same request. The patient-facing
-`POST /api/workflows/{id}/resume` refuses a run that is waiting for staff: that
-thread moves on a decision and on nothing else.
+The reviewer's note never reaches the patient. Staff decide at
+`POST /api/staff/escalations/{id}/resolve`, which records the decision and
+hands it to the paused run in the same request. The patient-facing
+`POST /api/workflows/{id}/resume` refuses a run that is waiting for staff.
 
 The emergency and prompt-injection screens are deliberately outside this. They
 are decided before the graph starts, answer at once and never wait for anyone
@@ -296,12 +333,8 @@ are decided before the graph starts, answer at once and never wait for anyone
 ## The agents
 
 The graph is a coordinator loop - in LangGraph's own pattern vocabulary, a
-graph-based supervisor built as a custom workflow: an LLM coordinator
-re-decides the next step after every specialist, human-in-the-loop is
-`interrupt()` resumed with `Command(resume=...)` on a persisted checkpointer
-(SqliteSaver locally, PostgresSaver in Docker/GKE), and crash-resume is
-`invoke(None, config)` on the same thread. The coordinator is a pure decision
-node: it picks the next step and never does domain work itself. Each
+graph-based supervisor built as a custom workflow. The coordinator is a pure
+decision node: it picks the next step and never does domain work itself. Each
 specialist runs its own database work, then returns to the coordinator.
 `safety_finalize` ends a run and `escalate` pauses one for a human, and any
 node that records an error forces `escalate`, so the graph stays safe even if
@@ -317,16 +350,73 @@ the coordinator misreads a result.
 | Safety | re-queries rows, reviews and sanitizes the reply | `SAFETY` | none domain-owned; `sanitize_agent_output` |
 
 `escalate` is a handler, not a model-driven agent: it opens an escalation and
-stops the run on an interrupt until a human decides. All structured model output
-goes through one entry point, `app/agents/llm.py::chat_json`. Full detail is in
-[docs/architecture.md](docs/architecture.md).
+stops the run on an interrupt until a human decides. All structured model
+output goes through one entry point, `app/agents/llm.py::chat_json`. Each
+agent also reads its own staff-editable operating rules from the database on
+every call (`app/agents/memory.py`, managed at `/api/staff/agent-rules`) - a
+procedural memory a staff member can change with no restart - and the safety
+agent replies in the patient's saved language, English or German, even when
+the LLM is unreachable. Full detail: [docs/architecture.md](docs/architecture.md).
 
-- **Staff-tunable agent rules and bilingual responses.** Each agent reads its own staff-editable
-  operating rules from the database on every call (`app/agents/memory.py`, managed at
-  `/api/staff/agent-rules`) and the safety agent replies in the patient's saved language
-  preference, English or German, even when the LLM is unreachable.
+## LLM configuration
 
-## Architecture
+Models are built through langchain's `init_chat_model` factory from named
+profiles in [backend/llm.yaml](backend/llm.yaml). Two profiles are tested:
+`groq` (the default) and `local` (any OpenAI-compatible server such as LM
+Studio or llama-server). Other providers plug in by installing their
+langchain package and adding a profile - a commented Gemini example sits in
+the file - but only the OpenAI-compatible path is verified; do not treat an
+uncommented profile as working until it has passed a live smoke test.
+Environment variables always win over the file:
+
+```bash
+LLM_API_KEY=your_groq_key
+# optional overrides (defaults come from backend/llm.yaml):
+# LLM_PROFILE=local        # pick another profile by name
+# LLM_MODEL=...            # override a single field of the active profile
+```
+
+Editing `llm.yaml` (model, timeout, retry count, temperature) applies on the
+next request, no restart; a malformed file or profile logs a warning and falls
+back to the env defaults. An optional local fallback is tried once if the
+primary endpoint exhausts its retries:
+
+```bash
+LLM_FALLBACK_BASE_URL=http://localhost:1234/v1
+LLM_FALLBACK_MODEL=your_local_model
+```
+
+**Running without a key.** The system still runs. When no model is reachable,
+an agent's structured-output call fails, the node records the error instead of
+raising, and the graph routes the run to staff escalation with a full audit
+trail. Nothing medical is ever guessed. The emergency and medical-refusal
+responses need no model at all.
+
+## Tests and evaluation
+
+```bash
+cd backend && ../.venv/bin/python -m pytest -q
+```
+
+416 tests pass. They cover the agents (each with an injected fake model, no
+network and no keys), the tools and deterministic safety guardrails (the
+prompt-injection guard including document filenames, the PII redaction boundary
+in both languages, homoglyph and zero-width probes against the input gate and
+the English and German output sanitizer), replay-safe booking, cancel and
+reschedule, the YAML model-profile loader, patient profile updates, procedural
+agent rules and the bilingual safety response, the data model, RBAC on staff
+and patient-data routes, the SSE timeline, the scheduler jobs and a full
+fake-LLM end-to-end graph run including the pause-and-approve path. Linting is
+`ruff check backend`.
+
+**Evaluation.** A 66-sample golden dataset runs against the live API in two
+phases: phase 1 records what the system did, phase 2 scores the recording. The
+deterministic half needs no API key, and on a no-key run it classifies all 26
+guardrail samples correctly (precision 1.0, recall 1.0, zero false positives
+on the 10 legitimate look-alikes). The LLM-judge half is key gated. Dataset,
+commands and the committed baseline: [evals/README.md](evals/README.md).
+
+## Full architecture
 
 ```mermaid
 flowchart TD
@@ -392,94 +482,47 @@ flowchart TD
 
 Full write-up (request path, workflow lifecycle, data model, observability):
 [docs/architecture.md](docs/architecture.md). The source of truth for the
-diagram is [docs/architecture.mmd](docs/architecture.mmd).
+diagram is [docs/architecture.mmd](docs/architecture.mmd). Reading order for
+all documentation: [docs/index.md](docs/index.md).
 
-## Tests
-
-```bash
-cd backend && ../.venv/bin/python -m pytest -q
-```
-
-412 tests pass. They cover the agents (each with an injected fake model, no
-network and no keys), the tools and deterministic safety guardrails (the
-prompt-injection guard including document filenames, the PII redaction boundary
-in both languages and the English and German output sanitizer), replay-safe
-booking, cancel and reschedule, procedural agent rules and the bilingual safety
-response, the data model, RBAC on staff and patient-data routes, the SSE
-timeline, the scheduler jobs and a full fake-LLM end-to-end graph run in
-`test_graph_e2e.py`, including the pause-and-approve path from
-`waiting_approval` through to the booked appointment. Linting is
-`ruff check backend`.
-
-## Evaluation
-
-A 66-sample golden dataset runs against the live API in two phases: phase 1
-records what the system did, phase 2 scores the recording. The deterministic
-half needs no API key, and on a no-key run it classifies all 26 guardrail
-samples correctly (precision 1.0, recall 1.0, zero false positives on the 10
-legitimate look-alikes). The LLM-judge half is key gated and prints as pending
-until a key is set. Dataset, commands and the committed baseline:
-[evals/README.md](evals/README.md).
-
-## Stack at a glance
+**Stack choices** - each row's full reasoning, verified versions and costs
+live in [docs/decisions.md](docs/decisions.md):
 
 | Choice | Instead of | Why |
 |---|---|---|
 | FastAPI | Flask / Django | Async-native for SSE streaming and the LangGraph invocation; shares Pydantic v2 with the agent schemas and the settings layer. |
 | LangGraph | CrewAI / AutoGen | An explicit `StateGraph` plus checkpointer gives real crash-resume (`graph.invoke(None, config)`); CrewAI and AutoGen lean toward role-play and hide the state machine. |
+| LangChain `init_chat_model` | LiteLLM | One provider abstraction is enough; the factory plus `llm.yaml` profiles swaps endpoints and models without touching code, and LiteLLM would duplicate exactly that layer. |
 | Postgres / Cloud SQL | NoSQL (Firestore) | A relational core for patients, appointments and the append-only audit trail; a document store would fragment that for no benefit this app needs. |
 | Next.js 16 | Streamlit | A multi-role portal with httpOnly cookie auth and backend-enforced RBAC needs real routing and session handling, not a single reactive Python script. |
-| Groq `gpt-oss-120b` | paid APIs | Free developer tier, no card and one of only two Groq models with strict `json_schema` structured output; $0.15 / $0.60 per million tokens if it were paid. |
-| Custom `chat_json` wrapper | LiteLLM | Groq and LM Studio already speak the same OpenAI schema, so there is no translation problem to solve; a `try/except` fallback stays fully legible mid-demo, a `Router` exception is not. |
+| Groq `gpt-oss-120b` | paid APIs | Free developer tier, no card and one of only two Groq models with strict `json_schema` structured output. |
 | pwdlib (Argon2id) | passlib | passlib is unmaintained; pwdlib is the current, actively developed Argon2id implementation. |
-| Terraform HCL via OpenTofu | console clicking | OpenTofu is a drop-in MPL 2.0 fork of Terraform, same HCL, state format and provider protocol; infrastructure becomes reviewable and diffable instead of a click history nobody can audit. |
-| GKE Autopilot | self-managed Kubernetes | No node pools to size or patch; Google manages the nodes and bills per pod resource request. The backend stays at one replica because its APScheduler jobs run in-process with no distributed lock. |
-| Workload Identity Federation | service-account JSON keys | GitHub Actions mints short-lived tokens instead of storing a long-lived key, the top GCP credential-leak vector, pinned to this exact repository. |
-| Prometheus + Grafana (local) | a SaaS APM | Scraping `/metrics` in a compose stack costs nothing and gives a clickable dashboard today; Google Managed Service for Prometheus is the near-free path once a cluster exists. |
-| APScheduler + BackgroundTasks | Celery + Redis | A single-process app has no need for a broker or worker fleet; Memorystore for Redis carries a real monthly floor with no free tier for state this design does not keep. |
-| SQL `agent_rules` memory | LangMem | LangMem's last release is about 9 months stale with no feature work since and manages memory through nondeterministic LLM judgment; a plain indexed table read is deterministic and auditable. |
+| Terraform HCL via OpenTofu | console clicking | Same HCL, state format and provider protocol; infrastructure becomes reviewable and diffable instead of a click history nobody can audit. |
+| GKE Autopilot | self-managed Kubernetes | No node pools to size or patch. The backend stays at one replica because its APScheduler jobs run in-process with no distributed lock. |
+| Workload Identity Federation | service-account JSON keys | GitHub Actions mints short-lived tokens instead of storing a long-lived key, pinned to this exact repository. |
+| Prometheus + Grafana (local) | a SaaS APM | Scraping `/metrics` in a compose stack costs nothing and gives a clickable dashboard today. |
+| APScheduler + BackgroundTasks | Celery + Redis | A single-process app needs no broker or worker fleet; the internal reminders endpoint is the documented migration path to an external cron. |
+| SQL `agent_rules` memory | LangGraph Store / LangMem | The cross-thread facts here are structured records needing RBAC and audit writes; a plain indexed table read is deterministic and auditable. |
 
-Full reasoning, verified versions and costs for every row: [docs/decisions.md](docs/decisions.md).
-
-## Project structure
-
-```
-agentcare/
-  backend/            FastAPI + LangGraph service
-    app/              config, models, auth, safety, tools, agents, services, api
-    alembic/          migration environment and versions
-    tests/            412 pytest tests (unit, RBAC, fake-LLM end-to-end)
-    Dockerfile
-  frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
-    app/              login, register, patient portal, staff portal
-    components/       shared UI
-    proxy.ts          cookie gate (UX only)
-  docs/               architecture, decisions, security, demo script, runbook
-  monitoring/         prometheus.yml, grafana provisioning and dashboard
-  scripts/            seed_demo.py
-  docker-compose.yml
-  requirements.txt
-  .env.example
-```
-
-## Configuration
+## Configuration reference
 
 Every variable lives in `.env.example`. Defaults run locally with no cloud
 account.
 
 | Variable | What it does |
 |---|---|
-| `LLM_BASE_URL` | OpenAI-compatible chat endpoint. Default Groq `https://api.groq.com/openai/v1`. |
 | `LLM_API_KEY` | Key for the primary endpoint. Empty is allowed; the system degrades to staff escalation. |
-| `LLM_MODEL` | Chat model. Default `openai/gpt-oss-120b`. |
-| `LLM_FALLBACK_BASE_URL` | Optional second endpoint, tried once when the primary exhausts retries (e.g. LM Studio). |
+| `LLM_PROFILE` | Named profile from `backend/llm.yaml`. Empty uses the file's `default_profile` (groq). |
+| `LLM_BASE_URL` | Overrides the active profile's endpoint. |
+| `LLM_MODEL` | Overrides the active profile's model. |
+| `INJECTION_GUARD_MODEL` | Layer-2 injection classifier model; only called when `LLM_API_KEY` is set. |
+| `MODEL_ARMOR_TEMPLATE` | Full GCP template path; empty disables the Model Armor layer entirely. |
+| `LLM_FALLBACK_BASE_URL` | Optional second endpoint, tried once when the primary exhausts retries. |
 | `LLM_FALLBACK_API_KEY` | Key for the fallback endpoint. Empty for a local server. |
 | `LLM_FALLBACK_MODEL` | Model name on the fallback endpoint. |
 | `DATABASE_URL` | SQLAlchemy URL. Default `sqlite:///./agentcare.db`; compose sets Postgres. |
-| `CHECKPOINT_DB_PATH` | LangGraph SQLite checkpoint file. Ignored when `DATABASE_URL` is Postgres (checkpoints live in the same database). |
-| `LANGFUSE_PUBLIC_KEY` | Optional tracing. Empty disables tracing entirely. |
-| `LANGFUSE_SECRET_KEY` | Optional Langfuse secret. |
-| `LANGFUSE_HOST` | Optional Langfuse host. |
+| `CHECKPOINT_DB_PATH` | LangGraph SQLite checkpoint file. Ignored when `DATABASE_URL` is Postgres. |
+| `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Optional tracing. Empty disables it entirely. |
 | `JWT_SECRET` | Secret for HS256 session cookies. Set a long random value. |
 | `JWT_EXPIRE_MINUTES` | Session lifetime in minutes. Default 1440. |
 | `INTERNAL_TASK_TOKEN` | Token for the internal reminders endpoint. Empty requires a staff cookie instead. |
@@ -490,13 +533,6 @@ account.
 | `LOG_LEVEL` | structlog level. Default `INFO`. |
 | `FRONTEND_ORIGIN` | Allowed CORS origin. Default `http://localhost:3000`. |
 
-Langfuse tracing needs one package more than `requirements.txt` pins. The
-handler in `langfuse.langchain` imports `langchain`, which the backend does
-not use anywhere else, so install it explicitly when you want traces:
-`pip install langchain==1.3.14`. With both keys set and that package missing,
-the workflow still runs to completion untraced and logs one
-`langfuse_disabled_missing_dependency` warning.
-
 ## Deployment
 
 - **Docker Compose (implemented).** `docker compose up --build` brings up
@@ -505,23 +541,20 @@ the workflow still runs to completion untraced and logs one
   Postgres, so checkpoints live in the same database.
 - **GKE Autopilot, Terraform and kustomize (committed, not yet deployed).**
   `infra/terraform/` provisions Artifact Registry, IAM and Workload Identity
-  Federation, a GKE Autopilot cluster and Cloud SQL for PostgreSQL 17 (on by
-  default, the primary database path under the deployment's GCP trial
-  credit; Neon free-tier Postgres is the documented post-credit swap);
+  Federation, a GKE Autopilot cluster and Cloud SQL for PostgreSQL 17;
   `infra/k8s/` is the kustomize base plus a `gcp` overlay (GCE ingress and
   the SSE timeout BackendConfig). `.github/workflows/deploy.yml`
   builds, pushes and applies both on a manual `workflow_dispatch`. Every piece
   validates on its own (`tofu validate`, `kubectl kustomize`, `actionlint`),
   but none of it has run against a real GCP project - that first `tofu apply`
-  is still gated on a project with billing enabled. The whole path is scoped
-  to run inside a one-time ~€250, 3-month GCP trial credit. Full walkthrough,
-  reasoning and verified costs: [docs/deployment-gcp.md](docs/deployment-gcp.md)
-  and [docs/decisions.md](docs/decisions.md).
+  is still gated on a project with billing enabled. Full walkthrough:
+  [docs/deployment-gcp.md](docs/deployment-gcp.md).
 
 ## Credits
 
 Built by Gauranggiri Meghanathi for the AgentCare Build Challenge 2026.
-Frameworks: FastAPI, LangGraph, Next.js and shadcn/ui, all MIT licensed. All
+Demo shot list: [docs/demo-script.md](docs/demo-script.md). Frameworks:
+FastAPI, LangGraph, LangChain, Next.js and shadcn/ui, all MIT licensed. All
 patient, provider and appointment data is synthetic.
 
 Licensed under the [MIT License](LICENSE).

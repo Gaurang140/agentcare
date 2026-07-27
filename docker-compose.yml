@@ -24,10 +24,8 @@ services:
       DATABASE_URL: postgresql+psycopg://agentcare:agentcare@db:5432/agentcare
       JWT_SECRET: change_me_generate_a_long_random_string
       FRONTEND_ORIGIN: http://localhost:3000
-      # LLM credentials come from the repo-root .env (compose reads it for
-      # ${} substitution automatically; the file itself is dockerignored, so
-      # this passthrough is the only way the key reaches the container).
-      # Empty defaults keep the keyless demo path working.
+      # From the repo-root .env; .env itself is dockerignored, so this
+      # passthrough is the only way the key reaches the container.
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
       LLM_MODEL: ${LLM_MODEL:-openai/gpt-oss-120b}
