@@ -972,6 +972,168 @@ rtk git commit -m "replace stale docs with canonical project guide"
 
 ---
 
+## Task 5A: Repair the reviewed deployment path and remove speculative cloud surface
+
+This fix wave is required by the independent Task 5 review and the current-GCP
+audit. It makes the canonical deployment guide executable instead of
+rewording around broken configuration.
+
+**Files:**
+
+- Add: `backend/tests/test_deployment_config.py`
+- Modify: `backend/tests/test_documents.py`
+- Modify: `backend/app/tools/document_tools.py`
+- Modify: `backend/docker-entrypoint.sh`
+- Modify: `docker-compose.yml`
+- Add: `infra/k8s/base/service-account.yaml`
+- Add: `infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml`
+- Add: `infra/k8s/overlays/gcp-migration/kustomization.yaml`
+- Modify: `infra/k8s/base/backend.yaml`
+- Modify: `infra/k8s/base/configmap.yaml`
+- Modify: `infra/k8s/base/kustomization.yaml`
+- Modify: `infra/k8s/base/migration-job.yaml`
+- Modify: `infra/k8s/overlays/gcp/kustomization.yaml`
+- Modify: `infra/terraform/main.tf`
+- Modify: `infra/terraform/variables.tf`
+- Modify: `infra/terraform/outputs.tf`
+- Modify: `infra/terraform/modules/iam/main.tf`
+- Modify: `infra/terraform/modules/iam/variables.tf`
+- Modify: `infra/terraform/modules/iam/outputs.tf`
+- Modify: `infra/terraform/modules/cloud-sql/main.tf`
+- Modify: `infra/terraform/modules/cloud-sql/variables.tf`
+- Modify: `infra/terraform/modules/cloud-sql/outputs.tf`
+- Modify comments only where stale in GCS, Model Armor, GKE and GCP overlay
+  files found by the review
+- Delete: `.github/workflows/deploy.yml`
+- Modify: `README.md`
+- Modify: `docs/architecture.md`
+- Modify: `docs/security.md`
+- Modify: `docs/decisions.md`
+- Modify: `docs/deployment-gcp.md`
+- Modify: `docs/demo-script.md`
+- Modify: `evals/results/summary-nokey-baseline.md`
+- Modify: `infra/k8s/README.md`
+
+### Step 1: Pin the configuration regressions with failing tests
+
+Add tests proving:
+
+- Compose reads the documented environment without hardcoding a known JWT
+  secret or injecting `LLM_MODEL`/`LLM_BASE_URL` over a selected YAML profile;
+- the Kubernetes base selects `LLM_PROFILE=groq` without field-level model or
+  endpoint overrides;
+- the backend Deployment uses the declared `agentcare-backend` service
+  account and skips startup migrations;
+- the migration Job is absent from the application base and owned by the
+  separate GCP migration overlay;
+- duplicate-document audit metadata does not expose the checksum.
+
+Run the focused tests and record the expected RED failures before editing
+implementation/configuration.
+
+### Step 2: Restore real model-profile selection
+
+Use the repo-root `.env.example` plus an optional `.env` as Compose
+`env_file` inputs. Keep the Compose Postgres URL and frontend origin as
+explicit overrides. Require a non-empty operator-provided `JWT_SECRET`.
+Remove synthesized Groq `LLM_MODEL` and `LLM_BASE_URL` values so
+`backend/llm.yaml` remains the default source and explicit env fields remain
+real overrides.
+
+In Kubernetes, set only `LLM_PROFILE: "groq"` in the base ConfigMap. Remove
+`LLM_MODEL` and `LLM_BASE_URL`. The GCP guide must explain that local
+OpenAI-compatible servers need a container-reachable endpoint and that local
+Vertex use requires ADC not automatically mounted by Compose.
+
+### Step 3: Make migration ownership singular and ordered
+
+Add a guarded `SKIP_STARTUP_MIGRATIONS` switch to the Docker entrypoint.
+Compose keeps the existing migrate/seed startup default. The Kubernetes
+backend Deployment sets the switch to true.
+
+Remove the migration Job from the application base Kustomization. Put that
+Job behind `infra/k8s/overlays/gcp-migration`, with its own immutable backend
+image transform. It remains the only Kubernetes migration/seed owner. The GCP
+runbook must delete/apply/wait/log the Job before applying the application
+overlay. Do not deploy the application before the Job succeeds.
+
+### Step 4: Make runtime workload identity declarative
+
+Add one `agentcare-backend` Kubernetes service account to the base, use it via
+`serviceAccountName`, and add the GCP service-account annotation through an
+overlay patch. Add the corresponding
+`roles/iam.workloadIdentityUser` binding in Terraform. The GCP operator
+replaces the project sentinel before rendering; remove every manual
+create/annotate/bind/patch command.
+
+### Step 5: Remove unused cloud and CD functionality
+
+The unverified deploy workflow applies unresolved values and is not the
+canonical deployment path. Delete `.github/workflows/deploy.yml` and the
+Terraform GitHub WIF pool/provider, deploy service account, mutable
+repository-name authorization, deploy IAM grants and outputs. Manual
+deployment remains the only truthful GCP procedure until a credentialed CD
+pipeline is designed and live-tested.
+
+Also delete:
+
+- the unused frontend Google service account and output;
+- project-wide Secret Manager accessor IAM and duplicate Secret Manager
+  instructions/API enablement, because pods read one Kubernetes Secret;
+- `roles/cloudsql.client` and the proxy-only connection-name output, because
+  the implemented database path is direct private-IP PostgreSQL.
+
+Do not add an alternative cloud or speculative replacement.
+
+### Step 6: Complete Vertex support with least privilege
+
+Add `enable_vertex_ai` (default false) to root Terraform and the IAM module.
+When true, grant the backend GSA `roles/aiplatform.user`. Add the Vertex AI
+API to the documented conditional enablement path. The guide must connect
+`enable_vertex_ai=true`, `LLM_PROFILE=vertex`, project/location environment
+values and the declarative KSA/GSA binding. Groq remains the default.
+
+### Step 7: Repair reviewed documentation details
+
+- Keep the duplicate audit event collapsed in the demo and remove checksum
+  from its audit metadata.
+- Split the committed no-key baseline reproduction into two runnable
+  terminals.
+- Add compact Compose log and destructive local-volume reset commands with an
+  explicit data-loss warning.
+- Remove CI/WIF, Secret Manager, Cloud SQL Proxy, Neon, retired `ADR-*` and
+  duplicate-migration claims from current docs and infrastructure comments.
+- Guard recursive GCS teardown by re-reading the Terraform output, checking
+  the expected bucket name and requiring typed confirmation.
+- Keep live GCP, Vertex and Model Armor status unverified.
+
+### Step 8: Verify and commit
+
+Run:
+
+```bash
+rtk "../../../.venv/bin/python" -m pytest -q tests/test_deployment_config.py tests/test_documents.py tests/test_model_config.py tests/test_llm.py
+rtk "../../../.venv/bin/ruff" check app tests ../evals
+rtk sh -n docker-entrypoint.sh
+rtk env JWT_SECRET=test-only-not-for-deploy docker compose config --quiet
+rtk kubectl kustomize infra/k8s/overlays/gcp
+rtk kubectl kustomize infra/k8s/overlays/gcp-migration
+rtk tofu -chdir=infra/terraform fmt -check -recursive
+rtk tofu -chdir=infra/terraform validate
+rtk rg -n "Secret Manager|secretmanager|cloudsql\\.client|Cloud SQL Auth Proxy|Workload Identity Federation|github_repository|Neon|ADR-[0-9]+" README.md docs infra .github
+rtk git diff --check
+```
+
+Commands are run from the directory their paths assume. Inspect all search
+matches rather than hiding them. Commit as:
+
+```bash
+rtk git add -A
+rtk git commit -m "make the GCP deployment path executable"
+```
+
+---
+
 ## Task 6: Repository-wide consistency pass
 
 **Files:**
