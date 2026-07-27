@@ -14,6 +14,15 @@ resource "google_model_armor_template" "this" {
   location    = var.location
   template_id = var.template_id
 
+  # Off by Google's default, and this clinic screens German patient text, so
+  # it has to be on for the EN/DE claim to hold (the RAI and injection
+  # filters are tested on German among their nine languages).
+  template_metadata {
+    multi_language_detection {
+      enable_multi_language_detection = true
+    }
+  }
+
   filter_config {
     # The one filter this app actually wants from the service: prompt
     # injection and jailbreak detection by model, which is what layer 2 is
