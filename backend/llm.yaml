@@ -1,0 +1,54 @@
+# Model profiles for the LangChain chat-model factory (app/agents/llm.py,
+# loaded by app/agents/model_config.py).
+#
+# Precedence: environment variables always win over this file (AGENTS.md:
+# config via environment). LLM_MODEL / LLM_BASE_URL override fields of the
+# active profile; LLM_PROFILE selects a different profile by name. API keys
+# never live here - they stay in the environment (LLM_API_KEY).
+#
+# The file is read on every request, so edits apply without a restart. A
+# missing or malformed file degrades to the env/default settings with a
+# logged warning; it can never take the backend down.
+
+default_profile: groq
+
+profiles:
+  # Groq's OpenAI-compatible endpoint - the default. `provider: openai`
+  # means "any OpenAI-compatible endpoint", reached through langchain-openai.
+  groq:
+    provider: openai
+    model: openai/gpt-oss-120b
+    base_url: https://api.groq.com/openai/v1
+    timeout: 30        # seconds per attempt (bounds a hung request)
+    max_retries: 3     # transport retries with exponential backoff
+    # temperature: 0.0 # uncomment to pin; unset keeps the provider default
+
+  # A local OpenAI-compatible server (LM Studio, llama-server, Ollama).
+  local:
+    provider: openai
+    model: qwen3:8b
+    base_url: http://localhost:8080/v1
+    timeout: 60
+    max_retries: 2
+
+  # Google Cloud Vertex AI. Needs `pip install langchain-google-vertexai`
+  # plus ADC credentials (gcloud auth application-default login) and the
+  # GOOGLE_CLOUD_PROJECT env var; keys under the profile beyond
+  # provider/model/base_url/timeout/max_retries pass straight through to
+  # init_chat_model, so `location` lands on ChatVertexAI.
+  vertex:
+    provider: google_vertexai
+    model: gemini-2.5-flash
+    location: europe-west3
+    timeout: 30
+    max_retries: 3
+
+# Optional second profile tried once when the primary exhausts its
+# transport retries (same role as LLM_FALLBACK_BASE_URL, which wins when
+# set). Empty means no fallback.
+fallback_profile: ""
+
+injection_guard:
+  # The prompt-injection classifier (safety/injection_guard.py layer 2).
+  # Runs against the primary profile's endpoint and credentials.
+  model: meta-llama/llama-prompt-guard-2-86m

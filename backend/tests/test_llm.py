@@ -23,23 +23,49 @@ class _Verdict(BaseModel):
     reason: str
 
 
-class _FakeMessage:
-    def __init__(self, content: str) -> None:
-        self.content = content
+def _completion(content: str):
+    """A real openai ChatCompletion, because agents/llm.py wraps the fake
+    client in a langchain ChatOpenAI that parses real SDK response types."""
+    from openai.types.chat import ChatCompletion, ChatCompletionMessage
+    from openai.types.chat.chat_completion import Choice
+
+    return ChatCompletion(
+        id="fake",
+        created=0,
+        model="fake-model",
+        object="chat.completion",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                message=ChatCompletionMessage(role="assistant", content=content),
+            )
+        ],
+    )
 
 
-class _FakeChoice:
-    def __init__(self, content: str) -> None:
-        self.message = _FakeMessage(content)
+def _ok(payload: dict):
+    return _completion(json.dumps(payload))
 
 
-class _FakeResponse:
-    def __init__(self, content: str) -> None:
-        self.choices = [_FakeChoice(content)]
+class _FakeRawResponse:
+    def __init__(self, response) -> None:
+        self._response = response
+        self.headers: dict = {}
+
+    def parse(self):
+        return self._response
 
 
-def _ok(payload: dict) -> _FakeResponse:
-    return _FakeResponse(json.dumps(payload))
+class _FakeWithRawResponse:
+    def __init__(self, completions: "_FakeCompletions") -> None:
+        self._completions = completions
+
+    def create(self, **kwargs) -> _FakeRawResponse:
+        return _FakeRawResponse(self._completions.create(**kwargs))
+
+    def parse(self, **kwargs) -> _FakeRawResponse:
+        return _FakeRawResponse(self._completions.create(**kwargs))
 
 
 class _FakeCompletions:
@@ -48,6 +74,10 @@ class _FakeCompletions:
     def __init__(self, script: list) -> None:
         self._script = list(script)
         self.calls: list[dict] = []
+
+    @property
+    def with_raw_response(self) -> _FakeWithRawResponse:
+        return _FakeWithRawResponse(self)
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -184,3 +214,40 @@ def test_chat_json_raises_when_primary_exhausted_and_no_fallback_configured():
         chat_json("system prompt", "user prompt", _Verdict, max_retries=3)
 
     assert len(primary.chat.completions.calls) == 3
+
+
+def test_build_chat_model_configures_openai_compatible_endpoint():
+    """The langchain factory must carry the profile's endpoint, timeout and
+    zero SDK-internal retries (the retry policy lives in with_retry, so the
+    openai SDK's own 2-attempt default must not multiply it)."""
+    from app.agents.llm import _build_chat_model
+    from app.agents.model_config import ModelProfile
+
+    profile = ModelProfile(
+        provider="openai",
+        model="openai/gpt-oss-120b",
+        base_url="https://api.groq.com/openai/v1",
+        timeout=30,
+        max_retries=3,
+    )
+
+    model = _build_chat_model(profile)
+
+    assert model.model_name == "openai/gpt-oss-120b"
+    assert model.openai_api_base == "https://api.groq.com/openai/v1"
+    assert model.request_timeout == 30
+    assert model.max_retries == 0
+
+
+def test_build_chat_model_missing_provider_package_raises_helpful_error():
+    """A profile naming a provider whose langchain package is not installed
+    must fail with the pip command in the message, not a bare ImportError."""
+    from app.agents.llm import LLMConfigError, _build_chat_model
+    from app.agents.model_config import ModelProfile
+
+    profile = ModelProfile(provider="nonexistent_provider_xyz", model="some-model")
+
+    with pytest.raises(LLMConfigError) as excinfo:
+        _build_chat_model(profile)
+
+    assert "pip install" in str(excinfo.value)

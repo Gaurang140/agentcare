@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "openai/gpt-oss-120b"
 
+    # Named profile from backend/llm.yaml (agents/model_config.py). Empty
+    # uses the file's default_profile; the LLM_* env vars above override
+    # individual fields of whichever profile is active.
+    llm_profile: str = ""
+
     # Prompt-injection guard's optional classifier layer
     # (safety/injection_guard.py): a small preview model that reviews text
     # the deterministic pattern list alone would miss. Only called when
@@ -47,9 +52,9 @@ class Settings(BaseSettings):
     checkpoint_db_path: str = "checkpoints.db"
 
     # Langfuse tracing (optional, env-gated): entirely inert while both keys
-    # are empty (the default). Enabling it also requires `pip install
-    # langchain==1.3.14`, since langfuse.langchain.CallbackHandler imports it
-    # - not in requirements.txt because the default path never needs it.
+    # are empty (the default). langfuse.langchain.CallbackHandler needs
+    # langchain, which is pinned in requirements.txt since agents/llm.py
+    # moved onto the langchain chat-model layer.
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
     langfuse_host: str = ""

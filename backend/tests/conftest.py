@@ -237,22 +237,52 @@ def seeded(db: Session) -> dict[str, int]:
 # chat.completions.create), reused here so the six agent-node test files
 # don't each redefine it. Lives in conftest rather than test_llm.py because
 # it's infrastructure the agent tests depend on, not part of what test_llm.py
-# itself is testing.
+# itself is testing. Responses are real `openai.types.chat.ChatCompletion`
+# objects and the client answers `.with_raw_response.create/.parse` too,
+# because agents/llm.py wraps this fake in a langchain ChatOpenAI, which
+# talks to the client the way the real SDK surface does.
 
 
-class _FakeMessage:
-    def __init__(self, content: str) -> None:
-        self.content = content
+def _fake_completion(content: str):
+    from openai.types.chat import ChatCompletion, ChatCompletionMessage
+    from openai.types.chat.chat_completion import Choice
+
+    return ChatCompletion(
+        id="fake",
+        created=0,
+        model="fake-model",
+        object="chat.completion",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                message=ChatCompletionMessage(role="assistant", content=content),
+            )
+        ],
+    )
 
 
-class _FakeChoice:
-    def __init__(self, content: str) -> None:
-        self.message = _FakeMessage(content)
+class _FakeRawResponse:
+    """What the SDK's with_raw_response methods hand back: the parsed
+    response behind `.parse()` plus HTTP `.headers`."""
+
+    def __init__(self, response) -> None:
+        self._response = response
+        self.headers: dict = {}
+
+    def parse(self):
+        return self._response
 
 
-class _FakeResponse:
-    def __init__(self, content: str) -> None:
-        self.choices = [_FakeChoice(content)]
+class _FakeWithRawResponse:
+    def __init__(self, completions: "_FakeCompletions") -> None:
+        self._completions = completions
+
+    def create(self, **kwargs) -> _FakeRawResponse:
+        return _FakeRawResponse(self._completions.create(**kwargs))
+
+    def parse(self, **kwargs) -> _FakeRawResponse:
+        return _FakeRawResponse(self._completions.create(**kwargs))
 
 
 class _FakeCompletions:
@@ -261,6 +291,10 @@ class _FakeCompletions:
     def __init__(self, script: list) -> None:
         self._script = list(script)
         self.calls: list[dict] = []
+
+    @property
+    def with_raw_response(self) -> _FakeWithRawResponse:
+        return _FakeWithRawResponse(self)
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -294,7 +328,7 @@ def fake_llm() -> Generator:
 
     def _make(script_items: list) -> FakeLLMClient:
         script = [
-            item if isinstance(item, Exception) else _FakeResponse(json.dumps(item))
+            item if isinstance(item, Exception) else _fake_completion(json.dumps(item))
             for item in script_items
         ]
         client = FakeLLMClient(script)

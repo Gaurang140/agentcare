@@ -35,8 +35,11 @@ scripts/     # seed_demo.py and helpers
    anywhere. The deterministic guardrails in `backend/app/safety/` are the first
    gate; do not weaken them.
 3. **Structured LLM output only** through `agents/llm.py::chat_json` (json_schema
-   strict on Groq, json_object fallback, pydantic-validated). Never regex-parse
-   JSON out of prose. Never call `chat.completions` anywhere else.
+   strict on Groq, json_object fallback, pydantic-validated). Models are built
+   by the langchain `init_chat_model` factory from the profiles in
+   `backend/llm.yaml` (env vars win; see `agents/model_config.py`). Never
+   regex-parse JSON out of prose. Never build a chat model or call a provider
+   SDK anywhere else.
 4. **LangGraph 1.2.9 specifics:** checkpointer `from_conn_string` is a context
    manager held open in the FastAPI lifespan (ExitStack); the graph is built and
    compiled once. Any state key written by more than one node uses an
