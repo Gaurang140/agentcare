@@ -13,6 +13,10 @@ import json
 import httpx
 import openai
 import pytest
+from google.genai.errors import ClientError, ServerError
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
+from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from pydantic import BaseModel
 
 from app.agents.followup import FollowupOutput
@@ -42,6 +46,74 @@ def _bad_request_error(message: str = "response_format not supported") -> openai
 def _connection_error() -> openai.APIConnectionError:
     request = httpx.Request("POST", "https://fake.test/v1/chat/completions")
     return openai.APIConnectionError(request=request)
+
+
+def _google_client_error(code: int) -> ClientError:
+    return ClientError(
+        code,
+        {
+            "error": {
+                "code": code,
+                "message": f"Google API returned {code}",
+                "status": "RESOURCE_EXHAUSTED" if code == 429 else "CLIENT_ERROR",
+            }
+        },
+    )
+
+
+def _wrapped_google_client_error(code: int) -> ChatGoogleGenerativeAIError:
+    provider_error = _google_client_error(code)
+    wrapper = ChatGoogleGenerativeAIError(f"wrapped Google error {code}")
+    wrapper.__cause__ = provider_error
+    return wrapper
+
+
+class _ScriptedStructuredModel:
+    """Provider-neutral structured-model fake for transport policy tests."""
+
+    def __init__(self, outcomes: list[BaseException | _Verdict]):
+        self._outcomes = list(outcomes)
+        self.calls = 0
+
+    def with_structured_output(self, *_args, **_kwargs):
+        def invoke(_messages):
+            self.calls += 1
+            outcome = self._outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return {
+                "raw": AIMessage(content=outcome.model_dump_json()),
+                "parsed": outcome,
+                "parsing_error": None,
+            }
+
+        return RunnableLambda(invoke)
+
+
+def test_retry_adapter_forwards_runnable_config():
+    from app.agents.llm import _with_retry
+    from langchain_core.callbacks import BaseCallbackHandler
+
+    seen_configs = []
+    callback = BaseCallbackHandler()
+
+    def capture_config(value, config):
+        seen_configs.append(config)
+        return value
+
+    result = _with_retry(RunnableLambda(capture_config), max_retries=1).invoke(
+        "ok",
+        config={
+            "tags": ["llm-transport"],
+            "configurable": {"trace_id": "test-trace"},
+            "callbacks": [callback],
+        },
+    )
+
+    assert result == "ok"
+    assert seen_configs[0]["tags"] == ["llm-transport"]
+    assert seen_configs[0]["configurable"]["trace_id"] == "test-trace"
+    assert callback in seen_configs[0]["callbacks"].handlers
 
 
 @pytest.fixture(autouse=True)
@@ -129,10 +201,17 @@ def test_chat_json_sends_recursively_strict_schema():
     assert schema["$defs"]["ReminderSpec"]["additionalProperties"] is False
 
 
-def test_chat_json_falls_back_to_json_object_on_bad_request():
+@pytest.mark.parametrize(
+    "message",
+    [
+        "response_format is not supported by this endpoint",
+        "json_schema is unsupported by this endpoint",
+    ],
+)
+def test_chat_json_falls_back_to_json_object_when_structured_format_is_unsupported(message):
     client = FakeClient(
         [
-            _bad_request_error(),
+            _bad_request_error(message),
             _ok({"ok": False, "reason": "fallback worked"}),
         ]
     )
@@ -149,6 +228,25 @@ def test_chat_json_falls_back_to_json_object_on_bad_request():
     system_content = second_call["messages"][0]["content"]
     assert "schema" in system_content.lower()
     assert "_Verdict" in system_content or "ok" in system_content
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Invalid schema for response_format 'Verdict': required must include reason",
+        "Invalid request: temperature must be between 0 and 2",
+    ],
+)
+def test_chat_json_does_not_downgrade_unrelated_bad_requests(message):
+    error = _bad_request_error(message)
+    client = FakeClient([error])
+    set_llm_client_for_tests(client)
+
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        chat_json("system prompt", "user prompt", _Verdict)
+
+    assert excinfo.value is error
+    assert len(client.chat.completions.calls) == 1
 
 
 def test_chat_json_reprompts_once_on_validation_error_then_succeeds():
@@ -227,6 +325,120 @@ def test_chat_json_raises_when_primary_exhausted_and_no_fallback_configured():
     assert len(primary.chat.completions.calls) == 3
 
 
+@pytest.mark.parametrize(
+    "errors",
+    [
+        [
+            ServerError(503, {"error": {"message": "unavailable"}}),
+            ServerError(503, {"error": {"message": "unavailable"}}),
+        ],
+        [
+            httpx.ConnectError("connection failed"),
+            httpx.ConnectError("connection failed"),
+        ],
+        [
+            httpx.ReadTimeout("request timed out"),
+            httpx.ReadTimeout("request timed out"),
+        ],
+        [
+            _wrapped_google_client_error(429),
+            _wrapped_google_client_error(429),
+        ],
+    ],
+    ids=["google-5xx", "http-network", "http-timeout", "wrapped-google-429"],
+)
+def test_chat_json_retries_provider_neutral_transient_errors(monkeypatch, errors):
+    import app.agents.llm as llm_module
+
+    primary = _ScriptedStructuredModel(
+        [*errors, _Verdict(ok=True, reason="retry succeeded")]
+    )
+    monkeypatch.setattr(llm_module, "_resolve_primary", lambda _profiles: primary)
+
+    result = llm_module.chat_json(
+        "system prompt",
+        "user prompt",
+        _Verdict,
+        max_retries=3,
+    )
+
+    assert result == _Verdict(ok=True, reason="retry succeeded")
+    assert primary.calls == 3
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404])
+def test_chat_json_does_not_retry_or_fallback_for_google_client_errors(
+    monkeypatch,
+    code,
+):
+    import app.agents.llm as llm_module
+
+    error = _wrapped_google_client_error(code)
+    primary = _ScriptedStructuredModel([error])
+    fallback = _ScriptedStructuredModel([_Verdict(ok=True, reason="must not run")])
+    monkeypatch.setattr(llm_module, "_resolve_primary", lambda _profiles: primary)
+    monkeypatch.setattr(llm_module, "_resolve_fallback", lambda _profiles: fallback)
+
+    with pytest.raises(ChatGoogleGenerativeAIError) as excinfo:
+        llm_module.chat_json(
+            "system prompt",
+            "user prompt",
+            _Verdict,
+            max_retries=3,
+        )
+
+    assert excinfo.value is error
+    assert primary.calls == 1
+    assert fallback.calls == 0
+
+
+def test_chat_json_uses_fallback_after_google_transient_attempts_exhaust(
+    monkeypatch,
+):
+    import app.agents.llm as llm_module
+
+    errors = [
+        ServerError(503, {"error": {"message": "unavailable"}}),
+        ServerError(503, {"error": {"message": "unavailable"}}),
+        ServerError(503, {"error": {"message": "unavailable"}}),
+    ]
+    primary = _ScriptedStructuredModel(errors)
+    fallback = _ScriptedStructuredModel([_Verdict(ok=True, reason="via fallback")])
+    monkeypatch.setattr(llm_module, "_resolve_primary", lambda _profiles: primary)
+    monkeypatch.setattr(llm_module, "_resolve_fallback", lambda _profiles: fallback)
+
+    result = llm_module.chat_json(
+        "system prompt",
+        "user prompt",
+        _Verdict,
+        max_retries=3,
+    )
+
+    assert result == _Verdict(ok=True, reason="via fallback")
+    assert primary.calls == 3
+    assert fallback.calls == 1
+
+
+def test_chat_json_preserves_original_google_error_without_fallback(monkeypatch):
+    import app.agents.llm as llm_module
+
+    errors = [_wrapped_google_client_error(429) for _attempt in range(3)]
+    primary = _ScriptedStructuredModel(errors)
+    monkeypatch.setattr(llm_module, "_resolve_primary", lambda _profiles: primary)
+    monkeypatch.setattr(llm_module, "_resolve_fallback", lambda _profiles: None)
+
+    with pytest.raises(ChatGoogleGenerativeAIError) as excinfo:
+        llm_module.chat_json(
+            "system prompt",
+            "user prompt",
+            _Verdict,
+            max_retries=3,
+        )
+
+    assert excinfo.value is errors[-1]
+    assert primary.calls == 3
+
+
 def test_build_chat_model_configures_openai_compatible_endpoint():
     """The langchain factory must carry the profile's endpoint, timeout and
     zero SDK-internal retries (the retry policy lives in with_retry, so the
@@ -267,6 +479,7 @@ def test_build_chat_model_passes_vertex_params_to_langchain_factory(monkeypatch)
         provider="google_genai",
         model="gemini-2.5-flash",
         params={"vertexai": True},
+        timeout=45,
     )
 
     result = llm_module._build_chat_model(profile)
@@ -276,6 +489,8 @@ def test_build_chat_model_passes_vertex_params_to_langchain_factory(monkeypatch)
     assert captured["kwargs"] == {
         "model_provider": "google_genai",
         "vertexai": True,
+        "timeout": 45,
+        "max_retries": 1,
     }
 
 

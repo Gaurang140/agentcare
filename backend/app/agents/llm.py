@@ -29,9 +29,9 @@ Call sequence for one `chat_json(...)`:
    if that still fails, raise `LLMOutputError`.
 5. Transport failures and 5xx/429s are retried with exponential backoff
    (1-8s) via langchain's `with_retry`, within a single logical request.
-   The SDK's own internal retries are disabled (`max_retries=0`) so the
-   two policies never multiply, and each attempt is bounded by the
-   profile's `timeout`.
+   SDK retry loops are disabled with zero OpenAI retries or one total Google
+   attempt, so the two policies never multiply. Each attempt is bounded by
+   the profile's `timeout`.
 6. If the primary's retries are exhausted and a fallback is configured
    (`LLM_FALLBACK_BASE_URL`, or `fallback_profile` in llm.yaml), repeat
    the whole thing once against the fallback in `json_object` mode.
@@ -42,11 +42,14 @@ from __future__ import annotations
 import json
 from typing import TypeVar
 
+import httpx
 import openai
+from google.genai.errors import ClientError as GoogleClientError
+from google.genai.errors import ServerError as GoogleServerError
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.runnables import Runnable
+from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
 
@@ -58,16 +61,16 @@ logger = get_logger(__name__)
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
-# Errors worth retrying with backoff: dropped connections, timeouts, 5xx,
-# and 429 rate limits. langchain-openai raises the openai SDK's exception
-# types unchanged. A 400 (BadRequestError) is a different signal - it means
-# the request itself is unsupported, not that it should be retried - so it
-# is handled separately in _chat_json_once.
-_TRANSPORT_EXCEPTIONS: tuple[type[Exception], ...] = (
+# Direct errors worth retrying with backoff: dropped connections, timeouts,
+# 5xx and 429 rate limits. Google client errors are wrapped by its LangChain
+# integration, so wrapped Google 429s are classified separately below.
+_DIRECT_RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
     openai.APIConnectionError,
     openai.APITimeoutError,
     openai.InternalServerError,
     openai.RateLimitError,
+    GoogleServerError,
+    httpx.TransportError,
 )
 
 _override = None
@@ -82,6 +85,14 @@ class LLMOutputError(Exception):
 class LLMConfigError(Exception):
     """Raised when a profile names a provider whose langchain integration
     package is not installed."""
+
+
+class _RetryableProviderError(Exception):
+    """Private marker used only to drive LangChain's type-based retry API."""
+
+    def __init__(self, original: Exception):
+        super().__init__(str(original))
+        self.original = original
 
 
 def set_llm_client_for_tests(client, fallback=None) -> None:
@@ -114,11 +125,12 @@ def _wrap_test_client(fake, model_name: str) -> BaseChatModel:
 def _build_chat_model(profile: ModelProfile, *, model_name: str | None = None) -> BaseChatModel:
     """Build the chat model for a profile through init_chat_model.
 
-    SDK-internal retries stay off (`max_retries=0`): the retry policy lives
-    in `_with_retry`, and stacking the two would multiply attempts. The
-    "missing-key" placeholder keeps a keyless boot possible - openai 2.x
-    refuses to construct a client with no credentials, and the endpoint
-    answers 401 at call time either way."""
+    SDK-internal retries stay off: OpenAI-compatible clients use zero retries,
+    while Google's SDK uses one total attempt because zero restores its
+    default retry policy. The application retry policy lives in `_with_retry`,
+    so the two policies never multiply. The "missing-key" placeholder keeps a
+    keyless boot possible - openai 2.x refuses to construct a client with no
+    credentials, and the endpoint answers 401 at call time either way."""
     name = model_name or profile.model
     kwargs: dict = dict(profile.params)
     if profile.provider == "openai":
@@ -126,6 +138,9 @@ def _build_chat_model(profile: ModelProfile, *, model_name: str | None = None) -
         kwargs["api_key"] = settings.llm_api_key or "missing-key"
         kwargs["timeout"] = profile.timeout
         kwargs["max_retries"] = 0
+    elif profile.provider == "google_genai":
+        kwargs["timeout"] = profile.timeout
+        kwargs["max_retries"] = 1
     try:
         return init_chat_model(name, model_provider=profile.provider, **kwargs)
     except (ImportError, ValueError) as exc:
@@ -178,11 +193,61 @@ def _schema_in_prompt(system: str, schema_model: type[BaseModel]) -> str:
     )
 
 
+def _is_retryable_provider_error(exc: Exception) -> bool:
+    if isinstance(exc, _DIRECT_RETRYABLE_EXCEPTIONS):
+        return True
+
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if isinstance(current, GoogleClientError) and current.code == 429:
+            return True
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return False
+
+
+def _is_unsupported_structured_format_error(exc: openai.BadRequestError) -> bool:
+    error = exc.body.get("error", exc.body) if isinstance(exc.body, dict) else {}
+    code = str(error.get("code", "")).lower() if isinstance(error, dict) else ""
+    param = str(error.get("param", "")).lower() if isinstance(error, dict) else ""
+    message = (
+        str(error.get("message", exc)).lower()
+        if isinstance(error, dict)
+        else str(exc).lower()
+    )
+    names_structured_format = (
+        "response_format" in message
+        or "json_schema" in message
+        or param in {"response_format", "json_schema"}
+    )
+    explicitly_unsupported = "unsupported" in code or any(
+        phrase in message
+        for phrase in ("unsupported", "not supported", "does not support", "doesn't support")
+    )
+    return names_structured_format and explicitly_unsupported
+
+
 def _with_retry(runnable: Runnable, max_retries: int) -> Runnable:
-    """Exponential backoff (1-8s) on transport/5xx/429 within one logical
-    request; a BadRequestError propagates on the first attempt."""
-    return runnable.with_retry(
-        retry_if_exception_type=_TRANSPORT_EXCEPTIONS,
+    """Use at most `max_retries` total LangChain attempts with 1-8s backoff."""
+
+    def invoke_with_retry_marker(runnable_input):
+        try:
+            return runnable.invoke(runnable_input)
+        except Exception as exc:
+            if _is_retryable_provider_error(exc):
+                raise _RetryableProviderError(exc) from exc
+            raise
+
+    return RunnableLambda(invoke_with_retry_marker).with_retry(
+        retry_if_exception_type=(_RetryableProviderError,),
         stop_after_attempt=max_retries,
         wait_exponential_jitter=True,
         exponential_jitter_params={"initial": 1, "max": 8},
@@ -210,7 +275,10 @@ def _invoke_structured(
             strict=True,
             include_raw=True,
         )
-    return _with_retry(structured, max_retries).invoke(messages)
+    try:
+        return _with_retry(structured, max_retries).invoke(messages)
+    except _RetryableProviderError as exc:
+        raise exc.original
 
 
 def _validated_result(
@@ -261,8 +329,8 @@ def _chat_json_once(
             max_retries,
             json_object_mode=json_object_mode,
         )
-    except openai.BadRequestError:
-        if json_object_mode:
+    except openai.BadRequestError as exc:
+        if json_object_mode or not _is_unsupported_structured_format_error(exc):
             raise
         logger.info("llm_json_schema_unsupported_falling_back")
         json_object_mode = True
@@ -331,13 +399,16 @@ def chat_json(
     """Ask the LLM for JSON matching `schema_model` and return a validated
     instance. The only structured LLM entry point in the codebase - see
     module docstring for the full retry/fallback sequence. `max_retries`
-    defaults to the active profile's value from llm.yaml."""
+    is the public compatibility name for the maximum total LangChain attempts
+    and defaults to the active profile's value from llm.yaml."""
     profiles = load_llm_profiles(settings)
     retries = max_retries if max_retries is not None else profiles.primary.max_retries
     primary = _resolve_primary(profiles)
     try:
         return _chat_json_once(primary, system, user, schema_model, retries)
-    except _TRANSPORT_EXCEPTIONS as exc:
+    except Exception as exc:
+        if not _is_retryable_provider_error(exc):
+            raise
         fallback = _resolve_fallback(profiles)
         if fallback is None:
             raise
