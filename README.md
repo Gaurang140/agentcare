@@ -28,6 +28,7 @@ families plus Microsoft Presidio NER in English and German) that rewrites only
 the copy heading for the model, while the database keeps what the patient
 actually typed. A final deterministic sanitizer replaces any sentence in the
 answer that reads as a diagnosis, a dosage or a treatment recommendation.
+The full trust-boundary walkthrough is in [docs/security.md](docs/security.md).
 Guardrail libraries beyond Presidio were evaluated and either turned down or
 deferred, with the reasons in [docs/decisions.md](docs/decisions.md) ADR-15.
 
@@ -55,6 +56,17 @@ Docker Desktop running, then:
 docker compose up --build
 ```
 
+To see real agent bookings, put a (free) Groq key in `.env` first - compose
+passes `LLM_API_KEY` from the repo-root `.env` into the backend container:
+
+```bash
+cp .env.example .env   # then set LLM_API_KEY=your_groq_key
+```
+
+Without a key the stack still runs: the safety demos below work fully, and a
+normal booking parks on staff escalation instead of booking (the designed
+keyless degradation, see "LLM configuration").
+
 Open http://localhost:3000 and log in.
 
 | Role | Email | Password |
@@ -77,8 +89,8 @@ Python 3.12 and Node 22. Backend commands run from `backend/`; the seed runs
 from the repo root.
 
 ```bash
-# 0. create the virtualenv (Python 3.12)
-python3 -m venv .venv
+# 0. create the virtualenv (Python 3.12 - newer majors may miss pinned wheels)
+python3.12 -m venv .venv
 
 # 1. install backend dependencies into the venv
 .venv/bin/pip install -r requirements.txt
@@ -110,19 +122,26 @@ each flag explained, lives in [docs/runbook.md](docs/runbook.md).
 
 ## LLM configuration
 
-AgentCare talks to any OpenAI-compatible endpoint. The default is the Groq free
-tier. Put your key in `.env`:
+Models are built through langchain's `init_chat_model` factory from named
+profiles in [backend/llm.yaml](backend/llm.yaml) (`groq` is the default;
+`local` targets an OpenAI-compatible local server; `vertex` reaches Google
+Cloud Vertex AI after `pip install langchain-google-vertexai`). Environment
+variables always win over the file, so the quick path is unchanged - put your
+key in `.env`:
 
 ```bash
 cp .env.example .env
 # then set:
-LLM_BASE_URL=https://api.groq.com/openai/v1
 LLM_API_KEY=your_groq_key
-LLM_MODEL=openai/gpt-oss-120b
+# optional overrides (defaults come from backend/llm.yaml):
+# LLM_PROFILE=local        # pick another profile by name
+# LLM_MODEL=...            # override a single field of the active profile
 ```
 
-An optional local fallback (LM Studio, no key) is tried once if the primary
-endpoint exhausts its retries:
+Editing `llm.yaml` (model, timeout, retry count, temperature) applies on the
+next request, no restart; a malformed file logs a warning and falls back to
+the env defaults. An optional local fallback (LM Studio, no key) is tried
+once if the primary endpoint exhausts its retries:
 
 ```bash
 LLM_FALLBACK_BASE_URL=http://localhost:1234/v1
@@ -148,9 +167,11 @@ home) and watch what happens.
    Book me a cardiology appointment next week.
    ```
 
-   Expect: the run routes to Cardiology, books a free slot, notes that an ECG
-   report and a blood test are required and returns a confirmation. Watch the
-   agent timeline fill in step by step.
+   Expect (with `LLM_API_KEY` set): the run routes to Cardiology, books a free
+   slot, notes that an ECG report and a blood test are required and returns a
+   confirmation. Watch the agent timeline fill in step by step. Without a key
+   this run parks on staff escalation instead - that is the keyless
+   degradation path, not a bug.
 
 2. **Emergency phrase (instant escalation, zero model calls)**
 
@@ -189,7 +210,8 @@ home) and watch what happens.
    Book me a cardiology appointment, my email is jane.doe@example.com and my number is 0176 12345678.
    ```
 
-   Expect: booking still succeeds as normal. In the audit trail, look for a
+   Expect: booking still succeeds as normal (needs `LLM_API_KEY`; keyless it
+   escalates like item 1). In the audit trail, look for a
    `safety.pii_redacted` event: the text that actually reached the model had
    the email and phone number swapped for `[REDACTED_EMAIL]` /
    `[REDACTED_PHONE]` tokens (`backend/app/safety/pii.py`), and the audit row
@@ -215,7 +237,8 @@ home) and watch what happens.
 LangGraph checkpoints every super-step, so a run survives a backend restart and
 resumes from where it stopped. `resume` re-enters the graph with the same
 `thread_id`; it is a no-op on an already-finished run, so nothing re-executes or
-duplicates.
+duplicates. Run this one with `LLM_API_KEY` set: a keyless run escalates to
+staff almost immediately, leaving nothing mid-flight to kill.
 
 ```bash
 # 1. log in and save the session cookie
@@ -272,12 +295,17 @@ are decided before the graph starts, answer at once and never wait for anyone
 
 ## The agents
 
-The graph is a coordinator loop. The coordinator is a pure decision node: it
-picks the next step and never does domain work itself. Each specialist runs its
-own database work, then returns to the coordinator. `safety_finalize` ends a
-run and `escalate` pauses one for a human, and any node that records an error
-forces `escalate`, so the graph stays safe even if the coordinator misreads a
-result.
+The graph is a coordinator loop - in LangGraph's own pattern vocabulary, a
+graph-based supervisor built as a custom workflow: an LLM coordinator
+re-decides the next step after every specialist, human-in-the-loop is
+`interrupt()` resumed with `Command(resume=...)` on a persisted checkpointer
+(SqliteSaver locally, PostgresSaver in Docker/GKE), and crash-resume is
+`invoke(None, config)` on the same thread. The coordinator is a pure decision
+node: it picks the next step and never does domain work itself. Each
+specialist runs its own database work, then returns to the coordinator.
+`safety_finalize` ends a run and `escalate` pauses one for a human, and any
+node that records an error forces `escalate`, so the graph stays safe even if
+the coordinator misreads a result.
 
 | Agent | Role | Prompt | Tools it owns |
 |---|---|---|---|
@@ -372,7 +400,7 @@ diagram is [docs/architecture.mmd](docs/architecture.mmd).
 cd backend && ../.venv/bin/python -m pytest -q
 ```
 
-338 tests pass. They cover the agents (each with an injected fake model, no
+409 tests pass. They cover the agents (each with an injected fake model, no
 network and no keys), the tools and deterministic safety guardrails (the
 prompt-injection guard including document filenames, the PII redaction boundary
 in both languages and the English and German output sanitizer), replay-safe
@@ -420,7 +448,7 @@ agentcare/
   backend/            FastAPI + LangGraph service
     app/              config, models, auth, safety, tools, agents, services, api
     alembic/          migration environment and versions
-    tests/            338 pytest tests (unit, RBAC, fake-LLM end-to-end)
+    tests/            409 pytest tests (unit, RBAC, fake-LLM end-to-end)
     Dockerfile
   frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
     app/              login, register, patient portal, staff portal
