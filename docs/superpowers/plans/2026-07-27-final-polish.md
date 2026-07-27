@@ -803,6 +803,7 @@ rtk git commit -m "remove unused frontend surface"
 
 **Files:**
 
+- Rewrite: `.env.example`
 - Rewrite: `README.md`
 - Rewrite: `docs/architecture.md`
 - Rewrite: `docs/security.md`
@@ -926,6 +927,11 @@ Use only existing GCP infrastructure. Do not suggest an alternative cloud.
 actually supports. Demonstrate duplicate-upload/idempotency evidence through a
 new request plus the staff audit view, not a nonexistent portal upload action.
 
+Update `.env.example` so `LLM_PROFILE` documents `groq | local | vertex`,
+explains that the Vertex profile uses Application Default Credentials, and
+names `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` without adding any
+credential value or secret. Remove the stale commented-example wording.
+
 Keep `infra/k8s/README.md` to manifest-local prerequisites, render/apply,
 verification, and teardown links. Keep `evals/README.md` focused on the eval
 harness.
@@ -960,7 +966,7 @@ Manually follow every local Markdown link in the final documentation set.
 ### Step 8: Commit
 
 ```bash
-rtk git add README.md docs evals infra frontend/README.md backend/alembic/README
+rtk git add .env.example README.md docs evals infra frontend/README.md backend/alembic/README
 rtk git commit -m "replace stale docs with canonical project guide"
 ```
 
@@ -1029,8 +1035,8 @@ From the repository root:
 
 ```bash
 rtk kubectl kustomize infra/k8s/overlays/gcp
-rtk tofu -chdir=infra/tofu fmt -check -recursive
-rtk tofu -chdir=infra/tofu validate
+rtk tofu -chdir=infra/terraform fmt -check -recursive
+rtk tofu -chdir=infra/terraform validate
 ```
 
 If `tofu` is unavailable, report that exact environmental limitation; do not
