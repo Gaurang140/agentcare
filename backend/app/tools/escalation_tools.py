@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.exceptions import NotFoundError
@@ -44,25 +45,33 @@ def create_escalation(
 def resolve_escalation(
     db: Session, escalation_id: int, reviewer_id: int, approve: bool, note: str
 ) -> dict:
-    """Record a staff decision: status becomes approved or rejected."""
+    """Record the first staff decision; later attempts are idempotent."""
     escalation = db.get(Escalation, escalation_id)
     if escalation is None:
         raise NotFoundError(f"Escalation {escalation_id} not found")
 
-    escalation.status = "approved" if approve else "rejected"
-    escalation.reviewed_by = reviewer_id
-    escalation.resolution_note = note
-    db.flush()
-
-    write_audit(
-        db,
-        reviewer_id,
-        "escalation.resolved",
-        "escalation",
-        escalation.id,
-        {"approve": approve},
+    decided = db.execute(
+        update(Escalation)
+        .where(Escalation.id == escalation_id, Escalation.status == "open")
+        .values(
+            status="approved" if approve else "rejected",
+            reviewed_by=reviewer_id,
+            resolution_note=note,
+        ),
+        execution_options={"synchronize_session": False},
     )
+
+    if decided.rowcount:
+        write_audit(
+            db,
+            reviewer_id,
+            "escalation.resolved",
+            "escalation",
+            escalation.id,
+            {"approve": approve},
+        )
     db.commit()
+    db.refresh(escalation)
 
     return {
         "id": escalation.id,

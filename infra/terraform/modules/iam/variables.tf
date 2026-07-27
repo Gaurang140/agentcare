@@ -3,8 +3,18 @@ variable "project_id" {
   type        = string
 }
 
+variable "region" {
+  description = "Region containing the Artifact Registry repository."
+  type        = string
+}
+
+variable "artifact_registry_repository_id" {
+  description = "Repository the GKE node identity can pull images from."
+  type        = string
+}
+
 variable "bucket_name" {
-  description = "Documents GCS bucket name. The backend service account gets objectAdmin scoped to exactly this bucket, never a project-wide storage role."
+  description = "Documents GCS bucket name. The backend service account gets objectCreator scoped to exactly this bucket, never a project-wide storage role."
   type        = string
 }
 

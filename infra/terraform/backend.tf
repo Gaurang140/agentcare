@@ -1,8 +1,8 @@
 # State backend: local by default, so `tofu init -backend=false && tofu
 # validate` (or a first `tofu plan`) works with zero setup and no bucket has
-# to exist first. Switch to the commented `gcs` block once the one-time
-# state-bucket step in docs/deployment-gcp.md has been run, then
-# `tofu init -migrate-state`.
+# to exist first. For a shared environment, provision a protected state
+# bucket through the organization's bootstrap process, set its exact name in
+# the commented block, then run `tofu init -migrate-state`.
 terraform {
   backend "local" {}
 

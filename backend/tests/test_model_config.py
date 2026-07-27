@@ -275,3 +275,29 @@ profiles:
     profiles = load_llm_profiles(settings, path=config)
 
     assert profiles.guard is None
+
+
+def test_guard_rejects_an_explicit_non_openai_profile(monkeypatch, tmp_path: Path):
+    config = tmp_path / "llm.yaml"
+    config.write_text(
+        """
+default_profile: main
+profiles:
+  main:
+    provider: openai
+    model: app-model
+    base_url: https://app.test/v1
+  wrong-guard-endpoint:
+    provider: google_genai
+    model: gemini-2.5-flash
+injection_guard:
+  model: meta-llama/llama-prompt-guard-2-86m
+  profile: wrong-guard-endpoint
+""",
+        encoding="utf-8",
+    )
+    settings = _settings(monkeypatch)
+
+    profiles = load_llm_profiles(settings, path=config)
+
+    assert profiles.guard is None

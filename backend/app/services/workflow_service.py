@@ -30,7 +30,7 @@ from app.agents.support import redact_text_for_agent
 from app.config import settings
 from app.exceptions import NotFoundError, ValidationError
 from app.logging_setup import get_logger
-from app.models import User, WorkflowRun
+from app.models import Escalation, User, WorkflowRun
 from app.safety.guardrails import ScreenResult, screen_request
 from app.safety.injection_guard import InjectionResult, screen_injection
 from app.tools.audit_tools import write_audit
@@ -315,6 +315,33 @@ def _invoke_graph(
         return None
 
 
+def _fail_before_graph(
+    db: Session,
+    workflow_run: WorkflowRun,
+    *,
+    reason: str,
+    log_event: str,
+    error: Exception,
+) -> WorkflowRun:
+    """Contain work that fails after a run is claimed but before invoke()."""
+    logger.error(
+        log_event,
+        workflow_id=workflow_run.id,
+        error_type=type(error).__name__,
+    )
+    db.rollback()
+    create_escalation(
+        db,
+        workflow_run.id,
+        reason=reason,
+        severity="agent_failure",
+    )
+    workflow_run.status = "failed"
+    workflow_run.current_step = "crashed"
+    db.commit()
+    return workflow_run
+
+
 def create_run(db: Session, user: User, request_text: str) -> WorkflowRun:
     """Screen the request and create its WorkflowRun row - synchronously,
     with zero LLM calls or graph invocation either way. An emergency,
@@ -416,7 +443,12 @@ def resume_workflow(db: Session, workflow_run_id: int) -> WorkflowRun:
 
 
 def resume_with_decision(
-    db: Session, workflow_run_id: int, approved: bool, note: str | None, reviewer_id: int
+    db: Session,
+    workflow_run_id: int,
+    escalation_id: int,
+    approved: bool,
+    note: str | None,
+    reviewer_id: int,
 ) -> WorkflowRun:
     """Hand a staff decision to a run parked at the escalate node's
     interrupt, and let the graph carry it out: an approved uncertainty case
@@ -428,18 +460,16 @@ def resume_with_decision(
     while resuming ends as a failed run with its own escalation, exactly like
     a crash on the first pass, and never as a 500 out of the staff route.
 
-    The run is claimed before the invoke, not merely read: the status moves
-    waiting_approval -> running in one conditional UPDATE, committed first,
-    the same way `appointment_tools.book_appointment` claims a slot. Two
-    staff members approving the same case at the same moment would both read
-    waiting_approval and both resume the one thread otherwise, off one
-    checkpoint, which on a booking run means booking twice. The loser's
-    UPDATE matches zero rows and takes the no-op path.
+    The run claim and escalation decision are one transaction. The status
+    moves waiting_approval -> running and the matching open escalation gets
+    its reviewer, note and decision before either change commits. Two staff
+    members can both read the open case, but only one can claim the run; the
+    loser cannot overwrite the decision that actually drove the graph.
 
-    The raw staff note is already persisted on Escalation.resolution_note by
-    the staff route. Only an approved uncertainty case needs it as agent
-    guidance, so that copy is PII-redacted before Command construction. Raw
-    note text therefore never enters LangGraph's checkpoint input.
+    The same transaction persists the raw staff note on
+    Escalation.resolution_note. Only an approved uncertainty case needs it as
+    agent guidance, so that copy is PII-redacted before Command construction.
+    Raw note text therefore never enters LangGraph's checkpoint input.
     """
     workflow_run = db.get(WorkflowRun, workflow_run_id)
     if workflow_run is None:
@@ -447,28 +477,72 @@ def resume_with_decision(
     if workflow_run.status != "waiting_approval":
         return workflow_run
 
+    escalation = db.get(Escalation, escalation_id)
+    if escalation is None or escalation.workflow_run_id != workflow_run_id:
+        raise NotFoundError(f"Escalation {escalation_id} not found for this workflow")
+    severity = escalation.severity
+
     claimed = db.execute(
         update(WorkflowRun)
         .where(WorkflowRun.id == workflow_run_id, WorkflowRun.status == "waiting_approval")
-        .values(status="running")
+        .values(status="running"),
+        execution_options={"synchronize_session": False},
+    )
+    if claimed.rowcount == 0:
+        db.commit()
+        return workflow_run
+
+    decided = db.execute(
+        update(Escalation)
+        .where(
+            Escalation.id == escalation_id,
+            Escalation.workflow_run_id == workflow_run_id,
+            Escalation.status == "open",
+        )
+        .values(
+            status="approved" if approved else "rejected",
+            reviewed_by=reviewer_id,
+            resolution_note=note,
+        ),
+        execution_options={"synchronize_session": False},
+    )
+    if decided.rowcount == 0:
+        db.rollback()
+        raise ValidationError("This escalation has already been resolved")
+
+    write_audit(
+        db,
+        reviewer_id,
+        "escalation.resolved",
+        "escalation",
+        escalation_id,
+        {"approve": approved},
     )
     db.commit()
-    if claimed.rowcount == 0:
-        return workflow_run
+    db.refresh(workflow_run)
 
     raw_guidance = (note or "").strip()
     guidance = None
-    if approved and not (workflow_run.state or {}).get("error") and raw_guidance:
-        redaction_state: AgentState = dict(workflow_run.state or {})
-        redaction_state.setdefault("workflow_id", workflow_run.id)
-        redaction_state.setdefault("patient_id", workflow_run.patient_id)
-        guidance = redact_text_for_agent(
-            db,
-            redaction_state,
-            raw_guidance,
-            "escalate",
-        )
-        db.commit()
+    if approved and severity == "uncertainty" and raw_guidance:
+        try:
+            redaction_state: AgentState = dict(workflow_run.state or {})
+            redaction_state.setdefault("workflow_id", workflow_run.id)
+            redaction_state.setdefault("patient_id", workflow_run.patient_id)
+            guidance = redact_text_for_agent(
+                db,
+                redaction_state,
+                raw_guidance,
+                "escalate",
+            )
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - pre-invoke boundary
+            return _fail_before_graph(
+                db,
+                workflow_run,
+                reason="staff guidance redaction failed",
+                log_event="staff_guidance_redaction_failed",
+                error=exc,
+            )
 
     resume = Command(
         resume={

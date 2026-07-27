@@ -1,11 +1,4 @@
-"""Idempotent synthetic seed data: departments, doctors, appointment slots,
-required documents, and demo users.
-
-`seed(db)` is safe to call from a script, from a test, or from an admin
-route: it checks for any existing Department row first and, if the db has
-already been seeded, returns the current counts without inserting anything
-a second time.
-"""
+"""Idempotently reconcile the synthetic demo catalog and users."""
 
 from __future__ import annotations
 
@@ -118,93 +111,137 @@ def _counts(db: Session) -> dict[str, int]:
 
 
 def _seed_agent_rules(db: Session) -> None:
-    """Insert the default per-agent operating rules if none exist yet.
-
-    Idempotent independently of the department/doctor/slot check below, so
-    a db already seeded before this feature shipped still gets its default
-    rules the next time seed() runs.
-    """
-    if db.query(AgentRule).first() is not None:
-        return
+    """Insert each missing default per-agent operating rule."""
+    existing = {
+        (row.agent_name, row.rule_text)
+        for row in db.query(AgentRule.agent_name, AgentRule.rule_text).all()
+    }
     for agent_name, rule_texts in _AGENT_RULES.items():
         for rule_text in rule_texts:
-            db.add(AgentRule(agent_name=agent_name, rule_text=rule_text, source="seed"))
-    db.commit()
+            if (agent_name, rule_text) not in existing:
+                db.add(
+                    AgentRule(
+                        agent_name=agent_name,
+                        rule_text=rule_text,
+                        source="seed",
+                    )
+                )
 
 
-def seed(db: Session) -> dict[str, int]:
-    """Insert synthetic demo data if the db is empty, else no-op.
-
-    Returns row counts for departments, doctors, slots, required_documents,
-    users and agent_rules - either the counts just inserted, or (on a
-    repeat call) the counts already present.
-    """
-    if db.query(Department).first() is not None:
-        _seed_agent_rules(db)
-        return _counts(db)
-
+def _seed_catalog(db: Session) -> None:
     weekdays = _next_weekdays(date.today(), _WEEKDAY_COUNT)
     slot_times = [pair for day in weekdays for pair in _slot_times_for_day(day)]
 
     for dept_name, doctor_names in _DEPARTMENTS.items():
-        dept = Department(name=dept_name)
-        db.add(dept)
-        db.flush()  # assign dept.id for the FKs below
+        dept = db.query(Department).filter_by(name=dept_name).one_or_none()
+        if dept is None:
+            dept = Department(name=dept_name)
+            db.add(dept)
+            db.flush()
 
+        existing_documents = {
+            row[0]
+            for row in db.query(RequiredDocument.document_type)
+            .filter_by(department_id=dept.id)
+            .all()
+        }
         for document_type in _REQUIRED_DOCUMENTS.get(dept_name, []):
-            db.add(RequiredDocument(department_id=dept.id, document_type=document_type))
-
-        for doctor_name in doctor_names:
-            doctor = Doctor(department_id=dept.id, name=doctor_name)
-            db.add(doctor)
-            db.flush()  # assign doctor.id for the slots below
-
-            for start_time, end_time in slot_times:
+            if document_type not in existing_documents:
                 db.add(
-                    AppointmentSlot(
-                        doctor_id=doctor.id,
-                        start_time=start_time,
-                        end_time=end_time,
-                        status="free",
+                    RequiredDocument(
+                        department_id=dept.id,
+                        document_type=document_type,
                     )
                 )
 
-    patient = User(
-        email="patient@agentcare-demo.com",
-        password_hash=hash_password(_DEMO_PASSWORD),
-        role="patient",
-        full_name="Max Mustermann",
-    )
-    db.add(patient)
-    db.flush()
-    db.add(
-        PatientProfile(
-            user_id=patient.id,
-            date_of_birth=date(1990, 5, 14),
-            # English so the README's demo walkthrough (written in English)
-            # gets English responses; Erika below is the German showcase.
-            preferred_language="en",
+        for doctor_name in doctor_names:
+            doctor = (
+                db.query(Doctor)
+                .filter_by(department_id=dept.id, name=doctor_name)
+                .first()
+            )
+            if doctor is None:
+                doctor = Doctor(department_id=dept.id, name=doctor_name)
+                db.add(doctor)
+                db.flush()
+
+            existing_starts = {
+                row[0]
+                for row in db.query(AppointmentSlot.start_time)
+                .filter_by(doctor_id=doctor.id)
+                .all()
+            }
+            for start_time, end_time in slot_times:
+                if start_time not in existing_starts:
+                    db.add(
+                        AppointmentSlot(
+                            doctor_id=doctor.id,
+                            start_time=start_time,
+                            end_time=end_time,
+                            status="free",
+                        )
+                    )
+
+
+def _seed_patient(
+    db: Session,
+    *,
+    email: str,
+    full_name: str,
+    preferred_language: str,
+    date_of_birth: date | None = None,
+) -> None:
+    user = db.query(User).filter_by(email=email).one_or_none()
+    if user is None:
+        user = User(
+            email=email,
+            password_hash=hash_password(_DEMO_PASSWORD),
+            role="patient",
+            full_name=full_name,
         )
-    )
+        db.add(user)
+        db.flush()
 
-    second_patient = User(
+    if user.role == "patient" and user.patient_profile is None:
+        db.add(
+            PatientProfile(
+                user_id=user.id,
+                date_of_birth=date_of_birth,
+                preferred_language=preferred_language,
+            )
+        )
+
+
+def _seed_users(db: Session) -> None:
+    _seed_patient(
+        db,
+        email="patient@agentcare-demo.com",
+        full_name="Max Mustermann",
+        preferred_language="en",
+        date_of_birth=date(1990, 5, 14),
+    )
+    _seed_patient(
+        db,
         email="erika@agentcare-demo.com",
-        password_hash=hash_password(_DEMO_PASSWORD),
-        role="patient",
         full_name="Erika Musterfrau",
+        preferred_language="de",
     )
-    db.add(second_patient)
-    db.flush()
-    db.add(PatientProfile(user_id=second_patient.id, preferred_language="de"))
 
-    staff = User(
-        email="staff@agentcare-demo.com",
-        password_hash=hash_password(_DEMO_PASSWORD),
-        role="staff",
-        full_name="Admin Petra Muster",
-    )
-    db.add(staff)
+    if db.query(User).filter_by(email="staff@agentcare-demo.com").one_or_none() is None:
+        db.add(
+            User(
+                email="staff@agentcare-demo.com",
+                password_hash=hash_password(_DEMO_PASSWORD),
+                role="staff",
+                full_name="Admin Petra Muster",
+            )
+        )
 
-    db.commit()
+
+def seed(db: Session) -> dict[str, int]:
+    """Insert any missing canonical demo records and return current counts."""
+    _seed_catalog(db)
+    _seed_users(db)
     _seed_agent_rules(db)
+    db.commit()
     return _counts(db)

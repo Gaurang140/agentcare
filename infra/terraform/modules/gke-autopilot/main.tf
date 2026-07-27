@@ -17,6 +17,12 @@ resource "google_container_cluster" "this" {
     workload_pool = "${var.project_id}.svc.id.goog"
   }
 
+  cluster_autoscaling {
+    auto_provisioning_defaults {
+      service_account = var.node_service_account_email
+    }
+  }
+
   # Hackathon/demo cluster: allow `tofu destroy` to actually tear it down.
   # Flip to true before this cluster ever holds anything that must survive
   # an accidental destroy.

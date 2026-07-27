@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from app.agents.responses import staff_decision_response, staff_review_response
+from app.api import routes_workflows
 from app.api.routes_workflows import _serialize_escalation, run_workflow_background
 from app.config import settings
 from app.db.seed import seed
+from app.exceptions import ValidationError
 from app.models import (
     Appointment,
     AuditEvent,
@@ -175,6 +178,67 @@ def test_upload_rejects_one_bad_file_even_with_a_good_one_alongside(patient_clie
 
     assert resp.status_code == 400
     assert db_session.query(PatientDocument).count() == before
+
+
+def test_upload_count_is_bounded_before_documents_are_stored(
+    patient_client, db_session, monkeypatch
+):
+    monkeypatch.setattr(routes_workflows, "_MAX_FILE_COUNT", 2)
+    before = db_session.query(PatientDocument).count()
+
+    resp = patient_client.post(
+        "/api/requests",
+        data={"text": "what medication should I take"},
+        files=[
+            ("files", (f"note-{index}.txt", b"small", "text/plain"))
+            for index in range(3)
+        ],
+    )
+
+    assert resp.status_code == 400
+    assert db_session.query(PatientDocument).count() == before
+
+
+def test_upload_reader_requests_at_most_the_remaining_bounded_bytes(monkeypatch):
+    monkeypatch.setattr(routes_workflows, "_MAX_FILE_BYTES", 4)
+    monkeypatch.setattr(routes_workflows, "_MAX_TOTAL_FILE_BYTES", 10)
+
+    class RecordingFile:
+        def __init__(self):
+            self.requested: list[int] = []
+
+        def read(self, size: int) -> bytes:
+            self.requested.append(size)
+            return b"x" * size
+
+    source = RecordingFile()
+    upload = SimpleNamespace(filename="scan.pdf", file=source)
+
+    with pytest.raises(ValidationError, match="File too large"):
+        routes_workflows._read_upload(upload, total_bytes=0)
+
+    assert source.requested == [5]
+
+
+def test_upload_reader_enforces_aggregate_limit_without_reading_past_it(monkeypatch):
+    monkeypatch.setattr(routes_workflows, "_MAX_FILE_BYTES", 10)
+    monkeypatch.setattr(routes_workflows, "_MAX_TOTAL_FILE_BYTES", 12)
+
+    class RecordingFile:
+        def __init__(self):
+            self.requested: list[int] = []
+
+        def read(self, size: int) -> bytes:
+            self.requested.append(size)
+            return b"x" * size
+
+    source = RecordingFile()
+    upload = SimpleNamespace(filename="scan.pdf", file=source)
+
+    with pytest.raises(ValidationError, match="Combined uploads too large"):
+        routes_workflows._read_upload(upload, total_bytes=8)
+
+    assert source.requested == [5]
 
 
 def test_list_workflows_is_ownership_filtered(patient_client, db_session, other_patient_doc):

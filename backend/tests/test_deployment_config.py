@@ -63,6 +63,10 @@ def test_kubernetes_backend_uses_declared_service_account_and_skips_migrations()
         )
     )
     deployment = _resource(documents, "Deployment", "backend")
+    assert deployment["spec"]["strategy"] == {
+        "type": "RollingUpdate",
+        "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1},
+    }
     pod_spec = deployment["spec"]["template"]["spec"]
 
     assert pod_spec["serviceAccountName"] == "agentcare-backend"
@@ -80,6 +84,19 @@ def test_kubernetes_backend_uses_declared_service_account_and_skips_migrations()
     )
     env = {item["name"]: item["value"] for item in container.get("env", [])}
     assert env["SKIP_STARTUP_MIGRATIONS"] == "true"
+
+
+def test_kubernetes_probes_separate_process_liveness_from_database_readiness():
+    documents = list(
+        yaml.safe_load_all(
+            (REPO_ROOT / "infra/k8s/base/backend.yaml").read_text(encoding="utf-8")
+        )
+    )
+    deployment = _resource(documents, "Deployment", "backend")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+
+    assert container["livenessProbe"]["httpGet"]["path"] == "/api/live"
+    assert container["readinessProbe"]["httpGet"]["path"] == "/api/health"
 
 
 def test_application_base_excludes_migration_job():
@@ -115,6 +132,12 @@ def test_gcp_ingress_redirects_http_to_https():
         "enabled": True,
         "responseCodeName": "PERMANENT_REDIRECT",
     }
+    assert frontend_config["spec"]["sslPolicy"] == "agentcare-modern-tls"
+
+    terraform = (REPO_ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
+    assert 'resource "google_compute_ssl_policy" "frontend"' in terraform
+    assert 'profile         = "MODERN"' in terraform
+    assert 'min_tls_version = "TLS_1_2"' in terraform
 
     ingress_documents = list(
         yaml.safe_load_all(
@@ -124,9 +147,12 @@ def test_gcp_ingress_redirects_http_to_https():
         )
     )
     ingress = _resource(ingress_documents, "Ingress", "agentcare")
-    assert ingress["metadata"]["annotations"]["networking.gke.io/frontend-config"] == (
+    assert ingress["metadata"]["annotations"][
+        "networking.gke.io/v1beta1.FrontendConfig"
+    ] == (
         "agentcare-frontendconfig"
     )
+    assert "networking.gke.io/frontend-config" not in ingress["metadata"]["annotations"]
 
 
 def test_gcp_database_requires_encrypted_transport():
@@ -168,6 +194,55 @@ def test_model_armor_location_is_an_operator_substitution_not_a_second_default()
     assert model_armor_config["data"]["MODEL_ARMOR_LOCATION"] == "REGION"
 
 
+def test_gke_uses_a_dedicated_node_identity_with_explicit_pull_permissions():
+    iam = (REPO_ROOT / "infra/terraform/modules/iam/main.tf").read_text(
+        encoding="utf-8"
+    )
+    gke = (REPO_ROOT / "infra/terraform/modules/gke-autopilot/main.tf").read_text(
+        encoding="utf-8"
+    )
+    root = (REPO_ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
+
+    assert 'resource "google_service_account" "gke_nodes"' in iam
+    assert '"roles/container.defaultNodeServiceAccount"' in iam
+    assert 'resource "google_artifact_registry_repository_iam_member"' in iam
+    assert '"roles/artifactregistry.reader"' in iam
+    assert "service_account = var.node_service_account_email" in gke
+    assert "node_service_account_email = module.iam.gke_node_service_account_email" in root
+    assert "depends_on = [module.iam]" in root
+
+
+def test_gcp_overlay_declares_managed_prometheus_collection():
+    overlay = _load_yaml(REPO_ROOT / "infra/k8s/overlays/gcp/kustomization.yaml")
+    assert "podmonitoring.yaml" in overlay["resources"]
+
+    monitor = _load_yaml(REPO_ROOT / "infra/k8s/overlays/gcp/podmonitoring.yaml")
+    assert monitor["apiVersion"] == "monitoring.googleapis.com/v1"
+    assert monitor["kind"] == "PodMonitoring"
+    assert monitor["spec"]["selector"]["matchLabels"] == {"app": "backend"}
+    assert monitor["spec"]["endpoints"] == [
+        {"port": "http", "path": "/metrics", "interval": "30s"}
+    ]
+
+
+def test_gcp_runbook_checks_required_plugins_and_exercises_gcs_upload_path():
+    runbook = (REPO_ROOT / "docs/deployment-gcp.md").read_text(encoding="utf-8")
+
+    assert "gke-gcloud-auth-plugin --version" in runbook
+    assert "docker buildx version" in runbook
+    assert "openssl version" in runbook
+    assert "monitoring.googleapis.com" in runbook
+    assert "logging.googleapis.com" in runbook
+    assert "serviceusage.googleapis.com" in runbook
+    assert "cloudresourcemanager.googleapis.com" in runbook
+    assert 'curl -fsS --max-time 10 "https://YOUR_DOMAIN/api/health"' in runbook
+    assert 'curl -fsSI --max-time 10 "https://YOUR_DOMAIN/api/health"' not in runbook
+    assert "files=@/tmp/${SMOKE_FILENAME};type=text/plain" in runbook
+    assert 'gcloud storage ls "gs://${DOCUMENTS_BUCKET}/**${SMOKE_FILENAME}"' in runbook
+    assert "openssl rand -hex 32" in runbook
+    assert "JWT_SECRET=.{32,}" in runbook
+
+
 def test_ci_defaults_to_read_only_and_verifies_kubeconform_archive():
     workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
     assert workflow["permissions"] == {"contents": "read"}
@@ -179,6 +254,35 @@ def test_ci_defaults_to_read_only_and_verifies_kubeconform_archive():
     )
     assert "sha256sum -c" in install
     assert "| tar " not in install
+    assert "v0.7.0" in install
+    assert "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3" in install
+    assert "v0.6.7" not in install
+
+
+def test_ci_validates_terraform_with_pinned_opentofu():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    job = workflow["jobs"]["infrastructure"]
+    assert job["defaults"]["run"]["working-directory"] == "infra/terraform"
+
+    setup = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "set up OpenTofu"
+    )
+    assert setup["uses"] == (
+        "opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4"
+    )
+    assert setup["with"] == {
+        "tofu_version": "1.12.1",
+        "tofu_wrapper": False,
+    }
+
+    commands = "\n".join(
+        step["run"] for step in job["steps"] if isinstance(step.get("run"), str)
+    )
+    assert "tofu fmt -check -recursive" in commands
+    assert "tofu init -backend=false -input=false" in commands
+    assert "tofu validate -no-color" in commands
 
 
 def test_ci_pins_first_party_actions_to_full_release_commits():
@@ -205,3 +309,38 @@ def test_ci_pins_first_party_actions_to_full_release_commits():
                     assert step["uses"] == expected[action]
 
     assert found == set(expected)
+
+
+def test_frontend_image_does_not_copy_an_untracked_public_directory():
+    dockerfile = (REPO_ROOT / "frontend/Dockerfile").read_text(encoding="utf-8")
+
+    assert "/app/public" not in dockerfile
+
+
+def test_ci_gates_eval_evidence_and_production_frontend_advisories():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    backend_steps = workflow["jobs"]["test"]["steps"]
+    frontend_steps = workflow["jobs"]["frontend"]["steps"]
+
+    backend_commands = "\n".join(
+        step["run"] for step in backend_steps if isinstance(step.get("run"), str)
+    )
+    frontend_commands = "\n".join(
+        step["run"] for step in frontend_steps if isinstance(step.get("run"), str)
+    )
+
+    assert "ruff check backend evals" in backend_commands
+    assert "pytest -q backend evals/test_evidence_safety.py" in backend_commands
+    assert "evals/phase2_score.py --selftest" in backend_commands
+    assert "npm audit --omit=dev --audit-level=high" in frontend_commands
+
+
+def test_frontend_pins_patched_next_runtime_transitives():
+    package = _load_yaml(REPO_ROOT / "frontend/package.json")
+
+    assert "shadcn" not in package["dependencies"]
+    assert package["devDependencies"]["shadcn"]
+    assert package["overrides"] == {
+        "postcss": "8.5.22",
+        "sharp": "0.35.3",
+    }

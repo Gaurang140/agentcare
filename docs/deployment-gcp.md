@@ -20,12 +20,14 @@ executable in this guide is OpenTofu. Kubernetes source is in `infra/k8s`.
 | Compute | Regional GKE Autopilot cluster |
 | Database | Cloud SQL for PostgreSQL 17 with private IP |
 | Documents | GCS bucket with public access prevention |
-| Runtime identity | Backend KSA/GSA pair through GKE Workload Identity |
+| Runtime identity | Backend KSA/GSA pair plus a dedicated GKE node GSA |
 | Safety provider | Model Armor template plus a regional PSC endpoint and private DNS |
-| Workloads | Ordered migration Job, then backend, frontend, Services and HTTPS-redirecting GCE Ingress |
+| Metrics | Google Managed Service for Prometheus through PodMonitoring |
+| Workloads | Ordered migration Job, then backend, frontend, Services and TLS-1.2 HTTPS-redirecting GCE Ingress |
 
 The backend remains one replica because APScheduler jobs run in-process without
-a distributed lock.
+a distributed lock. Its rollout strategy forbids a surge replica, so upgrades
+have brief backend downtime instead of running two schedulers at once.
 
 ## Manual gaps
 
@@ -35,7 +37,7 @@ The committed configuration does not complete these items:
 2. Cloud SQL database, database user and connection URL
 3. secret values and the `agentcare-secrets` Kubernetes Secret
 4. GCS bucket, Model Armor template and project sentinels in the overlays
-5. image registry names and immutable image tags in both overlays
+5. image registry names and commit-addressed image tags in both overlays
 6. `FRONTEND_ORIGIN`
 7. optional Vertex API, IAM flag, profile and Google project/location
 8. public DNS and a real domain for the managed TLS certificate
@@ -80,9 +82,12 @@ Required tools:
 gcloud --version
 tofu -version
 docker --version
+docker buildx version
 kubectl version --client
 kustomize version
+gke-gcloud-auth-plugin --version
 curl --version
+openssl version
 ```
 
 Plain Terraform can consume the same `infra/terraform` files. If using it,
@@ -115,14 +120,19 @@ OpenTofu's Google provider reads ADC, not only the `gcloud` login.
 API enablement is not managed by `infra/terraform`:
 
 ```bash
+gcloud services enable serviceusage.googleapis.com
+
 gcloud services enable \
   artifactregistry.googleapis.com \
+  cloudresourcemanager.googleapis.com \
   compute.googleapis.com \
   container.googleapis.com \
   dns.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
+  logging.googleapis.com \
   modelarmor.googleapis.com \
+  monitoring.googleapis.com \
   networkconnectivity.googleapis.com \
   servicenetworking.googleapis.com \
   sqladmin.googleapis.com \
@@ -140,7 +150,7 @@ Confirm the relevant services are enabled:
 
 ```bash
 gcloud services list --enabled \
-  --filter='NAME:(artifactregistry.googleapis.com container.googleapis.com dns.googleapis.com sqladmin.googleapis.com modelarmor.googleapis.com networkconnectivity.googleapis.com aiplatform.googleapis.com)'
+  --filter='NAME:(artifactregistry.googleapis.com cloudresourcemanager.googleapis.com container.googleapis.com dns.googleapis.com logging.googleapis.com monitoring.googleapis.com serviceusage.googleapis.com sqladmin.googleapis.com modelarmor.googleapis.com networkconnectivity.googleapis.com aiplatform.googleapis.com)'
 ```
 
 ## 5. Initialize, validate and plan
@@ -260,6 +270,13 @@ gcloud sql backups list --instance=agentcare-postgres
 
 ## 8. Prepare secret material
 
+Generate a deployment-specific JWT signing secret and keep the output out of
+shell history:
+
+```bash
+openssl rand -hex 32
+```
+
 Prepare the runtime Kubernetes values in a temporary file:
 
 ```bash
@@ -280,7 +297,25 @@ LANGFUSE_SECRET_KEY=
 
 For the Groq profile, set `LLM_API_KEY`. For Vertex, leave that key empty and
 configure workload identity plus the non-secret Google variables in the next
-section.
+section. Paste the generated value into `JWT_SECRET`; do not reuse a local or
+different-environment secret.
+
+Fail before touching Kubernetes if the signing secret or database URL is
+missing:
+
+```bash
+grep -Eq '^JWT_SECRET=.{32,}$' /tmp/agentcare-secrets.env || {
+  echo "JWT_SECRET must contain at least 32 characters" >&2
+  exit 1
+}
+grep -Eq '^DATABASE_URL=postgresql\+psycopg://.+' /tmp/agentcare-secrets.env || {
+  echo "DATABASE_URL must be a PostgreSQL psycopg URL" >&2
+  exit 1
+}
+```
+
+The backend independently refuses to boot outside development with a blank,
+default or short JWT secret.
 
 ## 9. Connect kubectl
 
@@ -369,7 +404,7 @@ The Vertex profile is configured and construction is unit-tested. This
 procedure does not claim live authentication, quota or model response until
 the operator completes the workflow smoke test.
 
-## 12. Build and push immutable images
+## 12. Build and push commit-addressed images
 
 Configure Docker for the registry host:
 
@@ -480,13 +515,15 @@ After the certificate becomes active, verify both TLS and the configured 308
 redirect:
 
 ```bash
-curl -fsSI --max-time 10 "https://YOUR_DOMAIN/api/health"
+curl -fsS --max-time 10 "https://YOUR_DOMAIN/api/health"
 curl -sSI --max-time 10 "http://YOUR_DOMAIN/" | head -n 1
 ```
 
-The second command must report `HTTP/1.1 308 Permanent Redirect`. An HTTP 200
-on port 80 means the `FrontendConfig` has not reconciled; inspect the Ingress
-events before exposing the application.
+The second command must report `HTTP/1.1 308 Permanent Redirect`. The same
+`FrontendConfig` attaches the Terraform-managed `agentcare-modern-tls`
+policy, which requires TLS 1.2 or newer. An HTTP 200 on port 80 means the
+configuration has not reconciled; inspect the Ingress events before exposing
+the application.
 
 To test the frontend independently of public Ingress readiness, use port
 forwarding:
@@ -544,13 +581,20 @@ curl -sS -c /tmp/agentcare-cookies.txt \
 Submit an emergency test, which needs no model:
 
 ```bash
-curl -sS -b /tmp/agentcare-cookies.txt \
+export SMOKE_FILENAME="agentcare-smoke-$(date -u +%Y%m%dT%H%M%SZ).txt"
+printf 'synthetic AgentCare deployment smoke test\n' \
+  > "/tmp/${SMOKE_FILENAME}"
+curl -fsS -b /tmp/agentcare-cookies.txt \
   -X POST http://localhost:8000/api/requests \
-  -F 'text=I have severe chest pain and cannot breathe'
+  -F 'text=I have severe chest pain and cannot breathe' \
+  -F "files=@/tmp/${SMOKE_FILENAME};type=text/plain"
+gcloud storage ls "gs://${DOCUMENTS_BUCKET}/**${SMOKE_FILENAME}"
 ```
 
 Verify an escalated status, localized emergency guidance and an emergency row
-in the staff queue.
+in the staff queue. The GCS listing must include a newly created object; that
+proves the backend pod's Workload Identity and bucket-scoped objectCreator
+grant handled a real upload.
 
 ### Model-assisted workflow
 
@@ -600,10 +644,10 @@ A clean verdict produces no dedicated success audit event. Absence of an error
 log alone is not proof of a live call. Preserve provider-side evidence or the
 blocked audit row before claiming Model Armor verification.
 
-Remove the temporary cookie file:
+Remove the temporary local files:
 
 ```bash
-rm /tmp/agentcare-cookies.txt
+rm /tmp/agentcare-cookies.txt "/tmp/${SMOKE_FILENAME}"
 ```
 
 ## 16. Roll back

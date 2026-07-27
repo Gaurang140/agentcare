@@ -181,7 +181,7 @@ sequenceDiagram
     G->>CP: interrupt() persists paused state
     G-->>DB: Run becomes waiting_approval
     Staff->>API: Approve or reject escalation
-    API->>DB: Persist reviewer, note and audit
+    API->>DB: Atomically claim run and persist reviewer, note and audit
     API->>G: Command(resume=decision), same thread_id
     G->>CP: Load paused thread
     alt approved uncertainty

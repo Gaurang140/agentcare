@@ -22,13 +22,16 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: ruff check
-        run: ruff check backend
+        run: ruff check backend evals
 
       - name: compile check
-        run: python -m compileall backend -q
+        run: python -m compileall backend evals -q
 
       - name: run tests
-        run: cd backend && pytest -q
+        run: PYTHONPATH=backend python -m pytest -q backend evals/test_evidence_safety.py
+
+      - name: verify eval metric fixture
+        run: python evals/phase2_score.py --selftest
 
   # First-party actions are pinned to the current v7 release commits. These
   # releases run on the runner's node24.
@@ -52,6 +55,9 @@ jobs:
 
       - name: install dependencies
         run: npm ci
+
+      - name: audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
 
       - name: lint
         run: npm run lint
@@ -90,6 +96,29 @@ jobs:
       - name: report the revision reached
         run: cd backend && alembic current
 
+  infrastructure:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: set up OpenTofu
+        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+        with:
+          tofu_version: "1.12.1"
+          tofu_wrapper: false
+
+      - name: check formatting
+        run: tofu fmt -check -recursive
+
+      - name: initialize providers without remote state
+        run: tofu init -backend=false -input=false
+
+      - name: validate configuration
+        run: tofu validate -no-color
+
   manifests:
     # Rendering is not validation: kustomize does no schema check at all.
     # kubeconform validates the rendered output offline against the published
@@ -104,10 +133,10 @@ jobs:
           archive="$RUNNER_TEMP/kubeconform-linux-amd64.tar.gz"
           bin_dir="$RUNNER_TEMP/kubeconform-bin"
           curl -sfL \
-            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
             -o "$archive"
-          # Published in the v0.6.7 release's CHECKSUMS asset.
-          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  $archive" \
+          # Published in the v0.7.0 release's CHECKSUMS asset.
+          echo "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  $archive" \
             | sha256sum -c -
           mkdir -p "$bin_dir"
           tar xzf "$archive" -C "$bin_dir" kubeconform
@@ -115,8 +144,8 @@ jobs:
 
       - name: validate every overlay
         # -ignore-missing-schemas skips the GKE CRDs (BackendConfig,
-        # ManagedCertificate) that have no published schema; every core
-        # resource is still validated strictly.
+        # FrontendConfig, ManagedCertificate and PodMonitoring) that have no
+        # published schema; every core resource is still validated strictly.
         run: |
           for overlay in infra/k8s/overlays/*/; do
             echo "::group::$overlay"

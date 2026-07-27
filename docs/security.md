@@ -187,9 +187,14 @@ Current restrictions are:
 
 - extensions limited to PDF, PNG, JPG, JPEG and TXT
 - maximum size of 10 MB per file
+- maximum of five files and 25 MB combined per request
+- bounded reads stop at the applicable limit plus one byte
 - directory components removed from filenames
 - remaining names normalized to a safe character set
 - content deduplicated by SHA-256 checksum per patient
+
+PDF text extraction stops when the 1,500-character model-input cap is filled
+and never processes more than ten pages.
 
 The storage adapter writes locally by default and can write to GCS when
 configured. The GCS runtime role is bucket-scoped

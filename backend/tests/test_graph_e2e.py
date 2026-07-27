@@ -33,7 +33,6 @@ from app.models import (
 )
 from app.services import workflow_service
 from app.tools.appointment_tools import get_available_slots
-from app.tools.escalation_tools import resolve_escalation
 
 _SLOT_WINDOW_DAYS = 14
 
@@ -111,9 +110,7 @@ def _uncertainty_pause_script() -> list[dict]:
 
 
 def _staff_decision(db, run, *, approved: bool, note: str):
-    """The two steps routes_staff.resolve_escalation_route takes, in its
-    order: record the decision on the escalation row, then hand it to the
-    graph waiting at the interrupt."""
+    """Use the same atomic decision-and-resume boundary as the staff route."""
     escalation = (
         db.query(Escalation)
         .filter_by(workflow_run_id=run.id)
@@ -121,9 +118,13 @@ def _staff_decision(db, run, *, approved: bool, note: str):
         .first()
     )
     assert escalation is not None
-    resolve_escalation(db, escalation.id, _REVIEWER_ID, approved, note)
     return workflow_service.resume_with_decision(
-        db, run.id, approved=approved, note=note, reviewer_id=_REVIEWER_ID
+        db,
+        run.id,
+        escalation.id,
+        approved=approved,
+        note=note,
+        reviewer_id=_REVIEWER_ID,
     )
 
 
@@ -259,6 +260,44 @@ def test_appointment_escalation_is_not_filed_twice(db, seeded, fake_llm):
     assert [e.severity for e in escalations] == ["agent_failure"]
     audit = db.query(AuditEvent).filter_by(action="agent.escalate.completed").one()
     assert audit.metadata_json == {"severity": "agent_failure"}
+    assert len(client.chat.completions.calls) == 6
+
+
+def test_approved_appointment_failure_closes_without_resuming_agents(
+    db, seeded, fake_llm
+):
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {
+                "intent": "book",
+                "department": "Cardiology",
+                "confidence": 0.95,
+                "reason": "routing",
+            },
+            {"next_step": "handle_appointment", "reasoning": "department resolved"},
+            {"slot_id": 999_999, "reason": "invented id"},
+            {"slot_id": 999_998, "reason": "invented again"},
+            {
+                "next_step": "handle_documents",
+                "reasoning": "coordinator missed the escalation",
+            },
+        ]
+    )
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", []
+    )
+    assert run.status == "waiting_approval"
+
+    resumed = _staff_decision(
+        db, run, approved=True, note="handled manually; do not retry the agent"
+    )
+
+    assert resumed.status == "escalated"
+    assert db.query(Appointment).count() == 0
+    assert [(e.severity, e.status) for e in db.query(Escalation).all()] == [
+        ("agent_failure", "approved")
+    ]
     assert len(client.chat.completions.calls) == 6
 
 
@@ -475,7 +514,6 @@ def test_resume_command_contains_only_redacted_staff_guidance(
 
     note = "John Smith: jane.doe@example.com, +49 176 12345678"
     escalation = db.query(Escalation).filter_by(workflow_run_id=run.id).one()
-    resolve_escalation(db, escalation.id, _REVIEWER_ID, True, note)
 
     graph_inputs = []
 
@@ -493,6 +531,7 @@ def test_resume_command_contains_only_redacted_staff_guidance(
     workflow_service.resume_with_decision(
         db,
         run.id,
+        escalation.id,
         approved=True,
         note=note,
         reviewer_id=_REVIEWER_ID,
@@ -506,6 +545,39 @@ def test_resume_command_contains_only_redacted_staff_guidance(
     )
     assert note not in str(graph_inputs[0])
     assert db.get(Escalation, escalation.id).resolution_note == note
+
+
+def test_staff_guidance_redaction_failure_is_contained_after_decision_claim(
+    db, seeded, fake_llm, monkeypatch
+):
+    fake_llm(_uncertainty_pause_script())
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "something about an appointment, maybe", []
+    )
+    escalation = db.query(Escalation).filter_by(workflow_run_id=run.id).one()
+
+    def _explode(*_args, **_kwargs):
+        raise RuntimeError("redactor unavailable")
+
+    monkeypatch.setattr(workflow_service, "redact_text_for_agent", _explode)
+
+    resumed = workflow_service.resume_with_decision(
+        db,
+        run.id,
+        escalation.id,
+        approved=True,
+        note="route to cardiology",
+        reviewer_id=_REVIEWER_ID,
+    )
+
+    assert resumed.status == "failed"
+    assert db.get(Escalation, escalation.id).status == "approved"
+    assert (
+        db.query(Escalation)
+        .filter_by(workflow_run_id=run.id, severity="agent_failure", status="open")
+        .count()
+        == 1
+    )
 
 
 def test_staff_approval_resumes_the_run_and_books_the_appointment(db, seeded, fake_llm):
@@ -704,14 +776,26 @@ def test_second_decision_on_the_same_run_never_invokes_the_graph_twice(
         db, _patient_user(db), "something about an appointment, maybe", []
     )
     assert run.status == "waiting_approval"
+    escalation = db.query(Escalation).filter_by(workflow_run_id=run.id).one()
 
-    # The winner's claim, written straight to the row: the loser's session
-    # keeps the run cached exactly as it read it a moment earlier.
+    # The winner's claim and decision, written without synchronizing the
+    # identity map: this session still holds the loser's stale reads.
     db.execute(
         update(WorkflowRun).where(WorkflowRun.id == run.id).values(status="running"),
         execution_options={"synchronize_session": False},
     )
+    db.execute(
+        update(Escalation)
+        .where(Escalation.id == escalation.id)
+        .values(
+            status="rejected",
+            reviewed_by=_REVIEWER_ID,
+            resolution_note="winner's decision",
+        ),
+        execution_options={"synchronize_session": False},
+    )
     assert db.get(WorkflowRun, run.id).status == "waiting_approval"
+    assert db.get(Escalation, escalation.id).status == "open"
 
     invoked: list = []
 
@@ -723,10 +807,19 @@ def test_second_decision_on_the_same_run_never_invokes_the_graph_twice(
     monkeypatch.setattr(workflow_service, "get_graph", lambda: _CountingGraph())
 
     workflow_service.resume_with_decision(
-        db, run.id, approved=True, note="mine", reviewer_id=_REVIEWER_ID
+        db,
+        run.id,
+        escalation.id,
+        approved=True,
+        note="loser's decision",
+        reviewer_id=_REVIEWER_ID,
     )
 
     assert invoked == []
+    db.expire_all()
+    persisted = db.get(Escalation, escalation.id)
+    assert persisted.status == "rejected"
+    assert persisted.resolution_note == "winner's decision"
 
 
 def test_resume_unknown_workflow_run_raises_not_found(db, seeded, fake_llm):

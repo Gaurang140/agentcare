@@ -19,6 +19,7 @@ overlays/gcp/
   ingress.yaml
   backendconfig.yaml
   frontendconfig.yaml
+  podmonitoring.yaml
   configmap-storage.yaml
   configmap-model-armor.yaml
   serviceaccount-workload-identity.yaml
@@ -71,8 +72,12 @@ kubectl apply -k infra/k8s/overlays/gcp
 Do not apply the application overlay until the Job succeeds. The application
 overlay contains no Job. It includes backend and frontend workloads, GCE
 Ingress, a `FrontendConfig` that redirects HTTP to HTTPS and the long-timeout
-`BackendConfig` used by SSE. The backend container sets
-`SKIP_STARTUP_MIGRATIONS=true`.
+`BackendConfig` used by SSE. A `PodMonitoring` resource collects the existing
+backend `/metrics` endpoint through Google Managed Service for Prometheus. The
+backend container sets `SKIP_STARTUP_MIGRATIONS=true`.
+
+Backend rollouts set `maxSurge: 0` and `maxUnavailable: 1`. This causes brief
+downtime but preserves the one-process scheduler invariant.
 
 ## Verify
 

@@ -190,7 +190,7 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     )
     db.commit()
 
-    if approved and not error:
+    if approved and severity == "uncertainty":
         # escalation_id back to None so the router's short-circuit and
         # _final_status treat the continued run as an ordinary one. The row
         # itself stays, resolved, and is listed as handled so a later handoff

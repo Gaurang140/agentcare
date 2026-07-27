@@ -3,4 +3,6 @@
 # measured safety number the README points at.
 *
 !.gitignore
-!*nokey-baseline*
+!enriched-nokey-baseline.json
+!scores-nokey-baseline.json
+!summary-nokey-baseline.md

@@ -10,6 +10,12 @@ metadata:
 spec:
   # single replica: in-process APScheduler has no distributed lock; scale out only after moving jobs to a worker
   replicas: 1
+  # Never overlap old and new scheduler processes during a rollout.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: backend
@@ -17,13 +23,6 @@ spec:
     metadata:
       labels:
         app: backend
-      annotations:
-        # Scraped by the docker-compose Prometheus locally and by Google
-        # Managed Service for Prometheus on GKE; prometheus-fastapi-instrumentator
-        # exposes /metrics in backend/app/main.py.
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"
-        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: agentcare-backend
       securityContext:
@@ -67,7 +66,7 @@ spec:
               memory: "1Gi"
           livenessProbe:
             httpGet:
-              path: /api/health
+              path: /api/live
               port: 8000
             initialDelaySeconds: 15
             periodSeconds: 15

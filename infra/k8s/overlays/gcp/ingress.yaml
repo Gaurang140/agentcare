@@ -16,7 +16,7 @@ metadata:
     # Ingress can issue a certificate; ManagedCertificate provisioning fails
     # silently (stays "Provisioning") against a domain with no matching DNS.
     networking.gke.io/managed-certificates: "agentcare-cert"
-    networking.gke.io/frontend-config: "agentcare-frontendconfig"
+    networking.gke.io/v1beta1.FrontendConfig: "agentcare-frontendconfig"
 spec:
   rules:
     - http:

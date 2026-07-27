@@ -13,6 +13,11 @@ output "backend_service_account_email" {
   value       = module.iam.backend_service_account_email
 }
 
+output "gke_node_service_account_email" {
+  description = "Dedicated node identity configured on the GKE Autopilot cluster."
+  value       = module.iam.gke_node_service_account_email
+}
+
 output "gke_cluster_name" {
   description = "GKE Autopilot cluster name, for `gcloud container clusters get-credentials`."
   value       = module.gke.cluster_name

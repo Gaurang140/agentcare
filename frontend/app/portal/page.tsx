@@ -15,11 +15,11 @@ import { useCurrentUser } from "@/hooks/use-current-user";
 import { ApiError, listWorkflows, submitRequest } from "@/lib/api";
 import type { WorkflowRunSummary } from "@/lib/types";
 
-/** Mirrors backend/app/api/routes_workflows.py::_validate_upload exactly -
- * client-side check is UX only, the backend re-validates on the actual
- * upload regardless. */
+/** Mirrors the backend upload limits for UX; the API remains authoritative. */
 const ALLOWED_EXTENSIONS = [".pdf", ".png", ".jpg", ".jpeg", ".txt"];
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_FILE_COUNT = 5;
+const MAX_TOTAL_FILE_BYTES = 25 * 1024 * 1024;
 
 function fileExtension(filename: string): string {
   const dot = filename.lastIndexOf(".");
@@ -61,8 +61,14 @@ export default function PortalHomePage() {
     const accepted: File[] = [];
     const rejectedType: string[] = [];
     const rejectedSize: string[] = [];
+    const rejectedTotal: string[] = [];
+    let totalBytes = 0;
 
-    for (const file of selected) {
+    if (selected.length > MAX_FILE_COUNT) {
+      toast.error(`Choose at most ${MAX_FILE_COUNT} files`);
+    }
+
+    for (const file of selected.slice(0, MAX_FILE_COUNT)) {
       if (!ALLOWED_EXTENSIONS.includes(fileExtension(file.name))) {
         rejectedType.push(file.name);
         continue;
@@ -71,7 +77,12 @@ export default function PortalHomePage() {
         rejectedSize.push(file.name);
         continue;
       }
+      if (totalBytes + file.size > MAX_TOTAL_FILE_BYTES) {
+        rejectedTotal.push(file.name);
+        continue;
+      }
       accepted.push(file);
+      totalBytes += file.size;
     }
 
     if (rejectedType.length) {
@@ -79,6 +90,9 @@ export default function PortalHomePage() {
     }
     if (rejectedSize.length) {
       toast.error(`File too large, 10MB max: ${rejectedSize.join(", ")}`);
+    }
+    if (rejectedTotal.length) {
+      toast.error(`Combined files exceed 25MB: ${rejectedTotal.join(", ")}`);
     }
     setFiles(accepted);
   }
@@ -140,7 +154,7 @@ export default function PortalHomePage() {
                 onChange={handleFileChange}
               />
               <p className="text-xs text-muted-foreground">
-                PDF, PNG, JPG or TXT, up to 10MB each.
+                PDF, PNG, JPG or TXT. Up to 5 files, 10MB each and 25MB combined.
               </p>
               {files.length > 0 ? (
                 <ul className="text-xs text-muted-foreground">

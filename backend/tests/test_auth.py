@@ -1,6 +1,8 @@
 """Register / login / me happy path, and the RBAC-adjacent negative cases
 that make sure staff can actually reach the routes patients are denied."""
 
+from app.db.session import get_db
+from app.main import app
 from app.models import AuditEvent
 
 
@@ -126,3 +128,20 @@ def test_health_endpoint(client):
     r = client.get("/api/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok", "db": True}
+
+
+def test_live_endpoint_does_not_require_database(client):
+    original_dependency = app.dependency_overrides[get_db]
+
+    def unavailable_database():
+        raise RuntimeError("database unavailable")
+        yield
+
+    app.dependency_overrides[get_db] = unavailable_database
+    try:
+        response = client.get("/api/live")
+    finally:
+        app.dependency_overrides[get_db] = original_dependency
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}

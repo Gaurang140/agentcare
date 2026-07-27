@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import math
+
+import pytest
+from pydantic import ValidationError
+
 from app.agents import routing, support
 from app.models import Escalation
 from app.safety.pii import resolve_language
@@ -49,6 +54,17 @@ def test_low_confidence_escalates_instead_of_routing(db, seeded, fake_llm):
     escalation = db.get(Escalation, result["escalation_id"])
     assert escalation.severity == "uncertainty"
     assert escalation.workflow_run_id == 1
+
+
+@pytest.mark.parametrize("confidence", [-1, 1.01, 95, math.nan, math.inf])
+def test_routing_output_rejects_confidence_outside_probability_range(confidence):
+    with pytest.raises(ValidationError):
+        routing.RoutingOutput(
+            intent="book",
+            department="Cardiology",
+            confidence=confidence,
+            reason="invalid confidence",
+        )
 
 
 def test_null_department_escalates_for_booking_intent(db, seeded, fake_llm):

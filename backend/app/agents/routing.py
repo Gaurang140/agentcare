@@ -15,6 +15,7 @@ from app.agents.prompts import ROUTING
 from app.agents.llm import invoke_structured
 from app.agents.memory import build_system_prompt
 from app.agents.responses import staff_review_response
+from app.agents.schema_types import Probability
 from app.agents.state import AgentState
 from app.agents.support import record_agent_exit, redact_request_for_agent
 from app.logging_setup import get_logger
@@ -40,7 +41,7 @@ class RoutingOutput(BaseModel):
     # field with a default drops out of "required" and the strict request
     # would 400. `str | None` with no default keeps it required-but-nullable.
     department: str | None
-    confidence: float
+    confidence: Probability
     reason: str
 
 

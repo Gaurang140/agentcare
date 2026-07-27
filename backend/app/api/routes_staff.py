@@ -117,25 +117,28 @@ def resolve_escalation_route(
     if run is not None and run.status == "running":
         raise ValidationError("This request is still being handed over. Try again in a moment.")
 
-    # resolve_escalation writes its own audit event with staff.id as the
-    # real actor - no separate write_audit call needed here.
-    resolve_escalation(db, escalation_id, staff.id, payload.approve, payload.note)
-
     # The decision is not only a record: a run parked at the escalate node's
     # interrupt is waiting for it, and approving an uncertainty case sends
     # that run back to the agents to finish what the patient asked for. Done
     # inline rather than in a background task so the staff member's next
     # screen already shows the outcome; the run is a handful of LLM calls and
-    # a crash inside it is contained by resume_with_decision.
+    # a crash inside it is contained by resume_with_decision. That service
+    # commits the decision and run claim together so a competing reviewer
+    # cannot overwrite the decision that actually resumed the graph.
     if run is not None and run.status == "waiting_approval":
         workflow_service.resume_with_decision(
             db,
             run.id,
+            escalation.id,
             approved=payload.approve,
             note=payload.note,
             reviewer_id=staff.id,
         )
+    else:
+        # Standalone and pre-graph escalations have no interrupted thread.
+        resolve_escalation(db, escalation_id, staff.id, payload.approve, payload.note)
 
+    db.refresh(escalation)
     return _to_escalation_out(escalation)
 
 

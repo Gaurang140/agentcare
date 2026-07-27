@@ -18,6 +18,11 @@ variable "subnetwork_name" {
   type        = string
 }
 
+variable "node_service_account_email" {
+  description = "Dedicated GSA used by Autopilot nodes for system workloads and image pulls."
+  type        = string
+}
+
 variable "cluster_name" {
   description = "GKE cluster name."
   type        = string

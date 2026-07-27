@@ -126,16 +126,22 @@ off to staff instead of inventing results.
 
 ```bash
 cp .env.example .env
+openssl rand -hex 32
 ```
 
-For Groq, put the key only in `.env`:
+Copy the generated value into `JWT_SECRET` in `.env`. Compose deliberately
+refuses to start with an empty authentication secret, including for local
+use.
+
+For live Groq calls, also put the key only in `.env`:
 
 ```dotenv
+JWT_SECRET=replace_with_the_generated_value
 LLM_PROFILE=groq
 LLM_API_KEY=replace_locally
 ```
 
-Generate a private `JWT_SECRET` before any shared or public environment.
+The model key can remain empty for deterministic safety paths and tests.
 
 ### 2A. Start the full stack with Docker
 
@@ -183,7 +189,7 @@ In a second terminal:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
@@ -257,19 +263,28 @@ a second request and the staff audit view, use
 Backend tests inject fake model clients, so they need no key or network:
 
 ```bash
-cd backend
-../.venv/bin/python -m pytest -q
-cd ..
+PYTHONPATH=backend .venv/bin/python -m pytest -q backend evals/test_evidence_safety.py
+.venv/bin/python evals/phase2_score.py --selftest
 .venv/bin/ruff check backend evals
-.venv/bin/python -m compileall backend -q
+.venv/bin/python -m compileall backend evals -q
 ```
 
 Frontend checks:
 
 ```bash
 cd frontend
+npm audit --omit=dev --audit-level=high
 npm run lint
 npm run build
+```
+
+Infrastructure checks:
+
+```bash
+tofu -chdir=infra/terraform fmt -check -recursive
+tofu -chdir=infra/terraform init -backend=false -input=false
+tofu -chdir=infra/terraform validate
+kubectl kustomize infra/k8s/overlays/gcp >/dev/null
 ```
 
 No test count is stated here because it changes with the repository. The

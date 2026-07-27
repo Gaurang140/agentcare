@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.tools import document_tools
 from app.models import Department, PatientDocument
 from app.tools.document_tools import check_required_documents, extract_text, store_document
 
@@ -101,6 +102,50 @@ def test_extract_text_returns_empty_for_unknown_extension():
 
 def test_extract_text_handles_invalid_pdf_bytes_gracefully():
     assert extract_text("broken.pdf", b"not a real pdf") == ""
+
+
+def test_pdf_extraction_stops_after_the_prompt_text_cap(monkeypatch):
+    extracted_pages: list[int] = []
+
+    class Page:
+        def __init__(self, index: int):
+            self.index = index
+
+        def extract_text(self) -> str:
+            extracted_pages.append(self.index)
+            return str(self.index) * 1000
+
+    class Reader:
+        def __init__(self, _source):
+            self.pages = [Page(1), Page(2), Page(3)]
+
+    monkeypatch.setattr(document_tools, "PdfReader", Reader)
+
+    text = extract_text("report.pdf", b"%PDF synthetic")
+
+    assert len(text) == 1500
+    assert extracted_pages == [1, 2]
+
+
+def test_pdf_extraction_caps_sparse_page_processing(monkeypatch):
+    extracted_pages: list[int] = []
+
+    class Page:
+        def __init__(self, index: int):
+            self.index = index
+
+        def extract_text(self) -> str:
+            extracted_pages.append(self.index)
+            return ""
+
+    class Reader:
+        def __init__(self, _source):
+            self.pages = [Page(index) for index in range(20)]
+
+    monkeypatch.setattr(document_tools, "PdfReader", Reader)
+
+    assert extract_text("sparse.pdf", b"%PDF synthetic") == ""
+    assert extracted_pages == list(range(10))
 
 
 def test_gcs_backend_is_wired_and_importable(monkeypatch):

@@ -35,15 +35,32 @@ requests_router = APIRouter(tags=["requests"])
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
 _MAX_FILE_BYTES = 10 * 1024 * 1024
+_MAX_FILE_COUNT = 5
+_MAX_TOTAL_FILE_BYTES = 25 * 1024 * 1024
 _ALLOWED_EXTENSIONS = {".pdf", ".png", ".jpg", ".jpeg", ".txt"}
 
 
-def _validate_upload(filename: str, content: bytes) -> None:
+def _validate_filename(filename: str) -> None:
     ext = Path(filename).suffix.lower()
     if ext not in _ALLOWED_EXTENSIONS:
         raise ValidationError(f"Unsupported file type: {filename!r}")
+
+
+def _read_upload(upload: UploadFile, total_bytes: int) -> tuple[str, bytes]:
+    filename = upload.filename or "upload"
+    _validate_filename(filename)
+
+    remaining_total = _MAX_TOTAL_FILE_BYTES - total_bytes
+    if remaining_total <= 0:
+        raise ValidationError("Combined uploads too large (max 25MB)")
+
+    read_limit = min(_MAX_FILE_BYTES, remaining_total) + 1
+    content = upload.file.read(read_limit)
     if len(content) > _MAX_FILE_BYTES:
         raise ValidationError(f"File too large (max 10MB): {filename!r}")
+    if len(content) > remaining_total:
+        raise ValidationError("Combined uploads too large (max 25MB)")
+    return filename, content
 
 
 def run_workflow_background(workflow_run_id: int, document_ids: list[int] | None = None) -> None:
@@ -72,14 +89,17 @@ def create_request(
     text: Annotated[str, Form()],
     files: Annotated[list[UploadFile], File()] = [],  # noqa: B006 - FastAPI's own idiom
 ) -> CreateRequestResponse:
+    if len(files) > _MAX_FILE_COUNT:
+        raise ValidationError(f"Too many files (max {_MAX_FILE_COUNT})")
+
     # Validate every file before storing any of them, so one rejected file
     # in a multi-file upload never leaves a partial set of documents behind.
     uploads: list[tuple[str, bytes]] = []
+    total_bytes = 0
     for upload in files:
-        content = upload.file.read()
-        filename = upload.filename or "upload"
-        _validate_upload(filename, content)
+        filename, content = _read_upload(upload, total_bytes)
         uploads.append((filename, content))
+        total_bytes += len(content)
 
     document_ids = [
         store_document(db, current_user.id, filename, content, None)["id"]

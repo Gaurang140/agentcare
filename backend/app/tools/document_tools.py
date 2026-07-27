@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from itertools import islice
 
 from pypdf import PdfReader
 from sqlalchemy.orm import Session
@@ -13,6 +14,7 @@ from app.services.storage import get_storage
 from app.tools.audit_tools import write_audit
 
 _EXTRACT_CHARS = 1500
+_MAX_PDF_PAGES = 10
 
 # Filename substring -> document_type, checked before any caller-supplied
 # LLM classification. The first matching hint group wins.
@@ -42,10 +44,19 @@ def extract_text(filename: str, content: bytes) -> str:
     if lowered.endswith(".pdf"):
         try:
             reader = PdfReader(io.BytesIO(content))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
+            chunks: list[str] = []
+            remaining = _EXTRACT_CHARS
+            for page in islice(reader.pages, _MAX_PDF_PAGES):
+                page_text = page.extract_text() or ""
+                if not page_text:
+                    continue
+                chunks.append(page_text[:remaining])
+                remaining -= len(chunks[-1])
+                if remaining == 0:
+                    break
         except Exception:  # noqa: BLE001 - extraction is best-effort
             return ""
-        return text[:_EXTRACT_CHARS]
+        return "\n".join(chunks)[:_EXTRACT_CHARS]
     if lowered.endswith(".txt"):
         return content.decode("utf-8", errors="ignore")[:_EXTRACT_CHARS]
     return ""

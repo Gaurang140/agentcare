@@ -19,8 +19,10 @@ from langchain_core.runnables import RunnableLambda
 from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from pydantic import BaseModel
 
+from app.agents import llm as llm_module
 from app.agents.followup import FollowupOutput
 from app.agents.llm import LLMOutputError, invoke_structured, set_llm_client_for_tests
+from app.agents.model_config import LLMProfiles, ModelProfile
 
 # The scripted openai-SDK-shaped fake lives in conftest.py, shared with the
 # agent-node tests.
@@ -167,6 +169,28 @@ def test_invoke_structured_strict_schema_happy_path():
     assert len(client.chat.completions.calls) == 1
     call = client.chat.completions.calls[0]
     assert call["response_format"] is _Verdict
+
+
+def test_keyless_local_fallback_constructs_with_placeholder_credential(monkeypatch):
+    monkeypatch.setattr(
+        llm_module.settings,
+        "llm_fallback_base_url",
+        "http://localhost:1234/v1",
+    )
+    monkeypatch.setattr(llm_module.settings, "llm_fallback_api_key", "")
+    profiles = LLMProfiles(
+        primary=ModelProfile(model="primary"),
+        fallback=ModelProfile(
+            provider="openai",
+            model="local-model",
+            base_url="http://localhost:1234/v1",
+        ),
+        injection_guard_model="",
+    )
+
+    fallback = llm_module._resolve_fallback(profiles)
+
+    assert fallback is not None
 
 
 def test_invoke_structured_sends_recursively_strict_schema():

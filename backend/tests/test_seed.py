@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.db.seed import seed
-from app.models import AGENT_NAMES, AgentRule, Department, RequiredDocument
+from app.models import AGENT_NAMES, AgentRule, Department, Doctor, RequiredDocument
 
 
 def _fresh_session() -> Session:
@@ -56,10 +56,7 @@ def test_seed_is_idempotent_and_meets_minimum_counts() -> None:
         db.close()
 
 
-def test_agent_rules_seeded_even_on_a_db_already_past_the_department_gate() -> None:
-    """A db seeded before this feature shipped already has Department rows,
-    so seed()'s main idempotency check short-circuits - _seed_agent_rules
-    must still run and insert the default rules on that next call."""
+def test_partial_database_is_repaired_without_removing_custom_catalog_rows() -> None:
     db = _fresh_session()
     try:
         db.add(Department(name="Pre-existing Department"))
@@ -68,11 +65,78 @@ def test_agent_rules_seeded_even_on_a_db_already_past_the_department_gate() -> N
 
         counts = seed(db)
 
+        assert counts["departments"] == 6
+        assert counts["doctors"] == 10
+        assert counts["slots"] >= 1000
+        assert counts["required_documents"] == 4
         assert counts["agent_rules"] == 12
+        assert db.query(Department).filter_by(name="Pre-existing Department").one()
+        assert db.query(Department).filter_by(name="Cardiology").one()
         assert db.query(AgentRule).count() == 12
 
-        # A second call stays idempotent.
+        assert seed(db) == counts
+    finally:
+        db.close()
+
+
+def test_custom_rule_does_not_prevent_missing_defaults_from_being_seeded() -> None:
+    db = _fresh_session()
+    try:
+        db.add(
+            AgentRule(
+                agent_name="routing",
+                rule_text="A staff-authored rule that is not a default.",
+                source="staff",
+            )
+        )
+        db.commit()
+
         seed(db)
-        assert db.query(AgentRule).count() == 12
+
+        defaults = db.query(AgentRule).filter_by(source="seed").all()
+        assert len(defaults) == 12
+        assert db.query(AgentRule).count() == 13
+
+        seed(db)
+        assert db.query(AgentRule).count() == 13
+    finally:
+        db.close()
+
+
+def test_seed_tolerates_duplicate_canonical_doctors() -> None:
+    db = _fresh_session()
+    try:
+        cardiology = Department(name="Cardiology")
+        db.add(cardiology)
+        db.flush()
+        db.add_all(
+            [
+                Doctor(department_id=cardiology.id, name="Dr. Anna Beispiel"),
+                Doctor(department_id=cardiology.id, name="Dr. Anna Beispiel"),
+            ]
+        )
+        db.commit()
+
+        counts = seed(db)
+
+        assert (
+            db.query(Doctor)
+            .filter_by(
+                department_id=cardiology.id,
+                name="Dr. Anna Beispiel",
+            )
+            .count()
+            == 2
+        )
+        assert (
+            db.query(Doctor)
+            .filter_by(
+                department_id=cardiology.id,
+                name="Dr. Thomas Krause",
+            )
+            .count()
+            == 1
+        )
+        assert seed(db) == counts
     finally:
         db.close()

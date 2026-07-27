@@ -70,9 +70,20 @@ docs/        # architecture, security, demo and GCP deployment guides
 (cd backend && ../.venv/bin/alembic upgrade head)   # migrate (sqlite default)
 .venv/bin/python scripts/seed_demo.py               # from repo root, idempotent
 (cd backend && ../.venv/bin/python -m uvicorn app.main:app --reload)
-(cd backend && ../.venv/bin/python -m pytest -q)    # full suite, must stay green
-.venv/bin/ruff check backend                        # must stay clean
-.venv/bin/python -m compileall backend -q           # must stay clean
+PYTHONPATH=backend .venv/bin/python -m pytest -q backend evals/test_evidence_safety.py
+.venv/bin/python evals/phase2_score.py --selftest
+.venv/bin/ruff check backend evals                  # must stay clean
+.venv/bin/python -m compileall backend evals -q     # must stay clean
+# frontend
+npm --prefix frontend ci
+npm --prefix frontend audit --omit=dev --audit-level=high
+npm --prefix frontend run lint
+npm --prefix frontend run build
+# infrastructure
+tofu -chdir=infra/terraform fmt -check -recursive
+tofu -chdir=infra/terraform init -backend=false -input=false
+tofu -chdir=infra/terraform validate
+kubectl kustomize infra/k8s/overlays/gcp
 # full stack
 docker compose up --build
 ```

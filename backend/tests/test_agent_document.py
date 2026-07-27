@@ -4,6 +4,11 @@ LLM, persist the classification, then report required-document coverage.
 
 from __future__ import annotations
 
+import math
+
+import pytest
+from pydantic import ValidationError
+
 from app.agents import document
 from app.models import AuditEvent, Department, PatientDocument
 
@@ -73,6 +78,12 @@ def test_low_confidence_classification_is_not_persisted(db, seeded, fake_llm):
     )
     assert audit is not None
     assert audit.metadata_json == {"confidence": 0.3, "suggested": "blood_test"}
+
+
+@pytest.mark.parametrize("confidence", [-1, 1.01, 95, math.nan, math.inf])
+def test_document_output_rejects_confidence_outside_probability_range(confidence):
+    with pytest.raises(ValidationError):
+        document.DocumentOutput(document_type="blood_test", confidence=confidence)
 
 
 def test_already_typed_document_is_not_reclassified(db, seeded, fake_llm):

@@ -81,6 +81,43 @@ def test_resolve_escalation_persists_reviewer_note_and_audit(staff_client, db_se
     assert audit.actor_id == staff.id
 
 
+def test_second_standalone_decision_cannot_overwrite_the_winner(
+    staff_client, db_session
+):
+    escalation = Escalation(
+        workflow_run_id=None,
+        reason="standalone review",
+        severity="safety",
+        status="open",
+    )
+    db_session.add(escalation)
+    db_session.commit()
+
+    first = staff_client.post(
+        f"/api/staff/escalations/{escalation.id}/resolve",
+        json={"approve": True, "note": "first decision"},
+    )
+    second = staff_client.post(
+        f"/api/staff/escalations/{escalation.id}/resolve",
+        json={"approve": False, "note": "late overwrite attempt"},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "approved"
+    assert second.json()["resolution_note"] == "first decision"
+    assert (
+        db_session.query(AuditEvent)
+        .filter_by(
+            action="escalation.resolved",
+            entity_type="escalation",
+            entity_id=escalation.id,
+        )
+        .count()
+        == 1
+    )
+
+
 def test_resolve_escalation_hands_the_decision_to_a_paused_workflow(
     staff_client, db_session, fake_llm, isolated_checkpointer
 ):

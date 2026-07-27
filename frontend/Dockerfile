@@ -22,12 +22,11 @@ ENV NODE_ENV=production
 RUN groupadd --system --gid 1001 nodejs \
     && useradd --system --uid 1001 --gid nodejs nextjs
 
-# Next 16 standalone output: server.js + a pruned node_modules from
-# .next/standalone, static assets from .next/static (not included in
-# standalone), and public/ copied separately.
+# Next 16 standalone output: server.js plus pruned node_modules from
+# .next/standalone. Static assets are copied separately because standalone
+# does not include them. The application has no public/ assets.
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 
 USER nextjs
 EXPOSE 3000

@@ -175,7 +175,7 @@ def _resolve_fallback(profiles) -> BaseChatModel | None:
         model = ChatOpenAI(
             model=fallback.model,
             base_url=fallback.base_url,
-            api_key=api_key,
+            api_key=api_key or "missing-key",
             timeout=fallback.timeout,
             max_retries=0,
         )

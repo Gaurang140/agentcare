@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root .env, resolved independent of the process working directory.
@@ -79,6 +80,22 @@ class Settings(BaseSettings):
     environment: str = "dev"
     log_level: str = "INFO"
     frontend_origin: str = "http://localhost:3000"
+
+    @model_validator(mode="after")
+    def reject_unsafe_production_jwt_secret(self) -> "Settings":
+        if self.environment.strip().lower() in {"dev", "development", "test"}:
+            return self
+
+        secret = self.jwt_secret.strip()
+        if (
+            len(secret) < 32
+            or secret == "change_me_generate_a_long_random_string"
+        ):
+            raise ValueError(
+                "JWT_SECRET must be a unique random value of at least 32 "
+                "characters outside development"
+            )
+        return self
 
 
 settings = Settings()

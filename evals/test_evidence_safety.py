@@ -1,6 +1,10 @@
 import json
+from pathlib import Path
 
 from evals import phase1_run, phase2_score
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _enriched(run_id: str) -> dict:
@@ -123,3 +127,33 @@ def test_pending_judge_points_to_a_new_output_run_id(monkeypatch):
 
     assert result["status"] == "pending"
     assert "new --run-id" in result["reason"]
+
+
+def test_only_reviewed_baseline_files_are_unignored():
+    rules = {
+        line
+        for line in (REPO_ROOT / "evals/results/.gitignore")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line and not line.startswith("#")
+    }
+
+    assert rules == {
+        "*",
+        "!.gitignore",
+        "!enriched-nokey-baseline.json",
+        "!scores-nokey-baseline.json",
+        "!summary-nokey-baseline.md",
+    }
+
+
+def test_committed_pending_reason_matches_current_scorer(monkeypatch):
+    monkeypatch.delenv("JUDGE_GROQ", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    baseline = json.loads(
+        (REPO_ROOT / "evals/results/scores-nokey-baseline.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert baseline["judge"]["reason"] == phase2_score.run_judge([])["reason"]

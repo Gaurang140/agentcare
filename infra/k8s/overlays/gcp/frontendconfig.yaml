@@ -3,6 +3,7 @@ kind: FrontendConfig
 metadata:
   name: agentcare-frontendconfig
 spec:
+  sslPolicy: agentcare-modern-tls
   redirectToHttps:
     enabled: true
     responseCodeName: PERMANENT_REDIRECT

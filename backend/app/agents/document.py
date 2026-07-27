@@ -64,6 +64,7 @@ from app.agents.prompts import DOCUMENT
 from app.agents.llm import invoke_structured
 from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language
+from app.agents.schema_types import Probability
 from app.agents.state import AgentState
 from app.agents.support import record_agent_exit
 from app.logging_setup import get_logger
@@ -94,7 +95,7 @@ class DocumentOutput(BaseModel):
     document_type: Literal[
         "ecg_report", "blood_test", "referral_letter", "imaging_report", "insurance_card", "other"
     ]
-    confidence: float
+    confidence: Probability
 
 
 def _classification_prompt(filename: str, extracted_text: str) -> str:

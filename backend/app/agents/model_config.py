@@ -177,7 +177,15 @@ def load_llm_profiles(
     guard_profile_name = str(guard.get("profile", ""))
     raw_guard = data.get("profiles", {}).get(guard_profile_name) if guard_profile_name else None
     if isinstance(raw_guard, dict):
-        guard_profile = _profile_from_mapping(raw_guard)
+        candidate = _profile_from_mapping(raw_guard)
+        if candidate is not None and candidate.provider == "openai":
+            guard_profile = candidate
+        else:
+            logger.warning(
+                "injection_guard_profile_not_openai_compatible",
+                profile=guard_profile_name,
+                provider=candidate.provider if candidate is not None else None,
+            )
     elif primary.provider == "openai":
         guard_profile = primary
     else:

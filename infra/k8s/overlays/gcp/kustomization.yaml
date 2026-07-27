@@ -6,6 +6,7 @@ resources:
   - ingress.yaml
   - backendconfig.yaml
   - frontendconfig.yaml
+  - podmonitoring.yaml
 
 patches:
   # Uploads go to a bucket rather than to the pod's own filesystem. Without
@@ -36,8 +37,8 @@ patches:
           cloud.google.com/backend-config: '{"default": "backend-backendconfig"}'
 
 # REGION-docker.pkg.dev/PROJECT/agentcare/{backend,frontend} are placeholders.
-# The manual runbook rewrites both names and tags to immutable Artifact
-# Registry images before rendering.
+# The manual runbook rewrites both names and tags to Git-SHA-addressed
+# Artifact Registry images before rendering.
 images:
   - name: agentcare-backend
     newName: REGION-docker.pkg.dev/PROJECT/agentcare/backend

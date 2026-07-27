@@ -7,6 +7,30 @@ resource "google_service_account" "backend" {
   description  = "Identity for the FastAPI/LangGraph backend pod. Terraform binds the agentcare-backend Kubernetes service account to it without downloading a key."
 }
 
+# Autopilot still needs a node identity for system workloads and image pulls.
+# Use a dedicated account instead of relying on the project's default Compute
+# Engine account or legacy automatic Editor grants.
+resource "google_service_account" "gke_nodes" {
+  project      = var.project_id
+  account_id   = "agentcare-gke-nodes"
+  display_name = "AgentCare GKE node runtime"
+  description  = "Node identity for the AgentCare GKE Autopilot cluster."
+}
+
+resource "google_project_iam_member" "gke_nodes_default_role" {
+  project = var.project_id
+  role    = "roles/container.defaultNodeServiceAccount"
+  member  = "serviceAccount:${google_service_account.gke_nodes.email}"
+}
+
+resource "google_artifact_registry_repository_iam_member" "gke_nodes_reader" {
+  project    = var.project_id
+  location   = var.region
+  repository = var.artifact_registry_repository_id
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${google_service_account.gke_nodes.email}"
+}
+
 # Bucket-scoped and create-only: uploads use UUID object names, and the runtime
 # has no read, list, overwrite or delete operation against GCS.
 resource "google_storage_bucket_iam_member" "backend_bucket_object_creator" {

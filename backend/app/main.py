@@ -84,6 +84,11 @@ app.include_router(events_router, prefix="/api")
 app.include_router(patient_router, prefix="/api")
 
 
+@app.get("/api/live")
+def live() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/api/health")
 def health(db: Annotated[Session, Depends(get_db)]) -> dict:
     db.execute(text("SELECT 1"))
