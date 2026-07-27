@@ -372,7 +372,7 @@ diagram is [docs/architecture.mmd](docs/architecture.mmd).
 cd backend && ../.venv/bin/python -m pytest -q
 ```
 
-317 tests pass. They cover the agents (each with an injected fake model, no
+338 tests pass. They cover the agents (each with an injected fake model, no
 network and no keys), the tools and deterministic safety guardrails (the
 prompt-injection guard including document filenames, the PII redaction boundary
 in both languages and the English and German output sanitizer), replay-safe
@@ -420,7 +420,7 @@ agentcare/
   backend/            FastAPI + LangGraph service
     app/              config, models, auth, safety, tools, agents, services, api
     alembic/          migration environment and versions
-    tests/            317 pytest tests (unit, RBAC, fake-LLM end-to-end)
+    tests/            338 pytest tests (unit, RBAC, fake-LLM end-to-end)
     Dockerfile
   frontend/           Next.js 16 App Router, Tailwind v4, shadcn/ui
     app/              login, register, patient portal, staff portal
