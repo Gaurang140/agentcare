@@ -328,9 +328,11 @@ their decision.
    `backend/app/safety/injection_guard.py::screen_injection` runs on the patient's request
    text and on a document's extracted text before either reaches a prompt. Layer 1 is always
    on: EN/German regex for known injection phrasing, a 120+ character base64-looking run and
-   role markers such as `assistant:` or `<|im_start|>`. Layer 2 is optional: a small
-   classifier on Groq, used only when both `LLM_API_KEY` and `INJECTION_GUARD_MODEL` are
-   set, and a classifier failure logs and falls back to layer 1 rather than blocking. Text
+   role markers such as `assistant:` or `<|im_start|>`. Layer 2 is optional and has two
+   providers for one slot: Google Model Armor when `MODEL_ARMOR_TEMPLATE` is set (the GCP
+   path, and it wins when both are configured), otherwise a small classifier on Groq when
+   both `LLM_API_KEY` and `INJECTION_GUARD_MODEL` are set. Either one failing logs and falls
+   back to layer 1 rather than blocking, and with neither configured layer 1 runs alone. Text
    that clears the guard then passes through `backend/app/safety/pii.py::redact_for_llm`,
    which replaces email addresses, phone numbers, IBANs, German health-insurance numbers and
    date-of-birth-shaped dates with typed `[REDACTED_...]` tokens. The redaction applies only

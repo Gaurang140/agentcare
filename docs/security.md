@@ -22,10 +22,10 @@ agent is traceable to the account that added it. Nothing that is stored is rewri
 this. Screening and redaction apply to the copy heading for the model, never to the database row
 and never to what the patient is shown.
 
-## The three safety layers
+## The safety layers
 
-Safety is defense in depth. Two of the three layers are deterministic and cannot be talked out of
-their decision by a model.
+Safety is defense in depth. The first layer and the last are deterministic and cannot be talked
+out of their decision by a model. The third runs only on the GCP path.
 
 1. **Deterministic pre-screen** (`backend/app/safety/guardrails.py::screen_request`). Runs in
    `workflow_service.create_run` before any graph node or LLM call. It matches the inbound request
@@ -41,7 +41,14 @@ their decision by a model.
    fails, finalize does not block: it falls back to the deterministic layer below and still ships a
    safe answer.
 
-3. **Output sanitizer** (`backend/app/safety/guardrails.py::sanitize_agent_output`). The last word.
+3. **Response screen** (`backend/app/safety/model_armor.py::screen_response`), on the GCP path
+   only. The composed answer goes to Model Armor immediately before the sanitizer below. A flagged
+   draft is replaced with the same referral sentence the sanitizer uses, and one
+   `safety.model_armor_blocked` audit row records the filter categories, never the draft. With
+   `MODEL_ARMOR_TEMPLATE` empty, or when the call fails or returns something the adapter cannot
+   read, the draft passes through untouched and the path is what it was.
+
+4. **Output sanitizer** (`backend/app/safety/guardrails.py::sanitize_agent_output`). The last word.
    It splits the candidate response into sentences and replaces any whole sentence that matches a
    forbidden pattern (states a diagnosis, an explicit dosage like "take 5mg" or a treatment
    recommendation) with a fixed referral to the care team. Because it swaps whole sentences, nothing
@@ -62,14 +69,22 @@ filename with `_` and `-` read as spaces), all before that text reaches a prompt
 on: EN/German regex for known injection phrasing ("ignore previous instructions", "vergiss alle
 Anweisungen"), a 120+ character base64-looking run and role markers (`assistant:`,
 `<|im_start|>`, `[INST]`). It reads the readings in order and reports which one blocked. Layer 2,
-optional: a classifier (`agents/llm.py::classify_injection`, default
-`meta-llama/llama-prompt-guard-2-86m` on Groq) used only when `LLM_API_KEY` and
-`INJECTION_GUARD_MODEL` are set; it reads a PII-redacted copy of the text, costs at most one call
-per document because the readings reach it joined into one input, and a classifier failure logs
-and falls back to layer 1, never blocks on its own. A blocked request escalates as `safety`;
-a blocked document is left typed `other` and the run continues, with the audit row naming the
-reading that blocked. Model Armor is the GCP-native scale path for layer 2, documented but not
-built here (`docs/decisions.md` ADR-15).
+optional: one model call, which reads a PII-redacted copy of the text, costs at most one call per
+document because the readings reach it joined into one input, and never blocks on its own when it
+fails, logging and falling back to layer 1 instead. A blocked request escalates as `safety`; a
+blocked document is left typed `other` and the run continues, with the audit row naming the
+reading that blocked.
+
+Layer 2 is one slot with two providers. Google Model Armor holds it when `MODEL_ARMOR_TEMPLATE`
+is set (`safety/model_armor.py`, the GCP path, prompt-injection and jailbreak detection at
+confidence level HIGH plus malicious URI detection); the Groq-hosted prompt guard holds it
+otherwise (`agents/llm.py::classify_injection`, default `meta-llama/llama-prompt-guard-2-86m`,
+used when `LLM_API_KEY` and `INJECTION_GUARD_MODEL` are both set). With both configured Model
+Armor wins, so a request pays for one round trip and not two. Layer 1 is unchanged by any of
+this and always runs first, redaction happens before either provider is called, and `via` on a
+block names which one decided (`deterministic`, `model_armor` or `classifier`). Model Armor's
+own PII detection stays off: Presidio already redacts in-process, and a second detector would
+duplicate it (`docs/decisions.md` ADR-15).
 
 ## PII boundary
 

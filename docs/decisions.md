@@ -489,9 +489,10 @@ state at that time rather than assumed now.
 
 **Status:** Presidio implemented now (`backend/app/safety/pii.py`, pinned in the root
 `requirements.txt`). NeMo Guardrails evaluated and deferred: no code, no dependency and no
-setting for it in this repo. Google Model Armor designed for the deployed path, not applied.
+setting for it in this repo. Google Model Armor implemented on 2026-07-27 for the deployed path
+(`backend/app/safety/model_armor.py`), when the GCP project it needs came into existence.
 AWS Bedrock Guardrails and LLM Guard rejected. Every version and date below was verified on
-2026-07-25.
+2026-07-25, and the Model Armor bullet again on 2026-07-27.
 
 **Context.** Model independence is a hard requirement here. The operator selects any
 OpenAI-compatible endpoint through `.env` alone (Groq, LM Studio, a llama.cpp server), so
@@ -503,10 +504,11 @@ the upgrade. This ADR records which guardrail libraries join that stack, on what
 which ones were turned down.
 
 **Decision.** Adopt **Microsoft Presidio** for NER-based PII detection at the prompt boundary.
-**Defer NVIDIA NeMo Guardrails 0.23.0**, recorded as viable and unbuilt. Document **Google Model
-Armor** as the GCP-native screening layer for the deployed path only. Reject **AWS Bedrock
-Guardrails**, **LLM Guard** by Protect AI and any Groq-hosted **Llama Guard 4** or **Llama
-Prompt Guard 2** as a required dependency.
+**Defer NVIDIA NeMo Guardrails 0.23.0**, recorded as viable and unbuilt. Adopt **Google Model
+Armor** as the GCP-native screening provider for the deployed path only, filling the layer-2
+slot the injection guard already has. Reject **AWS Bedrock Guardrails**, **LLM Guard** by
+Protect AI and any Groq-hosted **Llama Guard 4** or **Llama Prompt Guard 2** as a required
+dependency.
 
 **Why.**
 
@@ -542,14 +544,42 @@ Prompt Guard 2** as a required dependency.
   `safety` escalation, an audit row carrying rail name and category only) and fail-open with
   evidence, meaning one `rails_unavailable` warning plus a `safety.rails_skipped` audit row
   whenever the rails runtime errors.
-- **Model Armor, the deployed-path layer.** It is GCP-native and screens prompts and responses
-  as a service call: available in `europe-west3` (the region this deployment already uses for EU
-  data residency), with EU residency controls, English and German detection and a free tier of
-  2 million screened tokens per month. Its place is between the
-  deterministic screens and the LLM once the app actually runs on GCP, never as a local
-  dependency, because it is a network call and the local no-key path has to keep working with no
-  network at all. `docs/security.md` names it as the scale path for the optional injection
-  classifier for the same reason.
+- **Model Armor, adopted for the deployed path.** It is GCP-native and screens prompts and
+  responses as a service call: available in `europe-west3` (the region this deployment already
+  uses for EU data residency), with EU residency controls, English and German detection and a
+  free tier of 2 million screened tokens per month. This ADR first recorded it as designed and
+  not applied, for one reason only: it is a GCP runtime dependency and no GCP project existed.
+  That reason ended on 2026-07-27 with the first real deploy, so it shipped.
+  What shipped is a provider, not a layer. The injection guard already had two layers, and the
+  second one is a slot: one optional model call, enabled by configuration, fail-open on any
+  error. Model Armor fills that slot when `MODEL_ARMOR_TEMPLATE` is set and the Groq
+  prompt-guard model fills it otherwise, the same shape `services/storage.py` uses for local and
+  GCS document storage. It also screens the drafted answer immediately before the deterministic
+  output sanitizer. Layer 1 still decides first, the deterministic sanitizer still decides last,
+  and with no template configured the code path is what it was, which keeps the no-key demo path
+  and every non-GCP deployment unchanged. `google-cloud-modelarmor` 0.7.1 is pinned in the root
+  `requirements.txt` and imported lazily, so a machine without the package still runs the app.
+  Which control owns what, and why not the other one:
+
+  | Concern | Owner | Why not the other |
+  |---|---|---|
+  | Known injection phrasing, healthcare boundary, emergency and medical refusal | deterministic code | must work with no network and no key |
+  | Prompt injection and jailbreak detection by model | Model Armor (layer 2) | replaces the Groq prompt-guard call in the same slot |
+  | Malicious URI in patient text | Model Armor | AgentCare has no URL screening at all today, so this is additive |
+  | PII detection and redaction | Presidio, locally | Model Armor's SDP settings stay OFF: a second PII detector is duplication, and the local one works with no cloud |
+  | Final healthcare-boundary sanitizing of the answer | deterministic `sanitize_agent_output` | keeps the last word, so a cloud outage can never let a diagnosis through |
+
+  The SDP row is the one worth stating twice, because turning those settings on is a one-line
+  change someone will be tempted to make: Presidio already redacts before any text leaves the
+  process, so the copy Model Armor sees carries `[REDACTED_EMAIL]` and friends rather than
+  patient values, and a cloud detector would be a second answer to a question already answered
+  in-process. The Terraform module carries that reasoning as a comment on the line where
+  `sdp_settings` would go. Filter settings that are on: prompt injection and jailbreak at
+  confidence level HIGH, which is Google's own recommendation for minimizing false positives and
+  matters here because a false positive blocks a real patient from booking, plus malicious URI
+  detection. Cost of the choice: one network round trip in a request the patient is waiting on,
+  capped at a 2 second timeout, and a GCP dependency that is a configuration value rather than an
+  import.
 - **AWS Bedrock Guardrails, rejected.** A managed service tied to one provider's runtime. It
   contradicts the model-independence requirement directly, and the deployment target here is
   GCP, so it would also mean a second cloud account for one control.
@@ -572,8 +602,9 @@ alternative) and `docs/security.md` for how the layers sit in the request path.
 
 **Revisit when.** Rails: the deterministic layer plus Presidio stops covering a failure class
 the test suite can name, and there is time to run a new framework in front of real traffic.
-Model Armor: the first real GCP deploy, where it becomes a configuration change rather than a
-new dependency. Presidio: a larger German model fits the machine budget (the small model
+Model Armor: the free tier of 2 million tokens a month stops covering real traffic, or a
+measured false-positive rate at confidence level HIGH argues for a different one. Presidio: a
+larger German model fits the machine budget (the small model
 over-tags German function words as names, which over-redacts and costs prompt quality, not
 privacy), or Cloud DLP's managed detectors beat maintaining a local pattern list once the app
 runs on GCP.

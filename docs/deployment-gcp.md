@@ -20,16 +20,17 @@ and the verified costs.
 
 ## What gets built
 
-Terraform (`infra/terraform/`, five modules) provisions:
+Terraform (`infra/terraform/`, six modules) provisions:
 
 | Resource | Detail |
 |---|---|
 | Artifact Registry | Docker repository `agentcare` in `var.region`, cleanup policy keeping the last 10 versions per package |
 | GCS | Bucket `PROJECT_ID-agentcare-documents` in `var.gcs_location`, uniform bucket-level access, public access prevention enforced |
-| IAM runtime | Service accounts `agentcare-backend` (bucket-scoped `storage.objectAdmin`, project `secretmanager.secretAccessor`, plus `cloudsql.client` when Cloud SQL is enabled) and `agentcare-frontend` (no extra roles) |
+| IAM runtime | Service accounts `agentcare-backend` (bucket-scoped `storage.objectAdmin`, project `secretmanager.secretAccessor`, plus `cloudsql.client` when Cloud SQL is enabled and `modelarmor.user` when Model Armor is) and `agentcare-frontend` (no extra roles) |
 | IAM CI | Service account `agentcare-deploy` (`artifactregistry.writer`, `container.developer`) plus a Workload Identity pool and provider pinned to one GitHub repository |
 | GKE | Autopilot cluster `agentcare` in `var.region`, REGULAR release channel, Workload Identity enabled, deletion protection off |
 | Cloud SQL | PostgreSQL 17 instance `agentcare-postgres`, `db-f1-micro` on the ENTERPRISE edition, private IP only, created when `enable_cloud_sql` is true (the default) |
+| Model Armor | Screening template `agentcare` in `var.region`, prompt-injection and jailbreak filtering at confidence level HIGH plus malicious URI filtering, SDP off because Presidio owns PII in-process, created when `enable_model_armor` is true (the default) |
 
 Defaults you inherit unless you override them: `region` and `gcs_location` are `europe-west3`
 for EU data residency, `enable_cloud_sql` is `true` and the Cloud SQL module peers the
@@ -47,6 +48,7 @@ Kubernetes (`infra/k8s/`) is a kustomize base plus a `gcp` overlay:
 | `agentcare` Ingress (overlay) | GCE class, `/api` to the backend Service and `/` to the frontend Service, plus a `ManagedCertificate` named `agentcare-cert` |
 | `backend-backendconfig` (overlay) | `timeoutSec: 3600` so the load balancer does not cut the SSE workflow timeline at its 30 second default |
 | ConfigMap storage patch (overlay) | `STORAGE_BACKEND: gcs` and `GCS_BUCKET: REPLACE_ME` |
+| ConfigMap Model Armor patch (overlay) | `MODEL_ARMOR_TEMPLATE: REPLACE_ME` and `MODEL_ARMOR_LOCATION: europe-west3` |
 
 **The backend runs at one replica on purpose.** Its APScheduler jobs (due reminders every 60
 seconds, a stalled-workflow sweep every 600 seconds) run in the same process that serves
@@ -91,7 +93,7 @@ kustomize version
 
 `kubectl` carries kustomize's engine already, which covers rendering (`kubectl kustomize`) and
 applying (`kubectl apply -k`). The standalone binary is needed only for
-`kustomize edit set image` in Step 9; CI installs it at 5.8.1
+`kustomize edit set image` in Step 10; CI installs it at 5.8.1
 (`.github/workflows/deploy.yml`).
 
 Plain Terraform runs the same files: substitute `terraform` for `tofu` in every command below.
@@ -127,6 +129,7 @@ gcloud services enable \
   sqladmin.googleapis.com \
   servicenetworking.googleapis.com \
   secretmanager.googleapis.com \
+  modelarmor.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   sts.googleapis.com
@@ -288,9 +291,10 @@ kubectl create secret generic agentcare-secrets --from-literal=JWT_SECRET=new_va
 Delete-and-recreate would leave the app without a Secret in between, which restarts pods into a
 crash loop.
 
-The non-secret half lives in `infra/k8s/base/configmap.yaml`. Two values there need editing
-before a real deploy: `FRONTEND_ORIGIN` is a placeholder, and the overlay's `GCS_BUCKET` is
-`REPLACE_ME` (the real name is the `documents_bucket_name` output).
+The non-secret half lives in `infra/k8s/base/configmap.yaml`. Three values there need editing
+before a real deploy: `FRONTEND_ORIGIN` is a placeholder, the overlay's `GCS_BUCKET` is
+`REPLACE_ME` (the real name is the `documents_bucket_name` output) and the overlay's
+`MODEL_ARMOR_TEMPLATE` is `REPLACE_ME` too (Step 9).
 
 ---
 
@@ -322,7 +326,50 @@ wired: see `.github/workflows/deploy.yml` and the `workload_identity_provider` o
 
 ---
 
-## Step 9 - Point the overlay at your images and apply it
+## Step 9 - Point the backend at the Model Armor template
+
+Model Armor fills the injection guard's optional second layer on this deployment and screens the
+drafted answer just before the deterministic sanitizer (`docs/security.md`, `docs/decisions.md`
+ADR-15). Most of it is already done by the time you get here: `modelarmor.googleapis.com` was
+enabled in Step 2, the `model-armor` Terraform module created the template in Step 3 and the same
+apply granted the backend service account `roles/modelarmor.user`. What is left is telling the
+backend which template to call.
+
+```bash
+tofu -chdir=infra/terraform output -raw model_armor_template_name
+```
+
+That prints a full resource path,
+`projects/YOUR_PROJECT/locations/europe-west3/templates/agentcare`. Put it in
+`infra/k8s/overlays/gcp/configmap-model-armor.yaml` in place of `REPLACE_ME`, and leave
+`MODEL_ARMOR_LOCATION` at the region the template lives in:
+
+```yaml
+data:
+  MODEL_ARMOR_TEMPLATE: "projects/YOUR_PROJECT/locations/europe-west3/templates/agentcare"
+  MODEL_ARMOR_LOCATION: "europe-west3"
+```
+
+The location is not decoration. Model Armor has no global endpoint: the client builds
+`modelarmor.LOCATION.rep.googleapis.com` out of this value, so a value that disagrees with the
+template's own region fails every call.
+
+Leaving `REPLACE_ME` in place is not a hard failure. The adapter logs one `model_armor_failed`
+warning per call and returns no opinion, so the deterministic layers decide alone. That is the
+same behaviour you get from emptying the value or from
+`-var="enable_model_armor=false"` at apply time, and failing open is deliberate: a screening
+service must never be the thing that stops a patient from booking an appointment.
+
+Step 8 matters for this one. The calls go out under the pod's own GCP identity, so until the
+Workload Identity binding is in place they fail as the namespace default service account and the
+guard runs on its deterministic layer alone.
+
+Cost: the free tier is 2 million screened tokens per month per project, then 0.10 USD per
+million. A demo screens a few thousand.
+
+---
+
+## Step 10 - Point the overlay at your images and apply it
 
 ```bash
 cd infra/k8s/overlays/gcp
@@ -380,7 +427,7 @@ instead: `kubectl port-forward svc/frontend 3000:3000`.
 
 ---
 
-## Step 10 - Monitoring
+## Step 11 - Monitoring
 
 **Nothing in `infra/` deploys a metrics stack into the cluster.** What the committed
 configuration gives you is the scrape target and the log stream, not a dashboard.
@@ -419,7 +466,7 @@ them while a run is happening.
 
 ---
 
-## Step 11 - End-to-end test
+## Step 12 - End-to-end test
 
 Three checks against the deployed address. Use `http://INGRESS_IP` or, on the port-forward path,
 `http://localhost:8000` for the API calls.
@@ -499,7 +546,7 @@ back to Step 7.
 **Pods in `ErrImagePull` or `ImagePullBackOff`** - either the overlay still carries its
 `REGION-docker.pkg.dev/PROJECT/agentcare/...:TAG` placeholders, or the image was built without
 `--platform linux/amd64` and cannot run on the amd64 nodes. `kubectl describe pod <name>` names
-the image it tried to pull. Re-run the `kustomize edit set image` in Step 9, or rebuild with the
+the image it tried to pull. Re-run the `kustomize edit set image` in Step 10, or rebuild with the
 platform flag.
 
 **`kubectl apply -k` fails on the Job** - a leftover `backend-migrate` from the previous deploy.
