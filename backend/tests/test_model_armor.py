@@ -212,3 +212,18 @@ def test_client_construction_failure_is_reported_once_then_stays_quiet(
     assert screen_prompt("I need a dermatology appointment") is None
 
     assert [event for event, _ in armor_log.warnings] == ["model_armor_unavailable"]
+
+
+def test_every_call_disables_the_sdk_retry_wrapper(model_armor_on, fake_model_armor):
+    """The SDK ships a default Retry that re-sends on ServiceUnavailable for up
+    to 60 seconds, and it wraps the deadline instead of sitting inside it, so
+    the timeout above bounds one attempt and not the call. Measured against the
+    SDK's own defaults, a 503 took 59.8 seconds over 20 attempts. A second
+    opinion that is allowed to have no opinion gets exactly one attempt."""
+    client = fake_model_armor(prompt={"pi_and_jailbreak": False}, response={})
+
+    screen_prompt("book me a cardiology appointment")
+    screen_response("Your appointment is confirmed.")
+
+    assert client.prompt_calls[0]["retry"] is None
+    assert client.response_calls[0]["retry"] is None

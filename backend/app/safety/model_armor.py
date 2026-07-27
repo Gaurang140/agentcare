@@ -49,6 +49,13 @@ logger = get_logger(__name__)
 # budget is what a patient does not notice next to the LLM turn that follows,
 # not what a screening service might want at its slowest. Past it the call is
 # abandoned and the verdict is "no opinion".
+#
+# Every call also passes retry=None. The generated client ships a default
+# Retry that re-sends on ServiceUnavailable for up to 60 seconds, and it wraps
+# the deadline rather than sitting inside it, so the timeout alone bounds one
+# attempt and not the call: a 503 measured at 59.8 seconds over 20 attempts.
+# One attempt with no retry is the whole point of a second opinion that is
+# allowed to have no opinion.
 CALL_TIMEOUT_SECONDS = 2.0
 
 # `filter_match_state` and every per-filter `match_state` are the same enum
@@ -213,7 +220,7 @@ def _screen(text: str, *, operation: str) -> ModelArmorVerdict | None:
                 user_prompt_data=sdk.DataItem(text=text),
             )
             response = client.sanitize_user_prompt(
-                request=request, timeout=CALL_TIMEOUT_SECONDS
+                request=request, timeout=CALL_TIMEOUT_SECONDS, retry=None
             )
         else:
             request = sdk.SanitizeModelResponseRequest(
@@ -221,7 +228,7 @@ def _screen(text: str, *, operation: str) -> ModelArmorVerdict | None:
                 model_response_data=sdk.DataItem(text=text),
             )
             response = client.sanitize_model_response(
-                request=request, timeout=CALL_TIMEOUT_SECONDS
+                request=request, timeout=CALL_TIMEOUT_SECONDS, retry=None
             )
         # Parsing is inside the try on purpose: a payload shape this adapter
         # cannot read is the same kind of problem as a transport error, and

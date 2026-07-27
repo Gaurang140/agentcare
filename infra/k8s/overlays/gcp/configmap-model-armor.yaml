@@ -9,8 +9,9 @@
 # uses for GCS_BUCKET: replace it before applying. The real value is the
 # `model_armor_template_name` output from the terraform in infra/terraform/,
 # and it is a full resource path, projects/PROJECT/locations/LOCATION/templates/ID.
-# Left unreplaced the layer fails open: every call errors, the adapter logs one
-# model_armor_failed warning and returns no opinion, and layer 1 still decides.
+# Left unreplaced the layer simply stays off: the adapter treats its own
+# placeholder as unconfigured, so there is no call and no warning per request,
+# and the deterministic layers decide alone exactly as they do off GCP.
 #
 # MODEL_ARMOR_LOCATION must match the template's region, because the client
 # builds a regional endpoint out of it. europe-west3 matches the deployment's

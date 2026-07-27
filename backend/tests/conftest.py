@@ -381,12 +381,12 @@ class FakeArmorClient:
             raise outcome
         return outcome
 
-    def sanitize_user_prompt(self, request=None, timeout=None):
-        self.prompt_calls.append({"request": request, "timeout": timeout})
+    def sanitize_user_prompt(self, request=None, timeout=None, retry=None):
+        self.prompt_calls.append({"request": request, "timeout": timeout, "retry": retry})
         return self._replay(self._prompt_outcome, "sanitize_user_prompt")
 
-    def sanitize_model_response(self, request=None, timeout=None):
-        self.response_calls.append({"request": request, "timeout": timeout})
+    def sanitize_model_response(self, request=None, timeout=None, retry=None):
+        self.response_calls.append({"request": request, "timeout": timeout, "retry": retry})
         return self._replay(self._response_outcome, "sanitize_model_response")
 
 
