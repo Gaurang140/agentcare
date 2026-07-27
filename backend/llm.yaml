@@ -20,7 +20,7 @@ profiles:
     model: openai/gpt-oss-120b
     base_url: https://api.groq.com/openai/v1
     timeout: 30        # seconds per attempt (bounds a hung request)
-    max_retries: 3     # transport retries with exponential backoff
+    max_retries: 3     # maximum total LangChain attempts
     # temperature: 0.0 # uncomment to pin; unset keeps the provider default
 
   # A local OpenAI-compatible server (LM Studio, llama-server, Ollama).

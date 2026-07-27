@@ -37,10 +37,17 @@ def _ok(payload: dict):
     return _fake_completion(json.dumps(payload))
 
 
-def _bad_request_error(message: str = "response_format not supported") -> openai.BadRequestError:
+def _bad_request_error(
+    message: str = "response_format not supported",
+    *,
+    code: str | None = None,
+    param: str | None = None,
+) -> openai.BadRequestError:
     request = httpx.Request("POST", "https://fake.test/v1/chat/completions")
-    response = httpx.Response(400, request=request, json={"error": {"message": message}})
-    return openai.BadRequestError(message, response=response, body={"error": {"message": message}})
+    error_body = {"message": message, "code": code, "param": param}
+    body = {"error": error_body}
+    response = httpx.Response(400, request=request, json=body)
+    return openai.BadRequestError(message, response=response, body=body)
 
 
 def _connection_error() -> openai.APIConnectionError:
@@ -202,16 +209,30 @@ def test_chat_json_sends_recursively_strict_schema():
 
 
 @pytest.mark.parametrize(
-    "message",
+    ("message", "code", "param"),
     [
-        "response_format is not supported by this endpoint",
-        "json_schema is unsupported by this endpoint",
+        ("response_format is not supported by this endpoint", None, None),
+        ("json_schema is unsupported by this endpoint", None, None),
+        (
+            "This provider does not support response_format type json_schema",
+            "unsupported_parameter",
+            "response_format",
+        ),
+        (
+            "Invalid value: 'json_schema'. Supported values are: 'text', 'json_object'.",
+            "invalid_value",
+            "response_format",
+        ),
     ],
 )
-def test_chat_json_falls_back_to_json_object_when_structured_format_is_unsupported(message):
+def test_chat_json_falls_back_to_json_object_when_structured_format_is_unsupported(
+    message,
+    code,
+    param,
+):
     client = FakeClient(
         [
-            _bad_request_error(message),
+            _bad_request_error(message, code=code, param=param),
             _ok({"ok": False, "reason": "fallback worked"}),
         ]
     )
@@ -239,6 +260,35 @@ def test_chat_json_falls_back_to_json_object_when_structured_format_is_unsupport
 )
 def test_chat_json_does_not_downgrade_unrelated_bad_requests(message):
     error = _bad_request_error(message)
+    client = FakeClient([error])
+    set_llm_client_for_tests(client)
+
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        chat_json("system prompt", "user prompt", _Verdict)
+
+    assert excinfo.value is error
+    assert len(client.chat.completions.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    [
+        (
+            "Unsupported JSON schema keyword patternProperties in response_format",
+            "invalid_json_schema",
+        ),
+        (
+            "Invalid schema for response_format 'Verdict': required must include reason",
+            "unsupported_value",
+        ),
+        (
+            "Keyword patternProperties in json_schema is unsupported",
+            "invalid_json_schema",
+        ),
+    ],
+)
+def test_chat_json_does_not_downgrade_invalid_schema_details(message, code):
+    error = _bad_request_error(message, code=code, param="response_format")
     client = FakeClient([error])
     set_llm_client_for_tests(client)
 
@@ -366,7 +416,7 @@ def test_chat_json_retries_provider_neutral_transient_errors(monkeypatch, errors
     assert primary.calls == 3
 
 
-@pytest.mark.parametrize("code", [400, 401, 403, 404])
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 408])
 def test_chat_json_does_not_retry_or_fallback_for_google_client_errors(
     monkeypatch,
     code,

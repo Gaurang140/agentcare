@@ -223,16 +223,48 @@ def _is_unsupported_structured_format_error(exc: openai.BadRequestError) -> bool
         if isinstance(error, dict)
         else str(exc).lower()
     )
-    names_structured_format = (
-        "response_format" in message
-        or "json_schema" in message
-        or param in {"response_format", "json_schema"}
+    normalized = " ".join(
+        message.translate(str.maketrans("", "", "'\"`")).split()
     )
-    explicitly_unsupported = "unsupported" in code or any(
-        phrase in message
-        for phrase in ("unsupported", "not supported", "does not support", "doesn't support")
+    rejects_schema_detail = (
+        code in {"invalid_json_schema", "invalid_schema"}
+        or "invalid schema" in normalized
+        or "schema keyword" in normalized
+        or (
+            "keyword" in normalized
+            and ("json_schema" in normalized or "json schema" in normalized)
+        )
     )
-    return names_structured_format and explicitly_unsupported
+    if rejects_schema_detail:
+        return False
+
+    format_names = ("response_format", "response format", "json_schema", "json schema")
+    capability_rejected = any(
+        phrase in normalized
+        for name in format_names
+        for phrase in (
+            f"{name} is not supported",
+            f"{name} not supported",
+            f"{name} is unsupported",
+            f"{name} unsupported",
+            f"does not support {name}",
+            f"does not support the {name}",
+            f"doesnt support {name}",
+            f"doesnt support the {name}",
+        )
+    )
+    if capability_rejected:
+        return True
+
+    if code not in {"invalid_value", "unsupported_value"} or param != "response_format":
+        return False
+    invalid_value_at = normalized.find("invalid value")
+    supported_values_at = normalized.find("supported values")
+    if invalid_value_at < 0 or supported_values_at <= invalid_value_at:
+        return False
+    rejected_value = normalized[invalid_value_at:supported_values_at]
+    allowed_values = normalized[supported_values_at + len("supported values") :]
+    return "json_schema" in rejected_value and "json_schema" not in allowed_values
 
 
 def _with_retry(runnable: Runnable, max_retries: int) -> Runnable:
