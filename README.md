@@ -77,7 +77,7 @@ Presidio plus deterministic patterns redacting supported identifiers.
 | Frontend | Next.js App Router, React, Tailwind and shadcn/ui |
 | Safety | Deterministic gates, Presidio and optional Model Armor |
 | Observability | Append-only audit, SSE, Prometheus and Grafana |
-| Deployment | OpenTofu-compatible HCL, GKE Autopilot and Kustomize |
+| Deployment | Terraform HCL, GKE Autopilot and Kustomize |
 
 ## Repository map
 
@@ -98,7 +98,7 @@ frontend/         patient portal and staff console
 docs/             architecture, security, decisions, deployment and demo
 evals/            golden dataset and two-phase scoring harness
 infra/
-  terraform/      GCP resources, consumed by OpenTofu or Terraform
+  terraform/      GCP resources, managed by Terraform
   k8s/            Kustomize base and GCP overlay
 monitoring/       local Prometheus and Grafana configuration
 scripts/          idempotent synthetic demo seed
@@ -281,9 +281,9 @@ npm run build
 Infrastructure checks:
 
 ```bash
-tofu -chdir=infra/terraform fmt -check -recursive
-tofu -chdir=infra/terraform init -backend=false -input=false
-tofu -chdir=infra/terraform validate
+terraform -chdir=infra/terraform fmt -check -recursive
+terraform -chdir=infra/terraform init -backend=false -input=false
+terraform -chdir=infra/terraform validate
 kubectl kustomize infra/k8s/overlays/gcp >/dev/null
 ```
 

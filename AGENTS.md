@@ -22,7 +22,7 @@ backend/app/
   services/  # workflow_service (start/resume), storage adapter (local | gcs)
   api/       # routers; RBAC enforced here, never in the frontend
 frontend/    # Next.js 16 App Router, Tailwind v4, shadcn; proxy.ts (not middleware.ts)
-infra/       # terraform (OpenTofu-compatible HCL, GCP resources) + k8s/
+infra/       # Terraform HCL, GCP resources + k8s/
              #   (kustomize base + gcp overlay)
 scripts/     # seed_demo.py and helpers
 docs/        # architecture, security, demo and GCP deployment guides
@@ -80,9 +80,9 @@ npm --prefix frontend audit --omit=dev --audit-level=high
 npm --prefix frontend run lint
 npm --prefix frontend run build
 # infrastructure
-tofu -chdir=infra/terraform fmt -check -recursive
-tofu -chdir=infra/terraform init -backend=false -input=false
-tofu -chdir=infra/terraform validate
+terraform -chdir=infra/terraform fmt -check -recursive
+terraform -chdir=infra/terraform init -backend=false -input=false
+terraform -chdir=infra/terraform validate
 kubectl kustomize infra/k8s/overlays/gcp
 # full stack
 docker compose up --build

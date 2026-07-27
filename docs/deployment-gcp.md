@@ -9,8 +9,8 @@ This is the only end-to-end cloud runbook for AgentCare.
 > record its output for the environment you create.
 
 GCP is the sole deployment target. Infrastructure source is in
-`infra/terraform`, which is standard Terraform-compatible HCL. The preferred
-executable in this guide is OpenTofu. Kubernetes source is in `infra/k8s`.
+`infra/terraform`, which is Terraform HCL. The executable in this guide is
+Terraform. Kubernetes source is in `infra/k8s`.
 
 ## What the repository configures
 
@@ -83,7 +83,7 @@ Required tools:
 
 ```bash
 gcloud --version
-tofu -version
+terraform -version
 docker --version
 docker buildx version
 kubectl version --client
@@ -93,8 +93,6 @@ curl --version
 openssl version
 ```
 
-Plain Terraform can consume the same `infra/terraform` files. If using it,
-substitute `terraform` for `tofu` consistently.
 
 ## 3. Authenticate and confirm billing
 
@@ -116,7 +114,7 @@ gcloud billing projects describe "$PROJECT_ID"
 ```
 
 The billing response must show an enabled billing account before provisioning.
-OpenTofu's Google provider reads ADC, not only the `gcloud` login.
+Terraform's Google provider reads ADC, not only the `gcloud` login.
 
 ## 4. Enable required APIs
 
@@ -158,13 +156,13 @@ gcloud services list --enabled \
 
 ## 5. Initialize, validate and plan
 
-OpenTofu state is local unless the operator configures the commented GCS
+Terraform state is local unless the operator configures the commented GCS
 backend in `infra/terraform/backend.tf`.
 
 ```bash
-tofu -chdir=infra/terraform init
-tofu -chdir=infra/terraform validate
-tofu -chdir=infra/terraform plan \
+terraform -chdir=infra/terraform init
+terraform -chdir=infra/terraform validate
+terraform -chdir=infra/terraform plan \
   -out=/tmp/agentcare.tfplan \
   -var="project_id=$PROJECT_ID" \
   -var="region=$REGION" \
@@ -179,33 +177,33 @@ Review the plan. It should target only the intended project and region.
 ## 6. Apply infrastructure and capture outputs
 
 ```bash
-tofu -chdir=infra/terraform apply /tmp/agentcare.tfplan
-tofu -chdir=infra/terraform output
+terraform -chdir=infra/terraform apply /tmp/agentcare.tfplan
+terraform -chdir=infra/terraform output
 ```
 
 Capture values used below:
 
 ```bash
 export IMAGE_REPO="$(
-  tofu -chdir=infra/terraform output -raw artifact_registry_repository_url
+  terraform -chdir=infra/terraform output -raw artifact_registry_repository_url
 )"
 export DOCUMENTS_BUCKET="$(
-  tofu -chdir=infra/terraform output -raw documents_bucket_name
+  terraform -chdir=infra/terraform output -raw documents_bucket_name
 )"
 export BACKEND_GSA="$(
-  tofu -chdir=infra/terraform output -raw backend_service_account_email
+  terraform -chdir=infra/terraform output -raw backend_service_account_email
 )"
 export MODEL_ARMOR_TEMPLATE="$(
-  tofu -chdir=infra/terraform output -raw model_armor_template_name
+  terraform -chdir=infra/terraform output -raw model_armor_template_name
 )"
 export MODEL_ARMOR_ENDPOINT="$(
-  tofu -chdir=infra/terraform output -raw model_armor_endpoint_address
+  terraform -chdir=infra/terraform output -raw model_armor_endpoint_address
 )"
 export MODEL_ARMOR_HOST="$(
-  tofu -chdir=infra/terraform output -raw model_armor_endpoint_hostname
+  terraform -chdir=infra/terraform output -raw model_armor_endpoint_hostname
 )"
 export DB_HOST="$(
-  tofu -chdir=infra/terraform output -raw cloud_sql_private_ip_address
+  terraform -chdir=infra/terraform output -raw cloud_sql_private_ip_address
 )"
 ```
 
@@ -324,8 +322,8 @@ default or short JWT secret.
 
 ```bash
 gcloud container clusters get-credentials \
-  "$(tofu -chdir=infra/terraform output -raw gke_cluster_name)" \
-  --region "$(tofu -chdir=infra/terraform output -raw gke_cluster_location)"
+  "$(terraform -chdir=infra/terraform output -raw gke_cluster_name)" \
+  --region "$(terraform -chdir=infra/terraform output -raw gke_cluster_location)"
 
 kubectl config current-context
 kubectl get nodes
@@ -394,7 +392,7 @@ model defaults remain in `backend/llm.yaml`.
 
 Vertex uses ADC through the pod's Workload Identity, not a Google credential
 value in the Kubernetes Secret. Set `ENABLE_VERTEX_AI=true` before the
-OpenTofu plan, enable `aiplatform.googleapis.com` and add these non-secret
+Terraform plan, enable `aiplatform.googleapis.com` and add these non-secret
 values to `agentcare-config` before rollout:
 
 ```yaml
@@ -623,9 +621,9 @@ expected failure mode for unavailable model access.
 Confirm the configured resource and pod identity:
 
 ```bash
-tofu -chdir=infra/terraform output -raw model_armor_template_name
-tofu -chdir=infra/terraform output -raw model_armor_endpoint_hostname
-tofu -chdir=infra/terraform output -raw model_armor_endpoint_address
+terraform -chdir=infra/terraform output -raw model_armor_template_name
+terraform -chdir=infra/terraform output -raw model_armor_endpoint_hostname
+terraform -chdir=infra/terraform output -raw model_armor_endpoint_address
 kubectl get pod \
   -l app=backend \
   -o jsonpath='{.items[0].spec.serviceAccountName}'
@@ -684,12 +682,12 @@ gcloud sql backups list --instance=agentcare-postgres
 
 ## 17. Troubleshooting
 
-### OpenTofu cannot find credentials
+### Terraform cannot find credentials
 
 Run the ADC login again and verify
 `gcloud auth application-default print-access-token`.
 
-### OpenTofu cannot find the selected VPC or subnetwork
+### Terraform cannot find the selected VPC or subnetwork
 
 The defaults use an auto-mode network and regional subnetwork both named
 `default`. Set `NETWORK_NAME` and `SUBNETWORK_NAME` to existing resources and
@@ -775,7 +773,7 @@ kubectl get ingress
 Destroy managed infrastructure:
 
 ```bash
-tofu -chdir=infra/terraform destroy \
+terraform -chdir=infra/terraform destroy \
   -var="project_id=$PROJECT_ID" \
   -var="region=$REGION" \
   -var="gcs_location=$REGION" \
@@ -790,7 +788,7 @@ require the exact project-derived bucket name and type the resolved target:
 
 ```bash
 FRESH_DOCUMENTS_BUCKET="$(
-  tofu -chdir=infra/terraform output -raw documents_bucket_name
+  terraform -chdir=infra/terraform output -raw documents_bucket_name
 )"
 EXPECTED_DOCUMENTS_BUCKET="${PROJECT_ID}-agentcare-documents"
 

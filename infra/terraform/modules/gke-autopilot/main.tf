@@ -23,7 +23,7 @@ resource "google_container_cluster" "this" {
     }
   }
 
-  # Hackathon/demo cluster: allow `tofu destroy` to actually tear it down.
+  # Hackathon/demo cluster: allow `terraform destroy` to actually tear it down.
   # Flip to true before this cluster ever holds anything that must survive
   # an accidental destroy.
   deletion_protection = false

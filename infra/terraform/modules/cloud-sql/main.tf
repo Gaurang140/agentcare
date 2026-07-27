@@ -51,6 +51,6 @@ resource "google_sql_database_instance" "postgres" {
 
   depends_on = [google_service_networking_connection.private_vpc_connection]
 
-  # Hackathon/demo path: allow `tofu destroy` to actually tear it down.
+  # Hackathon/demo path: allow `terraform destroy` to actually tear it down.
   deletion_protection = false
 }
