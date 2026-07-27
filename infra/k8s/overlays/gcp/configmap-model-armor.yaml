@@ -1,0 +1,25 @@
+# Model Armor override for the gcp overlay, merged onto the base ConfigMap.
+#
+# The base ships MODEL_ARMOR_TEMPLATE: "", which disables the layer: off GCP
+# there is no template to call and the injection guard runs its deterministic
+# layer alone (backend/app/safety/model_armor.py). On a cluster the template
+# exists, so the backend names it on every call.
+#
+# MODEL_ARMOR_TEMPLATE is a placeholder, the same convention configmap-storage.yaml
+# uses for GCS_BUCKET: replace it before applying. The real value is the
+# `model_armor_template_name` output from the terraform in infra/terraform/,
+# and it is a full resource path, projects/PROJECT/locations/LOCATION/templates/ID.
+# Left unreplaced the layer fails open: every call errors, the adapter logs one
+# model_armor_failed warning and returns no opinion, and layer 1 still decides.
+#
+# MODEL_ARMOR_LOCATION must match the template's region, because the client
+# builds a regional endpoint out of it. europe-west3 matches the deployment's
+# EU data residency (docs/decisions.md ADR-04) and is a supported Model Armor
+# region.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentcare-config
+data:
+  MODEL_ARMOR_TEMPLATE: "REPLACE_ME"
+  MODEL_ARMOR_LOCATION: "europe-west3"

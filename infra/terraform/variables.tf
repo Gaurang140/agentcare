@@ -35,6 +35,12 @@ variable "enable_cloud_sql" {
   default     = true
 }
 
+variable "enable_model_armor" {
+  description = "Create the Model Armor screening template and grant the backend service account roles/modelarmor.user. On by default: it fills the injection guard's existing layer-2 slot on the GCP path and screens the drafted answer, both around the deterministic layers that keep deciding first and last (docs/decisions.md ADR-15). Set to false to run those deterministic layers alone, which is what every non-GCP deployment does. The API has to be enabled once per project either way, see Step 2 of docs/deployment-gcp.md."
+  type        = bool
+  default     = true
+}
+
 variable "domain" {
   description = "Optional custom domain for the frontend. Not consumed by this Terraform layer - reserved for the k8s kustomize overlay (infra/k8s) that owns the Ingress and ManagedCertificate resources."
   type        = string

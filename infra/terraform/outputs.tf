@@ -38,6 +38,11 @@ output "gke_cluster_location" {
   value       = module.gke.cluster_location
 }
 
+output "model_armor_template_name" {
+  description = "Full Model Armor template resource name; set as MODEL_ARMOR_TEMPLATE in the k8s gcp overlay. Null while enable_model_armor is false."
+  value       = module.model_armor.template_name
+}
+
 output "cloud_sql_connection_name" {
   description = "Cloud SQL connection name for the Cloud SQL Auth Proxy; null while enable_cloud_sql is false."
   value       = module.cloud_sql.connection_name

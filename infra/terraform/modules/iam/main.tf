@@ -42,6 +42,17 @@ resource "google_storage_bucket_iam_member" "backend_bucket_object_admin" {
 # narrower binding to yet. Revisit with a
 # google_secret_manager_secret_iam_member per secret once the secret IDs
 # exist and are imported here.
+# roles/modelarmor.user is the calling role: it allows sanitizeUserPrompt and
+# sanitizeModelResponse against an existing template and nothing else.
+# Administering templates is roles/modelarmor.admin, which no runtime identity
+# here holds - Terraform creates the template, the pod only calls it.
+resource "google_project_iam_member" "backend_model_armor_user" {
+  count   = var.enable_model_armor ? 1 : 0
+  project = var.project_id
+  role    = "roles/modelarmor.user"
+  member  = "serviceAccount:${google_service_account.backend.email}"
+}
+
 resource "google_project_iam_member" "backend_secret_accessor" {
   project = var.project_id
   role    = "roles/secretmanager.secretAccessor"

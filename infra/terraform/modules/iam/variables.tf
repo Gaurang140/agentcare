@@ -18,3 +18,9 @@ variable "enable_cloud_sql" {
   type        = bool
   default     = false
 }
+
+variable "enable_model_armor" {
+  description = "Grant the backend service account roles/modelarmor.user. Mirrors the root enable_model_armor flag; without the template there is nothing to call."
+  type        = bool
+  default     = true
+}
