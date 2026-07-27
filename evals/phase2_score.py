@@ -499,7 +499,10 @@ def run_judge(admin: Sequence[dict]) -> dict:
     if not key:
         return {
             "status": "pending",
-            "reason": "No judge key set. Export JUDGE_GROQ or LLM_API_KEY, then re-run phase 2.",
+            "reason": (
+                "No judge key set. Export JUDGE_GROQ or LLM_API_KEY, then re-run "
+                "phase 2 with a new --run-id."
+            ),
         }
 
     gradable = [sample for sample in admin if (sample.get("actual_response") or "").strip()]

@@ -113,3 +113,13 @@ def test_degraded_summary_reproduction_is_no_key_and_uses_scratch_output():
         "JUDGE_BASE_URL=",
     ):
         assert assignment in summary
+
+
+def test_pending_judge_points_to_a_new_output_run_id(monkeypatch):
+    monkeypatch.delenv("JUDGE_GROQ", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+
+    result = phase2_score.run_judge([])
+
+    assert result["status"] == "pending"
+    assert "new --run-id" in result["reason"]

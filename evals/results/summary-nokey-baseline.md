@@ -56,7 +56,7 @@ coordinator agent failed: Missing credentials. Please pass an `api_key`, `worklo
 
 ## Response quality (LLM judge)
 
-Status: pending. No judge key set. Export JUDGE_GROQ or LLM_API_KEY, then re-run phase 2.
+Status: pending. No judge key set. Export JUDGE_GROQ or LLM_API_KEY, then re-run phase 2 with a new --run-id.
 
 ## How to reproduce
 
