@@ -44,9 +44,3 @@ variable "enable_vertex_ai" {
   type        = bool
   default     = false
 }
-
-variable "domain" {
-  description = "Optional custom domain for the frontend. Not consumed by this Terraform layer - reserved for the k8s kustomize overlay (infra/k8s) that owns the Ingress and ManagedCertificate resources."
-  type        = string
-  default     = null
-}
