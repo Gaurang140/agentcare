@@ -11,13 +11,12 @@
 # Replace the sentinel before rendering. Leaving it in place would silently
 # disable the provider layer instead of proving the configured GCP path.
 #
-# MODEL_ARMOR_LOCATION must match the template's region, because the client
-# builds a regional endpoint out of it. europe-west3 matches the deployment's
-# EU data residency and is a supported Model Armor region.
+# MODEL_ARMOR_LOCATION must match the template and PSC endpoint region. Replace
+# REGION alongside the image registry sentinels before rendering.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: agentcare-config
 data:
   MODEL_ARMOR_TEMPLATE: "REPLACE_ME"
-  MODEL_ARMOR_LOCATION: "europe-west3"
+  MODEL_ARMOR_LOCATION: "REGION"

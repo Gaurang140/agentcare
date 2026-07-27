@@ -1,9 +1,11 @@
 # GKE Autopilot, not Standard: no node pools to size or patch, Google
 # manages the nodes and bills per pod resource request instead of per VM.
 resource "google_container_cluster" "this" {
-  project  = var.project_id
-  name     = var.cluster_name
-  location = var.region
+  project    = var.project_id
+  name       = var.cluster_name
+  location   = var.region
+  network    = var.network_name
+  subnetwork = var.subnetwork_name
 
   enable_autopilot = true
 

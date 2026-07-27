@@ -8,6 +8,16 @@ variable "region" {
   type        = string
 }
 
+variable "network_name" {
+  description = "VPC network for the cluster."
+  type        = string
+}
+
+variable "subnetwork_name" {
+  description = "Regional subnetwork for the cluster."
+  type        = string
+}
+
 variable "cluster_name" {
   description = "GKE cluster name."
   type        = string

@@ -5,6 +5,7 @@ resources:
   - ../../base
   - ingress.yaml
   - backendconfig.yaml
+  - frontendconfig.yaml
 
 patches:
   # Uploads go to a bucket rather than to the pod's own filesystem. Without

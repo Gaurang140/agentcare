@@ -15,6 +15,18 @@ variable "gcs_location" {
   default     = "europe-west3"
 }
 
+variable "network_name" {
+  description = "VPC network shared by GKE, Cloud SQL private access and the Model Armor private endpoint."
+  type        = string
+  default     = "default"
+}
+
+variable "subnetwork_name" {
+  description = "Regional subnetwork shared by GKE and the Model Armor private endpoint."
+  type        = string
+  default     = "default"
+}
+
 variable "enable_cloud_sql" {
   description = "Provision the canonical private-IP Cloud SQL for PostgreSQL instance. Set to false only for infrastructure validation that intentionally omits the database."
   type        = bool
@@ -22,7 +34,7 @@ variable "enable_cloud_sql" {
 }
 
 variable "enable_model_armor" {
-  description = "Create the Model Armor screening template and grant the backend service account roles/modelarmor.user. Set to false to run the deterministic safety layers without provider screening."
+  description = "Create the Model Armor template, regional endpoint, private DNS and runtime IAM. Set to false to run deterministic safety layers without provider screening."
   type        = bool
   default     = true
 }

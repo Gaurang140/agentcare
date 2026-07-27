@@ -21,8 +21,8 @@ executable in this guide is OpenTofu. Kubernetes source is in `infra/k8s`.
 | Database | Cloud SQL for PostgreSQL 17 with private IP |
 | Documents | GCS bucket with public access prevention |
 | Runtime identity | Backend KSA/GSA pair through GKE Workload Identity |
-| Safety provider | Model Armor template |
-| Workloads | Ordered migration Job, then backend, frontend, Services and GCE Ingress |
+| Safety provider | Model Armor template plus a regional PSC endpoint and private DNS |
+| Workloads | Ordered migration Job, then backend, frontend, Services and HTTPS-redirecting GCE Ingress |
 
 The backend remains one replica because APScheduler jobs run in-process without
 a distributed lock.
@@ -61,13 +61,15 @@ Run from the repository root:
 export PROJECT_ID="your-gcp-project-id"
 export REGION="europe-west3"
 export ENABLE_VERTEX_AI="false"
+export NETWORK_NAME="default"
+export SUBNETWORK_NAME="default"
 ```
 
 Confirm the values before any mutating command:
 
 ```bash
-printf 'project=%s\nregion=%s\nvertex=%s\n' \
-  "$PROJECT_ID" "$REGION" "$ENABLE_VERTEX_AI"
+printf 'project=%s\nregion=%s\nvertex=%s\nnetwork=%s\nsubnetwork=%s\n' \
+  "$PROJECT_ID" "$REGION" "$ENABLE_VERTEX_AI" "$NETWORK_NAME" "$SUBNETWORK_NAME"
 ```
 
 ## 2. Check local tools
@@ -117,9 +119,11 @@ gcloud services enable \
   artifactregistry.googleapis.com \
   compute.googleapis.com \
   container.googleapis.com \
+  dns.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   modelarmor.googleapis.com \
+  networkconnectivity.googleapis.com \
   servicenetworking.googleapis.com \
   sqladmin.googleapis.com \
   storage.googleapis.com \
@@ -136,7 +140,7 @@ Confirm the relevant services are enabled:
 
 ```bash
 gcloud services list --enabled \
-  --filter='NAME:(artifactregistry.googleapis.com container.googleapis.com sqladmin.googleapis.com modelarmor.googleapis.com aiplatform.googleapis.com)'
+  --filter='NAME:(artifactregistry.googleapis.com container.googleapis.com dns.googleapis.com sqladmin.googleapis.com modelarmor.googleapis.com networkconnectivity.googleapis.com aiplatform.googleapis.com)'
 ```
 
 ## 5. Initialize, validate and plan
@@ -152,6 +156,8 @@ tofu -chdir=infra/terraform plan \
   -var="project_id=$PROJECT_ID" \
   -var="region=$REGION" \
   -var="gcs_location=$REGION" \
+  -var="network_name=$NETWORK_NAME" \
+  -var="subnetwork_name=$SUBNETWORK_NAME" \
   -var="enable_vertex_ai=$ENABLE_VERTEX_AI"
 ```
 
@@ -179,6 +185,12 @@ export BACKEND_GSA="$(
 export MODEL_ARMOR_TEMPLATE="$(
   tofu -chdir=infra/terraform output -raw model_armor_template_name
 )"
+export MODEL_ARMOR_ENDPOINT="$(
+  tofu -chdir=infra/terraform output -raw model_armor_endpoint_address
+)"
+export MODEL_ARMOR_HOST="$(
+  tofu -chdir=infra/terraform output -raw model_armor_endpoint_hostname
+)"
 export DB_HOST="$(
   tofu -chdir=infra/terraform output -raw cloud_sql_private_ip_address
 )"
@@ -187,8 +199,9 @@ export DB_HOST="$(
 Inspect them without exposing credentials:
 
 ```bash
-printf 'images=%s\nbucket=%s\nbackend_identity=%s\nmodel_armor=%s\ndb_host=%s\n' \
-  "$IMAGE_REPO" "$DOCUMENTS_BUCKET" "$BACKEND_GSA" "$MODEL_ARMOR_TEMPLATE" "$DB_HOST"
+printf 'images=%s\nbucket=%s\nbackend_identity=%s\nmodel_armor=%s\nmodel_armor_host=%s\nmodel_armor_ip=%s\ndb_host=%s\n' \
+  "$IMAGE_REPO" "$DOCUMENTS_BUCKET" "$BACKEND_GSA" "$MODEL_ARMOR_TEMPLATE" \
+  "$MODEL_ARMOR_HOST" "$MODEL_ARMOR_ENDPOINT" "$DB_HOST"
 ```
 
 These outputs confirm resource addresses, not runtime readiness.
@@ -225,11 +238,17 @@ printf 'cloud-sql-private-ip=%s\n' "$DB_HOST"
 Construct the SQLAlchemy URL locally:
 
 ```text
-postgresql+psycopg://agentcare:URL_ENCODED_PASSWORD@PRIVATE_IP:5432/agentcare
+postgresql+psycopg://agentcare:URL_ENCODED_PASSWORD@PRIVATE_IP:5432/agentcare?sslmode=require
 ```
 
 Percent-encode reserved characters in the password. Do not commit the URL.
 The current root Terraform outputs do not generate it.
+
+The instance sets `ssl_mode = "ENCRYPTED_ONLY"` and the client URL sets
+`sslmode=require`, so plaintext database connections are rejected. This mode
+encrypts transport but does not verify the server identity. A production
+identity-verifying design needs a trusted Cloud SQL CA with `verify-ca` or
+`verify-full`, or a reviewed Cloud SQL connector/proxy path.
 
 Before a migration against an environment that matters, create an on-demand
 Cloud SQL backup:
@@ -310,18 +329,13 @@ Before applying, replace the environment-specific values in the working copy:
 |---|---|
 | `infra/k8s/base/configmap.yaml` | Real `FRONTEND_ORIGIN` when the public origin is known |
 | `infra/k8s/overlays/gcp/configmap-storage.yaml` | `GCS_BUCKET=$DOCUMENTS_BUCKET` |
-| `infra/k8s/overlays/gcp/configmap-model-armor.yaml` | `MODEL_ARMOR_TEMPLATE=$MODEL_ARMOR_TEMPLATE` |
+| `infra/k8s/overlays/gcp/configmap-model-armor.yaml` | `MODEL_ARMOR_TEMPLATE=$MODEL_ARMOR_TEMPLATE` and `MODEL_ARMOR_LOCATION=$REGION` |
 | `infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml` | Replace `PROJECT_ID` |
 | `infra/k8s/overlays/gcp/ingress.yaml` | Replace the sample domain |
 
-Confirm no sentinel remains in rendered configuration:
-
-```bash
-grep -R -n 'REPLACE_ME\|PLACEHOLDER\|PROJECT_ID\|example\.com' \
-  infra/k8s/base infra/k8s/overlays/gcp infra/k8s/overlays/gcp-migration
-```
-
-The command should return no match before a public deployment.
+Do not scan the source tree for these values: template and comment files keep
+sentinels intentionally. The rendered-artifact gate in section 13 is the
+authoritative check before apply.
 
 ### Local model and ADC truth
 
@@ -404,7 +418,7 @@ Render both stages before touching the cluster:
 kubectl kustomize infra/k8s/overlays/gcp-migration \
   >/tmp/agentcare-migration-rendered.yaml
 kubectl kustomize infra/k8s/overlays/gcp >/tmp/agentcare-rendered.yaml
-if grep -Eq 'REPLACE_ME|PLACEHOLDER|PROJECT_ID|REGION-docker|/PROJECT/|:TAG|example\.com' \
+if grep -Eq 'REPLACE_ME|PLACEHOLDER|PROJECT_ID|REGION-docker|MODEL_ARMOR_LOCATION: REGION|/PROJECT/|:TAG|example\.com' \
   /tmp/agentcare-migration-rendered.yaml /tmp/agentcare-rendered.yaml; then
   echo "refusing apply: unresolved deployment sentinel" >&2
   exit 1
@@ -461,6 +475,18 @@ kubectl describe managedcertificate agentcare-cert
 
 The certificate remains provisioning until DNS resolves to the load balancer.
 Public DNS and TLS have not been verified by the repository.
+
+After the certificate becomes active, verify both TLS and the configured 308
+redirect:
+
+```bash
+curl -fsSI --max-time 10 "https://YOUR_DOMAIN/api/health"
+curl -sSI --max-time 10 "http://YOUR_DOMAIN/" | head -n 1
+```
+
+The second command must report `HTTP/1.1 308 Permanent Redirect`. An HTTP 200
+on port 80 means the `FrontendConfig` has not reconciled; inspect the Ingress
+events before exposing the application.
 
 To test the frontend independently of public Ingress readiness, use port
 forwarding:
@@ -551,11 +577,20 @@ Confirm the configured resource and pod identity:
 
 ```bash
 tofu -chdir=infra/terraform output -raw model_armor_template_name
+tofu -chdir=infra/terraform output -raw model_armor_endpoint_hostname
+tofu -chdir=infra/terraform output -raw model_armor_endpoint_address
 kubectl get pod \
   -l app=backend \
   -o jsonpath='{.items[0].spec.serviceAccountName}'
 kubectl exec deployment/backend -- printenv MODEL_ARMOR_TEMPLATE
+kubectl exec deployment/backend -- python -c \
+  "import socket; print(socket.gethostbyname('modelarmor.${REGION}.rep.googleapis.com'))"
 ```
+
+The in-pod lookup must return the Terraform endpoint address. Google requires
+this regional API hostname to resolve through a Private Service Connect
+endpoint when called from the VPC; the private Cloud DNS zone is part of this
+Terraform stack. Do not treat the template alone as a working integration.
 
 Then submit an operator-approved injection fixture that deterministic rules do
 not already match. A Model Armor block produces a safety escalation and
@@ -607,10 +642,13 @@ gcloud sql backups list --instance=agentcare-postgres
 Run the ADC login again and verify
 `gcloud auth application-default print-access-token`.
 
-### OpenTofu cannot find the default VPC
+### OpenTofu cannot find the selected VPC or subnetwork
 
-The Cloud SQL module currently reads a network named `default`. A project
-without that network needs a reviewed infrastructure change before apply.
+The defaults use an auto-mode network and regional subnetwork both named
+`default`. Set `NETWORK_NAME` and `SUBNETWORK_NAME` to existing resources and
+pass the matching Terraform variables when an organization disables default
+network creation. GKE, Cloud SQL private access and the Model Armor endpoint
+must share that VPC; the endpoint must share the GKE region.
 
 ### Migration Job cannot connect
 
@@ -644,7 +682,17 @@ Confirm the image exists in Artifact Registry and targets `linux/amd64`.
 ### GCS or Model Armor returns permission denied
 
 Confirm the pod uses `agentcare-backend`, the Kubernetes service account has
-the annotation and the Google service account grants the expected role.
+the annotation and the Google service account grants the expected role. The
+GCS grant is bucket-scoped `roles/storage.objectCreator`; the runtime cannot
+read, list, overwrite or delete objects.
+
+For Model Armor, also confirm the regional endpoint and private DNS resources:
+
+```bash
+gcloud network-connectivity regional-endpoints describe agentcare-model-armor \
+  --region "$REGION"
+gcloud dns managed-zones describe agentcare-model-armor-rep
+```
 
 ### SSE stops behind the Ingress
 
@@ -684,6 +732,8 @@ tofu -chdir=infra/terraform destroy \
   -var="project_id=$PROJECT_ID" \
   -var="region=$REGION" \
   -var="gcs_location=$REGION" \
+  -var="network_name=$NETWORK_NAME" \
+  -var="subnetwork_name=$SUBNETWORK_NAME" \
   -var="enable_vertex_ai=$ENABLE_VERTEX_AI"
 ```
 

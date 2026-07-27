@@ -8,8 +8,18 @@ variable "location" {
   type        = string
 }
 
+variable "network_name" {
+  description = "VPC network that can resolve and reach the regional endpoint."
+  type        = string
+}
+
+variable "subnetwork_name" {
+  description = "Regional subnetwork that supplies the endpoint IP address."
+  type        = string
+}
+
 variable "enable_model_armor" {
-  description = "Create the screening template. Mirrors the root enable_model_armor flag; when false the backend runs its deterministic layers without provider screening."
+  description = "Create the template, regional endpoint and private DNS. When false, the backend runs its deterministic layers without provider screening."
   type        = bool
   default     = true
 }

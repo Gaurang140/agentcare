@@ -4,14 +4,17 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: set up python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
 
@@ -27,8 +30,8 @@ jobs:
       - name: run tests
         run: cd backend && pytest -q
 
-  # The three jobs below pin the current action majors, which run on the
-  # runner's node24. The backend job above keeps the pins it already had.
+  # First-party actions are pinned to the current v7 release commits. These
+  # releases run on the runner's node24.
 
   frontend:
     # The backend job never builds the frontend, so a type error or a lint
@@ -38,10 +41,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: set up node
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
           cache: npm
@@ -67,10 +70,10 @@ jobs:
       # env.py reads this variable through app.config.settings.
       DATABASE_URL: sqlite:///./ci-migrations.db
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: set up python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           # requirements.txt pulls presidio and two spaCy model wheels (about
@@ -94,12 +97,21 @@ jobs:
     # `kubectl apply` does.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: install kubeconform
         run: |
-          curl -sfL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
-            | tar xz -C /usr/local/bin kubeconform
+          archive="$RUNNER_TEMP/kubeconform-linux-amd64.tar.gz"
+          bin_dir="$RUNNER_TEMP/kubeconform-bin"
+          curl -sfL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            -o "$archive"
+          # Published in the v0.6.7 release's CHECKSUMS asset.
+          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  $archive" \
+            | sha256sum -c -
+          mkdir -p "$bin_dir"
+          tar xzf "$archive" -C "$bin_dir" kubeconform
+          echo "$bin_dir" >> "$GITHUB_PATH"
 
       - name: validate every overlay
         # -ignore-missing-schemas skips the GKE CRDs (BackendConfig,
@@ -119,7 +131,7 @@ jobs:
       contents: read
       pull-requests: write # gitleaks comments its findings on the pull request
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # gitleaks reads git history, not just the checked-out tree: a
           # credential that was committed and then removed is still a leaked

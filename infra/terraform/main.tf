@@ -30,6 +30,8 @@ module "model_armor" {
 
   project_id         = var.project_id
   location           = var.region
+  network_name       = var.network_name
+  subnetwork_name    = var.subnetwork_name
   enable_model_armor = var.enable_model_armor
 }
 
@@ -45,8 +47,10 @@ module "iam" {
 module "gke" {
   source = "./modules/gke-autopilot"
 
-  project_id = var.project_id
-  region     = var.region
+  project_id      = var.project_id
+  region          = var.region
+  network_name    = var.network_name
+  subnetwork_name = var.subnetwork_name
 }
 
 module "cloud_sql" {
@@ -55,4 +59,5 @@ module "cloud_sql" {
   project_id       = var.project_id
   region           = var.region
   enable_cloud_sql = var.enable_cloud_sql
+  network_name     = var.network_name
 }

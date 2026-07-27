@@ -35,7 +35,7 @@ No prompt is treated as an authorization or safety control.
 | Model to application | Generated fields and prose | Pydantic validation, transition guards and output sanitizer |
 | Agent to domain data | Tool arguments and repeated execution | Transactions, conditional updates, idempotency checks and audit |
 | Staff to paused graph | Approval and note | Staff RBAC, persisted decision claim and same-thread resume |
-| Runtime to GCP | Backend pod identity | Declarative Workload Identity binding and scoped IAM |
+| Runtime to GCP | Backend pod identity and VPC traffic | Workload Identity, scoped IAM, regional PSC endpoint and private DNS |
 
 The last row is configured but not live-verified. The deployment runbook lists
 the operator checks required before trusting the binding.
@@ -87,6 +87,12 @@ Exactly one provider can occupy the optional second layer:
 Model Armor takes precedence if both are configured. The provider receives a
 PII-redacted copy. A group of document readings is joined for one provider
 call rather than one call per reading.
+
+The GCP deployment creates a regional Private Service Connect endpoint for
+`modelarmor.REGION.rep.googleapis.com` and an apex private DNS record in the
+cluster VPC. Google requires that path for regional Model Armor calls from a
+VPC. The endpoint, DNS zone and template are disabled together when
+`enable_model_armor=false`.
 
 Model Armor uses one bounded attempt with SDK retries disabled. A positive
 verdict blocks. An unavailable client, timeout, incomplete no-opinion result
@@ -186,7 +192,9 @@ Current restrictions are:
 - content deduplicated by SHA-256 checksum per patient
 
 The storage adapter writes locally by default and can write to GCS when
-configured. Database rows keep metadata and storage references.
+configured. The GCS runtime role is bucket-scoped
+`roles/storage.objectCreator`; UUID object names make create-only access
+sufficient. Database rows keep metadata and storage references.
 
 Extension and size checks do not prove a file is benign. See known
 limitations.
@@ -222,8 +230,10 @@ or redacted PII values.
 
 The GCP design separates configuration from credentials. Pods read one
 Kubernetes Secret. Terraform declares the backend KSA-to-GSA binding and the
-GCP overlay declares the KSA annotation, but repository configuration alone
-does not prove that the runtime identity works in a live cluster.
+GCP overlay declares the KSA annotation. Cloud SQL rejects unencrypted
+connections, and the documented direct DSN requests TLS. That DSN does not
+verify server identity. Repository configuration alone does not prove the
+runtime identity, private DNS or TLS path in a live cluster.
 
 ## Known limitations
 

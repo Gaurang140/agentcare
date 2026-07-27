@@ -7,6 +7,23 @@
 #
 # Enabling the API is an operator prerequisite documented in
 # docs/deployment-gcp.md; this configuration does not enable project APIs.
+locals {
+  target_google_api = "modelarmor.${var.location}.rep.googleapis.com"
+}
+
+data "google_compute_network" "endpoint" {
+  count   = var.enable_model_armor ? 1 : 0
+  project = var.project_id
+  name    = var.network_name
+}
+
+data "google_compute_subnetwork" "endpoint" {
+  count   = var.enable_model_armor ? 1 : 0
+  project = var.project_id
+  name    = var.subnetwork_name
+  region  = var.location
+}
+
 resource "google_model_armor_template" "this" {
   count       = var.enable_model_armor ? 1 : 0
   project     = var.project_id
@@ -43,4 +60,53 @@ resource "google_model_armor_template" "this" {
     # in the cloud would duplicate that job while making it depend on a network
     # call. Do not add it.
   }
+}
+
+resource "google_compute_address" "endpoint" {
+  count        = var.enable_model_armor ? 1 : 0
+  project      = var.project_id
+  name         = "agentcare-model-armor-psc"
+  region       = var.location
+  address_type = "INTERNAL"
+  purpose      = "GCE_ENDPOINT"
+  subnetwork   = data.google_compute_subnetwork.endpoint[0].id
+}
+
+resource "google_network_connectivity_regional_endpoint" "this" {
+  count             = var.enable_model_armor ? 1 : 0
+  project           = var.project_id
+  name              = "agentcare-model-armor"
+  location          = var.location
+  target_google_api = local.target_google_api
+  access_type       = "REGIONAL"
+  address           = google_compute_address.endpoint[0].address
+  network           = data.google_compute_network.endpoint[0].id
+  subnetwork        = data.google_compute_subnetwork.endpoint[0].id
+}
+
+resource "google_dns_managed_zone" "this" {
+  count       = var.enable_model_armor ? 1 : 0
+  project     = var.project_id
+  name        = "agentcare-model-armor-rep"
+  dns_name    = "${local.target_google_api}."
+  description = "Private resolution for the AgentCare Model Armor regional endpoint"
+  visibility  = "private"
+
+  private_visibility_config {
+    networks {
+      network_url = data.google_compute_network.endpoint[0].id
+    }
+  }
+}
+
+resource "google_dns_record_set" "this" {
+  count        = var.enable_model_armor ? 1 : 0
+  project      = var.project_id
+  managed_zone = google_dns_managed_zone.this[0].name
+  name         = "${local.target_google_api}."
+  type         = "A"
+  ttl          = 300
+  rrdatas      = [google_compute_address.endpoint[0].address]
+
+  depends_on = [google_network_connectivity_regional_endpoint.this]
 }

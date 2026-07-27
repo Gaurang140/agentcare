@@ -28,6 +28,16 @@ output "model_armor_template_name" {
   value       = module.model_armor.template_name
 }
 
+output "model_armor_endpoint_address" {
+  description = "Private Service Connect address for the Model Armor regional endpoint; null while enable_model_armor is false."
+  value       = module.model_armor.endpoint_address
+}
+
+output "model_armor_endpoint_hostname" {
+  description = "Model Armor regional API hostname resolved by the private DNS zone; null while enable_model_armor is false."
+  value       = module.model_armor.endpoint_hostname
+}
+
 output "cloud_sql_private_ip_address" {
   description = "Private IP address used by the direct PostgreSQL connection; null while enable_cloud_sql is false."
   value       = module.cloud_sql.private_ip_address

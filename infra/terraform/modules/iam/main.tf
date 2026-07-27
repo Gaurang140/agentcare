@@ -7,12 +7,11 @@ resource "google_service_account" "backend" {
   description  = "Identity for the FastAPI/LangGraph backend pod. Terraform binds the agentcare-backend Kubernetes service account to it without downloading a key."
 }
 
-# Bucket-scoped, not roles/storage.objectAdmin at the project level: the
-# backend can read and write objects in the documents bucket and nowhere else
-# in the project.
-resource "google_storage_bucket_iam_member" "backend_bucket_object_admin" {
+# Bucket-scoped and create-only: uploads use UUID object names, and the runtime
+# has no read, list, overwrite or delete operation against GCS.
+resource "google_storage_bucket_iam_member" "backend_bucket_object_creator" {
   bucket = var.bucket_name
-  role   = "roles/storage.objectAdmin"
+  role   = "roles/storage.objectCreator"
   member = "serviceAccount:${google_service_account.backend.email}"
 }
 
