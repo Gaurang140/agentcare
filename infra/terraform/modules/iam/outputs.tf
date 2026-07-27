@@ -3,6 +3,11 @@ output "backend_service_account_email" {
   value       = google_service_account.backend.email
 }
 
+output "backend_service_account_name" {
+  description = "Fully qualified runtime service-account resource name."
+  value       = google_service_account.backend.name
+}
+
 output "gke_node_service_account_email" {
   description = "Dedicated node identity used by the GKE Autopilot cluster."
   value       = google_service_account.gke_nodes.email

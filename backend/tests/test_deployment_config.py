@@ -181,7 +181,18 @@ def test_model_armor_has_regional_psc_endpoint_and_private_dns():
     assert 'access_type       = "REGIONAL"' in module
     assert re.search(r'visibility\s*=\s*"private"', module)
     assert re.search(r'type\s*=\s*"A"', module)
-    assert "google_compute_address.endpoint[0].address" in module
+    assert re.search(
+        r'resource "google_network_connectivity_regional_endpoint" "this"'
+        r".*?address\s*=\s*google_compute_address\.endpoint\[0\]\.id",
+        module,
+        re.DOTALL,
+    )
+    assert re.search(
+        r'resource "google_dns_record_set" "this"'
+        r".*?rrdatas\s*=\s*\[google_compute_address\.endpoint\[0\]\.address\]",
+        module,
+        re.DOTALL,
+    )
 
 
 def test_model_armor_location_is_an_operator_substitution_not_a_second_default():
@@ -207,6 +218,50 @@ def test_gke_uses_a_dedicated_node_identity_with_explicit_pull_permissions():
     assert "service_account = var.node_service_account_email" in gke
     assert "node_service_account_email = module.iam.gke_node_service_account_email" in root
     assert "depends_on = [module.iam]" in root
+
+
+def test_workload_identity_binding_uses_the_created_gke_pool():
+    iam = (REPO_ROOT / "infra/terraform/modules/iam/main.tf").read_text(
+        encoding="utf-8"
+    )
+    iam_outputs = (
+        REPO_ROOT / "infra/terraform/modules/iam/outputs.tf"
+    ).read_text(encoding="utf-8")
+    gke_outputs = (
+        REPO_ROOT / "infra/terraform/modules/gke-autopilot/outputs.tf"
+    ).read_text(encoding="utf-8")
+    root = (REPO_ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
+
+    binding = (
+        'resource "google_service_account_iam_member" '
+        '"backend_workload_identity_user"'
+    )
+    assert binding not in iam
+    assert binding in root
+    assert 'output "backend_service_account_name"' in iam_outputs
+    assert 'output "workload_pool"' in gke_outputs
+    assert (
+        "google_container_cluster.this.workload_identity_config[0].workload_pool"
+        in gke_outputs
+    )
+    assert re.search(
+        r"service_account_id\s*=\s*module\.iam\.backend_service_account_name",
+        root,
+    )
+    assert re.search(
+        r'member\s*=\s*"serviceAccount:\${module\.gke\.workload_pool}'
+        r'\[default/agentcare-backend\]"',
+        root,
+    )
+    assert re.search(
+        r"moved\s*{"
+        r"\s*from\s*=\s*module\.iam\.google_service_account_iam_member"
+        r"\.backend_workload_identity_user"
+        r"\s*to\s*=\s*google_service_account_iam_member"
+        r"\.backend_workload_identity_user"
+        r"\s*}",
+        root,
+    )
 
 
 def test_gcp_overlay_declares_managed_prometheus_collection():

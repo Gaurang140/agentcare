@@ -79,7 +79,7 @@ resource "google_network_connectivity_regional_endpoint" "this" {
   location          = var.location
   target_google_api = local.target_google_api
   access_type       = "REGIONAL"
-  address           = google_compute_address.endpoint[0].address
+  address           = google_compute_address.endpoint[0].id
   network           = data.google_compute_network.endpoint[0].id
   subnetwork        = data.google_compute_subnetwork.endpoint[0].id
 }

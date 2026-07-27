@@ -56,12 +56,3 @@ resource "google_project_iam_member" "backend_vertex_ai_user" {
   role    = "roles/aiplatform.user"
   member  = "serviceAccount:${google_service_account.backend.email}"
 }
-
-# Declarative KSA-to-GSA impersonation for the backend application workload.
-# The migration Job connects directly to private-IP PostgreSQL and does not
-# mount a Kubernetes service-account token.
-resource "google_service_account_iam_member" "backend_workload_identity_user" {
-  service_account_id = google_service_account.backend.name
-  role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${var.project_id}.svc.id.goog[default/agentcare-backend]"
-}

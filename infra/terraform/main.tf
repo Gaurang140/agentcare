@@ -65,6 +65,17 @@ module "gke" {
   depends_on = [module.iam]
 }
 
+resource "google_service_account_iam_member" "backend_workload_identity_user" {
+  service_account_id = module.iam.backend_service_account_name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${module.gke.workload_pool}[default/agentcare-backend]"
+}
+
+moved {
+  from = module.iam.google_service_account_iam_member.backend_workload_identity_user
+  to   = google_service_account_iam_member.backend_workload_identity_user
+}
+
 module "cloud_sql" {
   source = "./modules/cloud-sql"
 
