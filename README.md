@@ -383,6 +383,16 @@ timeline, the scheduler jobs and a full fake-LLM end-to-end graph run in
 `waiting_approval` through to the booked appointment. Linting is
 `ruff check backend`.
 
+## Evaluation
+
+A 66-sample golden dataset runs against the live API in two phases: phase 1
+records what the system did, phase 2 scores the recording. The deterministic
+half needs no API key, and on a no-key run it classifies all 26 guardrail
+samples correctly (precision 1.0, recall 1.0, zero false positives on the 10
+legitimate look-alikes). The LLM-judge half is key gated and prints as pending
+until a key is set. Dataset, commands and the committed baseline:
+[evals/README.md](evals/README.md).
+
 ## Stack at a glance
 
 | Choice | Instead of | Why |
