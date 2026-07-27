@@ -245,7 +245,7 @@ manifests, application code, agents, APIs, database behavior, safety controls,
 deployment ordering or secret handling. It does not turn Terraform into an
 application-release runner.
 
-**Verification:** Terraform formatting, offline initialization and validation
+**Verification:** Terraform formatting, backend-free initialization and validation
 must pass. CI and tracked operator documentation must use Terraform
 consistently. Existing backend, frontend, manifest and deployment configuration
 checks remain green.
