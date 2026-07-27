@@ -89,10 +89,10 @@ Current profiles are:
 Vertex construction is unit-tested. Live authentication, quota and response
 behavior have not been verified.
 
-## `chat_json` as the model policy boundary
+## `invoke_structured` as the model policy boundary
 
 **Decision:** Route every structured agent result through
-`app/agents/llm.py::chat_json`.
+`app/agents/llm.py::invoke_structured`.
 
 **Why:** LangChain `with_structured_output` should own provider formatting and
 ordinary schema parsing. The application still needs one place for transport

@@ -16,7 +16,7 @@ flowchart TB
     API["FastAPI routes<br/>authentication and backend RBAC"]
     WS["workflow_service<br/>screen, create, execute, resume"]
     GRAPH["Compiled LangGraph StateGraph"]
-    MODEL["chat_json<br/>LangChain model factory and structured output"]
+    MODEL["invoke_structured<br/>LangChain model factory and structured output"]
     SAFE["Safety boundary<br/>request, injection, PII and output controls"]
     TOOLS["Transactional SQL tools"]
     DOMAIN[("Domain database<br/>SQLite or Postgres")]
@@ -109,7 +109,7 @@ reuses an escalation, changes the run to `waiting_approval` and pauses through
 LangGraph `interrupt()`.
 
 All model-assisted roles call
-`backend/app/agents/llm.py::chat_json`. That function is the application policy
+`backend/app/agents/llm.py::invoke_structured`. That function is the application policy
 boundary. It builds models through LangChain `init_chat_model`, delegates
 provider formatting and normal structured parsing to
 `with_structured_output`, then applies AgentCare retry, compatibility,

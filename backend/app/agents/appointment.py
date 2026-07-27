@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agents.prompts import APPOINTMENT
-from app.agents.llm import chat_json
+from app.agents.llm import invoke_structured
 from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language, staff_review_response
 from app.agents.state import AgentState
@@ -65,7 +65,7 @@ def _pick_valid_slot(system: str, llm_request_text: str, slots: list[dict]) -> i
     across every retry so a rules lookup does not repeat per attempt."""
     valid_ids = {s["slot_id"] for s in slots}
     for _ in range(_SLOT_PICK_ATTEMPTS):
-        picked = chat_json(system, _slot_prompt(llm_request_text, slots), AppointmentOutput)
+        picked = invoke_structured(system, _slot_prompt(llm_request_text, slots), AppointmentOutput)
         if picked.slot_id in valid_ids:
             return picked.slot_id
     return None

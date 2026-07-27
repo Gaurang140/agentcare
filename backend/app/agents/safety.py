@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agents.prompts import SAFETY
-from app.agents.llm import chat_json
+from app.agents.llm import invoke_structured
 from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.agents.support import record_agent_exit
@@ -181,7 +181,7 @@ def run(state: AgentState, db: Session) -> dict:
         try:
             system = build_system_prompt(db, "safety", SAFETY)
             user_content = f"{draft}\n\n{_LANGUAGE_INSTRUCTIONS[language]}"
-            llm_result = chat_json(system, user_content, SafetyOutput)
+            llm_result = invoke_structured(system, user_content, SafetyOutput)
             candidate = llm_result.rewritten or draft
             violations = list(llm_result.violations)
         except Exception as exc:  # noqa: BLE001 - MOSAIC fallback: never block finalize on an LLM error

@@ -1,4 +1,4 @@
-"""TDD for app.agents.llm.chat_json: the only LLM entry point in the app.
+"""TDD for the app's structured-model policy boundary.
 
 All tests inject a fake OpenAI-shaped client via set_llm_client_for_tests so
 nothing here touches the network. tenacity's sleep is patched to a no-op so
@@ -20,7 +20,7 @@ from langchain_google_genai.chat_models import ChatGoogleGenerativeAIError
 from pydantic import BaseModel
 
 from app.agents.followup import FollowupOutput
-from app.agents.llm import LLMOutputError, chat_json, set_llm_client_for_tests
+from app.agents.llm import LLMOutputError, invoke_structured, set_llm_client_for_tests
 
 # The scripted openai-SDK-shaped fake lives in conftest.py, shared with the
 # agent-node tests.
@@ -31,6 +31,26 @@ from conftest import _fake_completion
 class _Verdict(BaseModel):
     ok: bool
     reason: str
+
+
+def test_validated_result_reuses_langchain_pydantic_instance(monkeypatch):
+    import app.agents.llm as llm_module
+
+    parsed = _Verdict(ok=True, reason="already validated")
+
+    def fail_revalidation(*_args, **_kwargs):
+        raise AssertionError("LangChain's Pydantic instance was validated twice")
+
+    monkeypatch.setattr(_Verdict, "model_validate", fail_revalidation)
+
+    result, raw, error = llm_module._validated_result(
+        {"parsed": parsed, "raw": None, "parsing_error": None},
+        _Verdict,
+    )
+
+    assert result is parsed
+    assert raw is None
+    assert error is None
 
 
 def _ok(payload: dict):
@@ -137,11 +157,11 @@ def _reset_override():
     set_llm_client_for_tests(None)
 
 
-def test_chat_json_strict_schema_happy_path():
+def test_invoke_structured_strict_schema_happy_path():
     client = FakeClient([_ok({"ok": True, "reason": "fine"})])
     set_llm_client_for_tests(client)
 
-    result = chat_json("system prompt", "user prompt", _Verdict)
+    result = invoke_structured("system prompt", "user prompt", _Verdict)
 
     assert result == _Verdict(ok=True, reason="fine")
     assert len(client.chat.completions.calls) == 1
@@ -149,7 +169,7 @@ def test_chat_json_strict_schema_happy_path():
     assert call["response_format"] is _Verdict
 
 
-def test_chat_json_sends_recursively_strict_schema():
+def test_invoke_structured_sends_recursively_strict_schema():
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -193,7 +213,7 @@ def test_chat_json_sends_recursively_strict_schema():
     )
     set_llm_client_for_tests(client)
 
-    result = chat_json("system", "user", FollowupOutput)
+    result = invoke_structured("system", "user", FollowupOutput)
 
     assert result == FollowupOutput(
         reminders=[{"type": "appointment", "days_before_appointment": 1}],
@@ -225,7 +245,7 @@ def test_chat_json_sends_recursively_strict_schema():
         ),
     ],
 )
-def test_chat_json_falls_back_to_json_object_when_structured_format_is_unsupported(
+def test_invoke_structured_falls_back_to_json_object_when_structured_format_is_unsupported(
     message,
     code,
     param,
@@ -238,7 +258,7 @@ def test_chat_json_falls_back_to_json_object_when_structured_format_is_unsupport
     )
     set_llm_client_for_tests(client)
 
-    result = chat_json("system prompt", "user prompt", _Verdict)
+    result = invoke_structured("system prompt", "user prompt", _Verdict)
 
     assert result == _Verdict(ok=False, reason="fallback worked")
     assert len(client.chat.completions.calls) == 2
@@ -258,13 +278,13 @@ def test_chat_json_falls_back_to_json_object_when_structured_format_is_unsupport
         "Invalid request: temperature must be between 0 and 2",
     ],
 )
-def test_chat_json_does_not_downgrade_unrelated_bad_requests(message):
+def test_invoke_structured_does_not_downgrade_unrelated_bad_requests(message):
     error = _bad_request_error(message)
     client = FakeClient([error])
     set_llm_client_for_tests(client)
 
     with pytest.raises(openai.BadRequestError) as excinfo:
-        chat_json("system prompt", "user prompt", _Verdict)
+        invoke_structured("system prompt", "user prompt", _Verdict)
 
     assert excinfo.value is error
     assert len(client.chat.completions.calls) == 1
@@ -287,19 +307,19 @@ def test_chat_json_does_not_downgrade_unrelated_bad_requests(message):
         ),
     ],
 )
-def test_chat_json_does_not_downgrade_invalid_schema_details(message, code):
+def test_invoke_structured_does_not_downgrade_invalid_schema_details(message, code):
     error = _bad_request_error(message, code=code, param="response_format")
     client = FakeClient([error])
     set_llm_client_for_tests(client)
 
     with pytest.raises(openai.BadRequestError) as excinfo:
-        chat_json("system prompt", "user prompt", _Verdict)
+        invoke_structured("system prompt", "user prompt", _Verdict)
 
     assert excinfo.value is error
     assert len(client.chat.completions.calls) == 1
 
 
-def test_chat_json_reprompts_once_on_validation_error_then_succeeds():
+def test_invoke_structured_reprompts_once_on_validation_error_then_succeeds():
     client = FakeClient(
         [
             _ok({"ok": "not-a-boolean"}),  # invalid: bad type, missing "reason"
@@ -308,7 +328,7 @@ def test_chat_json_reprompts_once_on_validation_error_then_succeeds():
     )
     set_llm_client_for_tests(client)
 
-    result = chat_json("system prompt", "user prompt", _Verdict)
+    result = invoke_structured("system prompt", "user prompt", _Verdict)
 
     assert result == _Verdict(ok=True, reason="corrected")
     assert len(client.chat.completions.calls) == 2
@@ -316,7 +336,7 @@ def test_chat_json_reprompts_once_on_validation_error_then_succeeds():
     assert any("valid" in m["content"].lower() for m in retry_messages)
 
 
-def test_chat_json_repairs_validation_after_json_schema_rejection():
+def test_invoke_structured_repairs_validation_after_json_schema_rejection():
     client = FakeClient(
         [
             _bad_request_error(),
@@ -326,7 +346,7 @@ def test_chat_json_repairs_validation_after_json_schema_rejection():
     )
     set_llm_client_for_tests(client)
 
-    result = chat_json("system prompt", "user prompt", _Verdict)
+    result = invoke_structured("system prompt", "user prompt", _Verdict)
 
     assert result == _Verdict(ok=True, reason="corrected in json mode")
     assert len(client.chat.completions.calls) == 3
@@ -337,7 +357,7 @@ def test_chat_json_repairs_validation_after_json_schema_rejection():
     assert any("valid" in message["content"].lower() for message in third_call["messages"])
 
 
-def test_chat_json_raises_llm_output_error_when_validation_never_succeeds():
+def test_invoke_structured_raises_llm_output_error_when_validation_never_succeeds():
     client = FakeClient(
         [
             _ok({"ok": "nope"}),
@@ -347,17 +367,17 @@ def test_chat_json_raises_llm_output_error_when_validation_never_succeeds():
     set_llm_client_for_tests(client)
 
     with pytest.raises(LLMOutputError):
-        chat_json("system prompt", "user prompt", _Verdict)
+        invoke_structured("system prompt", "user prompt", _Verdict)
 
     assert len(client.chat.completions.calls) == 2
 
 
-def test_chat_json_uses_fallback_endpoint_when_primary_exhausted():
+def test_invoke_structured_uses_fallback_endpoint_when_primary_exhausted():
     primary = FakeClient([_connection_error(), _connection_error(), _connection_error()])
     fallback = FakeClient([_ok({"ok": True, "reason": "via fallback"})])
     set_llm_client_for_tests(primary, fallback)
 
-    result = chat_json("system prompt", "user prompt", _Verdict, max_retries=3)
+    result = invoke_structured("system prompt", "user prompt", _Verdict, max_retries=3)
 
     assert result == _Verdict(ok=True, reason="via fallback")
     assert len(primary.chat.completions.calls) == 3
@@ -365,12 +385,12 @@ def test_chat_json_uses_fallback_endpoint_when_primary_exhausted():
     assert fallback.chat.completions.calls[0]["response_format"] == {"type": "json_object"}
 
 
-def test_chat_json_raises_when_primary_exhausted_and_no_fallback_configured():
+def test_invoke_structured_raises_when_primary_exhausted_and_no_fallback_configured():
     primary = FakeClient([_connection_error(), _connection_error(), _connection_error()])
     set_llm_client_for_tests(primary)
 
     with pytest.raises(openai.APIConnectionError):
-        chat_json("system prompt", "user prompt", _Verdict, max_retries=3)
+        invoke_structured("system prompt", "user prompt", _Verdict, max_retries=3)
 
     assert len(primary.chat.completions.calls) == 3
 
@@ -397,7 +417,7 @@ def test_chat_json_raises_when_primary_exhausted_and_no_fallback_configured():
     ],
     ids=["google-5xx", "http-network", "http-timeout", "wrapped-google-429"],
 )
-def test_chat_json_retries_provider_neutral_transient_errors(monkeypatch, errors):
+def test_invoke_structured_retries_provider_neutral_transient_errors(monkeypatch, errors):
     import app.agents.llm as llm_module
 
     primary = _ScriptedStructuredModel(
@@ -405,7 +425,7 @@ def test_chat_json_retries_provider_neutral_transient_errors(monkeypatch, errors
     )
     monkeypatch.setattr(llm_module, "_resolve_primary", lambda _profiles: primary)
 
-    result = llm_module.chat_json(
+    result = llm_module.invoke_structured(
         "system prompt",
         "user prompt",
         _Verdict,
@@ -417,7 +437,7 @@ def test_chat_json_retries_provider_neutral_transient_errors(monkeypatch, errors
 
 
 @pytest.mark.parametrize("code", [400, 401, 403, 404, 408])
-def test_chat_json_does_not_retry_or_fallback_for_google_client_errors(
+def test_invoke_structured_does_not_retry_or_fallback_for_google_client_errors(
     monkeypatch,
     code,
 ):
@@ -430,7 +450,7 @@ def test_chat_json_does_not_retry_or_fallback_for_google_client_errors(
     monkeypatch.setattr(llm_module, "_resolve_fallback", lambda _profiles: fallback)
 
     with pytest.raises(ChatGoogleGenerativeAIError) as excinfo:
-        llm_module.chat_json(
+        llm_module.invoke_structured(
             "system prompt",
             "user prompt",
             _Verdict,
@@ -442,7 +462,7 @@ def test_chat_json_does_not_retry_or_fallback_for_google_client_errors(
     assert fallback.calls == 0
 
 
-def test_chat_json_uses_fallback_after_google_transient_attempts_exhaust(
+def test_invoke_structured_uses_fallback_after_google_transient_attempts_exhaust(
     monkeypatch,
 ):
     import app.agents.llm as llm_module
@@ -457,7 +477,7 @@ def test_chat_json_uses_fallback_after_google_transient_attempts_exhaust(
     monkeypatch.setattr(llm_module, "_resolve_primary", lambda _profiles: primary)
     monkeypatch.setattr(llm_module, "_resolve_fallback", lambda _profiles: fallback)
 
-    result = llm_module.chat_json(
+    result = llm_module.invoke_structured(
         "system prompt",
         "user prompt",
         _Verdict,
@@ -469,7 +489,7 @@ def test_chat_json_uses_fallback_after_google_transient_attempts_exhaust(
     assert fallback.calls == 1
 
 
-def test_chat_json_preserves_original_google_error_without_fallback(monkeypatch):
+def test_invoke_structured_preserves_original_google_error_without_fallback(monkeypatch):
     import app.agents.llm as llm_module
 
     errors = [_wrapped_google_client_error(429) for _attempt in range(3)]
@@ -478,7 +498,7 @@ def test_chat_json_preserves_original_google_error_without_fallback(monkeypatch)
     monkeypatch.setattr(llm_module, "_resolve_fallback", lambda _profiles: None)
 
     with pytest.raises(ChatGoogleGenerativeAIError) as excinfo:
-        llm_module.chat_json(
+        llm_module.invoke_structured(
             "system prompt",
             "user prompt",
             _Verdict,

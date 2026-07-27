@@ -61,7 +61,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agents.prompts import DOCUMENT
-from app.agents.llm import chat_json
+from app.agents.llm import invoke_structured
 from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language
 from app.agents.state import AgentState
@@ -284,7 +284,7 @@ def run(state: AgentState, db: Session) -> dict:
 
             prompt, counts = _redacted_prompt(spaced_name, extracted_text, language)
             _merge_counts(pii_counts, counts)
-            result = chat_json(system, prompt, DocumentOutput)
+            result = invoke_structured(system, prompt, DocumentOutput)
             if result.confidence < _CONFIDENCE_THRESHOLD:
                 write_audit(
                     db,

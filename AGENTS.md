@@ -36,7 +36,7 @@ docs/        # architecture, security, demo and GCP deployment guides
    anywhere. The deterministic guardrails in `backend/app/safety/` are the first
    gate; do not weaken them.
 3. **Keep the chat-model boundary in `agents/llm.py`.** Agent schemas go through
-   `chat_json`; the optional prompt-injection classifier goes through
+   `invoke_structured`; the optional prompt-injection classifier goes through
    `classify_injection`. Both build models with LangChain's `init_chat_model`
    factory from profiles in `backend/llm.yaml` (env vars win; see
    `agents/model_config.py`). Never regex-parse JSON out of prose, construct a

@@ -211,8 +211,8 @@ def test_unknown_patient_leaves_the_language_to_the_redactor(
 
 
 def test_routing_llm_failure_returns_error_not_raise(db, seeded, fake_llm):
-    # RuntimeError isn't a retried transport error, so chat_json propagates
-    # it on the first call - routing.run must still not raise.
+    # RuntimeError is not a retried transport error, so invoke_structured
+    # propagates it on the first call. routing.run must still not raise.
     fake_llm([RuntimeError("boom")])
 
     result = routing.run(_state(), db)

@@ -500,8 +500,11 @@ def test_document_agent_blocks_an_injection_filename_and_marks_the_field(db, see
 
 
 def _guard_calls(client) -> list[dict]:
-    """The layer 2 calls only: `classify_injection` and `chat_json` share one
-    client, and they are told apart by the model they name."""
+    """The layer 2 calls only.
+
+    `classify_injection` and `invoke_structured` share one client and are told
+    apart by the model they name.
+    """
     return [
         call
         for call in client.chat.completions.calls

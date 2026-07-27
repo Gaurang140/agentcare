@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agents.prompts import COORDINATOR
-from app.agents.llm import chat_json
+from app.agents.llm import invoke_structured
 from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.agents.support import record_agent_exit, redact_request_for_agent
@@ -60,7 +60,7 @@ def run(state: AgentState, db: Session) -> dict:
     try:
         request_text = redact_request_for_agent(db, state, "coordinator")
         system = build_system_prompt(db, "coordinator", COORDINATOR)
-        result = chat_json(system, _user_prompt(state, request_text), CoordinatorOutput)
+        result = invoke_structured(system, _user_prompt(state, request_text), CoordinatorOutput)
         plan = [*(state.get("plan") or []), result.next_step]
         update = {"plan": plan, "completed_steps": ["coordinator"]}
         record_agent_exit(db, "coordinator", workflow_id, {"next_step": result.next_step})

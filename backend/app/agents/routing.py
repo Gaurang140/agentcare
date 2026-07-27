@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agents.prompts import ROUTING
-from app.agents.llm import chat_json
+from app.agents.llm import invoke_structured
 from app.agents.memory import build_system_prompt
 from app.agents.responses import staff_review_response
 from app.agents.state import AgentState
@@ -90,7 +90,7 @@ def run(state: AgentState, db: Session) -> dict:
         departments = list_departments(db)
         request_text = redact_request_for_agent(db, state, "routing")
         system = build_system_prompt(db, "routing", ROUTING)
-        result = chat_json(
+        result = invoke_structured(
             system,
             _user_prompt(request_text, departments, state.get("staff_guidance")),
             RoutingOutput,

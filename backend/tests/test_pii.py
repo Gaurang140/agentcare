@@ -171,10 +171,10 @@ def test_resolve_language_ignores_a_language_with_no_model():
 
 
 # --- Node wiring: routing, coordinator, appointment, document ----------------
-# Each node builds its chat_json user-content from patient-submitted text
-# (request_text or a document's extracted_text). These tests assert the
-# messages actually sent to the fake LLM carry the redacted token, never the
-# raw value, and that a "safety.pii_redacted" audit row records the counts
+# Each node builds the user content passed to invoke_structured from
+# patient-submitted text (request_text or a document's extracted_text). These
+# tests assert the messages sent to the fake LLM carry the redacted token,
+# never the raw value, and that a "safety.pii_redacted" audit row records counts
 # (and nothing else) exactly once per node call.
 
 

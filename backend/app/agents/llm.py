@@ -1,20 +1,21 @@
 """The two LLM entry points for the whole codebase, on the langchain
 chat-model layer.
 
-`chat_json` is where every agent node gets its structured, pydantic-validated
-output. `classify_injection` is the one other model call: a single plain
-completion for the optional classifier layer of the prompt-injection guard
-(`safety/injection_guard.py`), since a prompt-guard model returns a bare
-label, not schema-shaped JSON. Nothing else builds a chat model.
+`invoke_structured` is where every agent node gets its structured,
+Pydantic-validated output. `classify_injection` is the one other model call:
+a single plain completion for the optional classifier layer of the
+prompt-injection guard (`safety/injection_guard.py`), since a prompt-guard
+model returns a bare label, not schema-shaped JSON. Nothing else builds a
+chat model.
 
 Models come from `langchain.chat_models.init_chat_model`, configured by the
 profiles in `backend/llm.yaml` (see `agents/model_config.py`; env vars win
-over the file). The default profile is Groq's OpenAI-compatible endpoint via
-langchain-openai; any other provider works by installing its langchain
-package (e.g. `pip install langchain-google-genai` for Gemini on Vertex AI) and
-naming it in a profile.
+over the file). The verified integrations are OpenAI-compatible endpoints
+through `langchain-openai` and Gemini on Vertex AI through
+`langchain-google-genai`. Adding another LangChain provider also requires
+compatibility tests for its structured-output and transport-error behavior.
 
-Call sequence for one `chat_json(...)`:
+Call sequence for one `invoke_structured(...)`:
 
 1. Resolve the active profile (or the test override injected by
    `set_llm_client_for_tests`) and build the chat model.
@@ -328,13 +329,16 @@ def _validated_result(
     parsing_error = result.get("parsing_error")
     if parsing_error is not None:
         return None, raw_message, parsing_error
+    parsed = result.get("parsed")
+    if isinstance(parsed, schema_model):
+        return parsed, raw_message, None
     try:
-        return schema_model.model_validate(result.get("parsed")), raw_message, None
+        return schema_model.model_validate(parsed), raw_message, None
     except ValidationError as exc:
         return None, raw_message, exc
 
 
-def _chat_json_once(
+def _invoke_structured_once(
     model: BaseChatModel,
     system: str,
     user: str,
@@ -422,22 +426,24 @@ def _chat_json_once(
     return parsed
 
 
-def chat_json(
+def invoke_structured(
     system: str,
     user: str,
     schema_model: type[SchemaT],
     max_retries: int | None = None,
 ) -> SchemaT:
-    """Ask the LLM for JSON matching `schema_model` and return a validated
-    instance. The only structured LLM entry point in the codebase - see
-    module docstring for the full retry/fallback sequence. `max_retries`
-    is the public compatibility name for the maximum total LangChain attempts
-    and defaults to the active profile's value from llm.yaml."""
+    """Return a validated `schema_model` instance from the configured model.
+
+    This is the codebase's structured-model policy boundary. See the module
+    docstring for the retry and fallback sequence. `max_retries` is the
+    maximum total LangChain attempts and defaults to the active profile's
+    value from llm.yaml.
+    """
     profiles = load_llm_profiles(settings)
     retries = max_retries if max_retries is not None else profiles.primary.max_retries
     primary = _resolve_primary(profiles)
     try:
-        return _chat_json_once(primary, system, user, schema_model, retries)
+        return _invoke_structured_once(primary, system, user, schema_model, retries)
     except Exception as exc:
         if not _is_retryable_provider_error(exc):
             raise
@@ -445,7 +451,7 @@ def chat_json(
         if fallback is None:
             raise
         logger.warning("llm_primary_exhausted_using_fallback", error=str(exc))
-        return _chat_json_once(
+        return _invoke_structured_once(
             fallback,
             system,
             user,

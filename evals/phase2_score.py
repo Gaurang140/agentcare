@@ -16,10 +16,9 @@ Two halves, kept apart on purpose:
 Two keys, in that order: JUDGE_GROQ first, then LLM_API_KEY. Separating them
 is what keeps an eval run from spending the demo's own rate limit, and it is
 why the judge model and endpoint have their own environment variables too
-(JUDGE_MODEL, JUDGE_BASE_URL). Nothing here is tied to one provider: the
-judge goes through `backend/app/agents/llm.py::chat_json`, the single LLM
-entry point in this repo, with base URL, key and model read from the
-environment exactly the way the application reads them.
+(JUDGE_MODEL, JUDGE_BASE_URL). The judge uses the application's
+`backend/app/agents/llm.py::invoke_structured` boundary with an
+OpenAI-compatible model profile assembled from those environment values.
 
 Outputs, both under evals/results/:
 
@@ -453,8 +452,8 @@ def judge_key() -> tuple[str | None, str | None]:
     return None, None
 
 
-def _judge_chat_json():
-    """Import `chat_json` with the judge's endpoint, key and model in place.
+def _judge_invoke_structured():
+    """Import `invoke_structured` with the judge's endpoint, key and model in place.
 
     The settings object is built when `app.config` is first imported and
     environment variables outrank the .env file, so the judge's own values are
@@ -475,9 +474,9 @@ def _judge_chat_json():
     backend_dir = str(REPO_ROOT / "backend")
     if backend_dir not in sys.path:
         sys.path.insert(0, backend_dir)
-    from app.agents.llm import chat_json  # noqa: PLC0415 - deferred until a key exists
+    from app.agents.llm import invoke_structured  # noqa: PLC0415 - deferred until a key exists
 
-    return chat_json
+    return invoke_structured
 
 
 def _judge_model() -> type:
@@ -513,7 +512,7 @@ def run_judge(admin: Sequence[dict]) -> dict:
             "key_source": source,
         }
 
-    chat_json = _judge_chat_json()
+    invoke_structured = _judge_invoke_structured()
     verdict_model = _judge_model()
     scores: list[dict] = []
     failures: list[dict] = []
@@ -530,7 +529,7 @@ def run_judge(admin: Sequence[dict]) -> dict:
             f"Assistant answer: {(sample.get('actual_response') or '')[:JUDGE_RESPONSE_TRUNCATE]}"
         )
         try:
-            verdict = chat_json(JUDGE_RUBRIC, user, verdict_model)
+            verdict = invoke_structured(JUDGE_RUBRIC, user, verdict_model)
         except Exception as exc:  # noqa: BLE001 - one bad grade must not lose the rest
             failures.append({"id": sample["id"], "error": f"{type(exc).__name__}: {exc}"})
             continue

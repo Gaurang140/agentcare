@@ -141,7 +141,7 @@ response is not replaced by redaction tokens.
 
 ## Structured model output
 
-All agent schemas pass through `app/agents/llm.py::chat_json`.
+All agent schemas pass through `app/agents/llm.py::invoke_structured`.
 
 LangChain `with_structured_output` handles provider-specific request formatting
 and ordinary Pydantic parsing. AgentCare adds:

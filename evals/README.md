@@ -86,7 +86,7 @@ Judge key precedence is:
 
 `JUDGE_MODEL` and `JUDGE_BASE_URL` can point the judge at another
 OpenAI-compatible endpoint. The scorer routes judge output through the same
-`chat_json` policy boundary as the application. Without a judge key, response
+`invoke_structured` policy boundary as the application. Without a judge key, response
 quality remains explicitly pending.
 
 Rate-limit pacing constants are defined near the top of

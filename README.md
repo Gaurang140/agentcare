@@ -22,7 +22,7 @@ prescribe or recommend doses.
 | Human control | Deterministic escalation node pauses with `interrupt()` and resumes the same thread |
 | Safety boundary | Emergency, medical-scope, injection and output controls run in application code |
 | PII boundary | Patient text is redacted only on the copy sent across each model boundary |
-| Structured model output | `chat_json` owns application policy and delegates schema handling to LangChain |
+| Structured model output | `invoke_structured` owns application policy and delegates schema handling to LangChain |
 | Auditability | Tool mutations, agent exits and approvals write append-only `AuditEvent` rows |
 | Model profiles | Groq default, local OpenAI-compatible and configured Vertex through Google GenAI |
 | Cloud target | GCP configuration is committed; live provisioning and verification remain operator work |
@@ -47,8 +47,8 @@ flowchart LR
         H -->|"Command + same thread_id"| C
     end
     G --> MB["Model boundary<br/>redact patient text per call"]
-    MB --> CJ["chat_json policy boundary<br/>LangChain structured output"]
-    CJ --> LLM["Groq, local or Vertex profile"]
+    MB --> SO["invoke_structured policy boundary<br/>LangChain structured output"]
+    SO --> LLM["Groq, local or Vertex profile"]
     G --> T["SQL tools"]
     T --> DB[("Domain SQL + append-only audit")]
     G <--> CP[("SQLite or Postgres checkpointer")]
@@ -314,7 +314,7 @@ put a Google credential value in `.env`. A host ADC login is not automatically
 mounted into the Compose backend container; direct local backend execution is
 the documented local Vertex path unless the operator explicitly mounts ADC.
 
-`chat_json` is the application policy boundary. LangChain
+`invoke_structured` is the application policy boundary. LangChain
 `with_structured_output` owns provider formatting and ordinary Pydantic
 parsing. AgentCare adds transport retries, strict-schema compatibility,
 one corrective prompt, fallback selection and application-specific errors.
