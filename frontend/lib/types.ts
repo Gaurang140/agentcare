@@ -149,10 +149,6 @@ export interface DoctorCreate {
   name: string;
 }
 
-export interface DoctorUpdate {
-  active: boolean;
-}
-
 export interface DoctorOut {
   id: number;
   department_id: number;
@@ -164,11 +160,6 @@ export interface SlotGenerateRequest {
   doctor_id: number;
   date_from: string; // ISO date
   date_to: string; // ISO date
-}
-
-export interface ReminderRunResponse {
-  sent_count: number;
-  reminder_ids: number[];
 }
 
 export interface AgentRuleOut {
@@ -183,10 +174,6 @@ export interface AgentRuleOut {
 export interface AgentRuleCreate {
   agent_name: string;
   rule_text: string;
-}
-
-export interface AgentRuleUpdate {
-  active: boolean;
 }
 
 // ---- schemas/workflow.py ----
@@ -209,11 +196,6 @@ export interface WorkflowRunDetail {
   appointment?: Record<string, unknown> | null;
   documents: DocumentMeta[];
   escalation?: Record<string, unknown> | null;
-}
-
-export interface ResumeResponse {
-  id: number;
-  status: string;
 }
 
 // ---- app/exceptions.py error envelope ----

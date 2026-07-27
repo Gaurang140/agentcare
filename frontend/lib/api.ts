@@ -23,10 +23,8 @@ import type {
   ProfileUpdateRequest,
   RegisterRequest,
   ReminderOut,
-  ReminderRunResponse,
   RescheduleRequest,
   ResolveEscalationRequest,
-  ResumeResponse,
   SlotGenerateRequest,
   SlotOut,
   UserSummary,
@@ -144,10 +142,6 @@ export function getWorkflow(id: number): Promise<WorkflowRunDetail> {
   return apiFetch(`/api/workflows/${id}`);
 }
 
-export function resumeWorkflow(id: number): Promise<ResumeResponse> {
-  return apiFetch(`/api/workflows/${id}/resume`, { method: "POST" });
-}
-
 // ---- patient self-service (routes_patient.py) ----
 
 export function listAppointments(): Promise<AppointmentOut[]> {
@@ -263,10 +257,6 @@ export function staffSetDoctorActive(doctorId: number, active: boolean): Promise
 
 export function staffGenerateSlots(payload: SlotGenerateRequest): Promise<SlotOut[]> {
   return apiFetch("/api/staff/slots/generate", { method: "POST", body: JSON.stringify(payload) });
-}
-
-export function staffRunDueReminders(): Promise<ReminderRunResponse> {
-  return apiFetch("/api/internal/reminders/run-due", { method: "POST" });
 }
 
 // ---- agent rules (procedural memory, routes_staff.py) ----
