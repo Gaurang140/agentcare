@@ -502,7 +502,7 @@ def test_staff_approval_resumes_the_run_and_books_the_appointment(db, seeded, fa
         ("approved", note)
     ]
     # The note reached the agents as guidance ...
-    assert any(note in json.dumps(call) for call in client.chat.completions.calls)
+    assert any(note in json.dumps(call["messages"]) for call in client.chat.completions.calls)
     # ... and reaches the patient through nothing at all: not the answer, and
     # not the state projection the portal renders (routes_workflows).
     assert note not in (resumed.state["final_response"] or "")

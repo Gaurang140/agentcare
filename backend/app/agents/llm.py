@@ -11,23 +11,22 @@ Models come from `langchain.chat_models.init_chat_model`, configured by the
 profiles in `backend/llm.yaml` (see `agents/model_config.py`; env vars win
 over the file). The default profile is Groq's OpenAI-compatible endpoint via
 langchain-openai; any other provider works by installing its langchain
-package (e.g. `pip install langchain-google-vertexai` for Vertex AI) and
+package (e.g. `pip install langchain-google-genai` for Gemini on Vertex AI) and
 naming it in a profile.
 
 Call sequence for one `chat_json(...)`:
 
 1. Resolve the active profile (or the test override injected by
    `set_llm_client_for_tests`) and build the chat model.
-2. Ask for strict structured output (`response_format: json_schema`,
-   `strict: true`, schema from `schema_model.model_json_schema()` with
-   `additionalProperties: False`) - Groq's gpt-oss models support this.
+2. Ask LangChain for strict structured output (`response_format:
+   json_schema`, `strict: true`) - Groq's gpt-oss models support this.
 3. If the endpoint rejects that request format (`openai.BadRequestError`,
    e.g. a local LM Studio server), retry the same model with
    `{"type": "json_object"}` and the schema spelled out in the prompt
    instead.
-4. Validate the reply with `schema_model.model_validate_json`. On a
-   validation failure, re-prompt once with the validation error appended
-   and validate again; if that still fails, raise `LLMOutputError`.
+4. Accept LangChain's validated Pydantic instance (or validate a provider
+   dict). On a validation failure, re-prompt once with the error appended;
+   if that still fails, raise `LLMOutputError`.
 5. Transport failures and 5xx/429s are retried with exponential backoff
    (1-8s) via langchain's `with_retry`, within a single logical request.
    The SDK's own internal retries are disabled (`max_retries=0`) so the
@@ -168,19 +167,6 @@ def _resolve_fallback(profiles) -> BaseChatModel | None:
     return _build_chat_model(fallback)
 
 
-def _strict_schema(schema_model: type[BaseModel]) -> dict:
-    schema = schema_model.model_json_schema()
-    schema["additionalProperties"] = False
-    return {
-        "type": "json_schema",
-        "json_schema": {
-            "name": schema_model.__name__,
-            "strict": True,
-            "schema": schema,
-        },
-    }
-
-
 def _schema_in_prompt(system: str, schema_model: type[BaseModel]) -> str:
     """json_object mode carries the schema in the system prompt instead of
     the request format."""
@@ -203,14 +189,49 @@ def _with_retry(runnable: Runnable, max_retries: int) -> Runnable:
     )
 
 
-def _invoke(
+def _invoke_structured(
     model: BaseChatModel,
     messages: list[BaseMessage],
-    response_format: dict,
+    schema_model: type[SchemaT],
     max_retries: int,
-) -> AIMessage:
-    bound = model.bind(response_format=response_format)
-    return _with_retry(bound, max_retries).invoke(messages)
+    *,
+    json_object_mode: bool,
+) -> dict:
+    if json_object_mode:
+        structured = model.with_structured_output(
+            schema_model,
+            method="json_mode",
+            include_raw=True,
+        )
+    else:
+        structured = model.with_structured_output(
+            schema_model,
+            method="json_schema",
+            strict=True,
+            include_raw=True,
+        )
+    return _with_retry(structured, max_retries).invoke(messages)
+
+
+def _validated_result(
+    result: dict,
+    schema_model: type[SchemaT],
+) -> tuple[SchemaT | None, AIMessage | None, Exception | None]:
+    """Normalize include_raw output across providers.
+
+    LangChain normally returns the requested Pydantic instance. Some provider
+    integrations return a dict instead, so the application boundary still
+    validates that dict before accepting it.
+    """
+    raw = result.get("raw")
+    raw_message = raw if isinstance(raw, AIMessage) else None
+    parsing_error = result.get("parsing_error")
+    if parsing_error is not None:
+        return None, raw_message, parsing_error
+    try:
+        return schema_model.model_validate(result.get("parsed")), raw_message, None
+    except ValidationError as exc:
+        return None, raw_message, exc
 
 
 def _chat_json_once(
@@ -229,43 +250,76 @@ def _chat_json_once(
             SystemMessage(_schema_in_prompt(system, schema_model)),
             HumanMessage(user),
         ]
-        reply = _invoke(model, messages, {"type": "json_object"}, max_retries)
     else:
         messages = [SystemMessage(system), HumanMessage(user)]
-        try:
-            reply = _invoke(model, messages, _strict_schema(schema_model), max_retries)
-        except openai.BadRequestError:
-            logger.info("llm_json_schema_unsupported_falling_back")
-            json_object_mode = True
-            messages = [
-                SystemMessage(_schema_in_prompt(system, schema_model)),
-                HumanMessage(user),
-            ]
-            reply = _invoke(model, messages, {"type": "json_object"}, max_retries)
 
-    content = reply.text
     try:
-        return schema_model.model_validate_json(content)
-    except ValidationError as exc:
-        logger.warning("llm_validation_failed_reprompting", error=str(exc))
-        retry_messages = [
-            *messages,
-            AIMessage(content),
-            HumanMessage(
-                "That response failed schema validation with this error: "
-                f"{exc}\nReturn corrected JSON only, matching the schema."
-            ),
-        ]
-        response_format = (
-            {"type": "json_object"} if json_object_mode else _strict_schema(schema_model)
+        result = _invoke_structured(
+            model,
+            messages,
+            schema_model,
+            max_retries,
+            json_object_mode=json_object_mode,
         )
-        reply = _invoke(model, retry_messages, response_format, max_retries)
+    except openai.BadRequestError:
+        if json_object_mode:
+            raise
+        logger.info("llm_json_schema_unsupported_falling_back")
+        json_object_mode = True
+        messages = [
+            SystemMessage(_schema_in_prompt(system, schema_model)),
+            HumanMessage(user),
+        ]
         try:
-            return schema_model.model_validate_json(reply.text)
-        except ValidationError as exc2:
-            raise LLMOutputError(
-                f"{schema_model.__name__} validation failed after retry: {exc2}"
-            ) from exc2
+            result = _invoke_structured(
+                model,
+                messages,
+                schema_model,
+                max_retries,
+                json_object_mode=True,
+            )
+        except ValidationError as exc:
+            parsed, raw_message, validation_error = None, None, exc
+        else:
+            parsed, raw_message, validation_error = _validated_result(result, schema_model)
+    except ValidationError as exc:
+        parsed, raw_message, validation_error = None, None, exc
+    else:
+        parsed, raw_message, validation_error = _validated_result(result, schema_model)
+
+    if validation_error is None:
+        assert parsed is not None
+        return parsed
+
+    logger.warning("llm_validation_failed_reprompting", error=str(validation_error))
+    retry_messages = [*messages]
+    if raw_message is not None:
+        retry_messages.append(raw_message)
+    retry_messages.append(
+        HumanMessage(
+            "That response failed schema validation with this error: "
+            f"{validation_error}\nReturn corrected JSON only, matching the schema."
+        )
+    )
+    try:
+        retry_result = _invoke_structured(
+            model,
+            retry_messages,
+            schema_model,
+            max_retries,
+            json_object_mode=json_object_mode,
+        )
+    except ValidationError as exc2:
+        raise LLMOutputError(
+            f"{schema_model.__name__} validation failed after retry: {exc2}"
+        ) from exc2
+    parsed, _, validation_error = _validated_result(retry_result, schema_model)
+    if validation_error is not None:
+        raise LLMOutputError(
+            f"{schema_model.__name__} validation failed after retry: {validation_error}"
+        ) from validation_error
+    assert parsed is not None
+    return parsed
 
 
 def chat_json(

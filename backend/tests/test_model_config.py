@@ -50,6 +50,16 @@ def test_committed_yaml_provides_groq_default_profile(monkeypatch):
     assert profiles.injection_guard_model == "meta-llama/llama-prompt-guard-2-86m"
 
 
+def test_committed_yaml_provides_vertex_profile(monkeypatch):
+    settings = _settings(monkeypatch, LLM_PROFILE="vertex")
+
+    profiles = load_llm_profiles(settings)
+
+    assert profiles.primary.provider == "google_genai"
+    assert profiles.primary.model == "gemini-2.5-flash"
+    assert profiles.primary.params == {"vertexai": True}
+
+
 def test_env_model_overrides_yaml(monkeypatch):
     settings = _settings(monkeypatch, LLM_MODEL="my-custom-model")
 
@@ -71,7 +81,7 @@ profiles:
     model: model-one
     base_url: https://one.test/v1
   second:
-    provider: google_vertexai
+    provider: google_genai
     model: gemini-2.5-flash
     location: europe-west3
     timeout: 12
@@ -82,7 +92,7 @@ profiles:
 
     profiles = load_llm_profiles(settings, path=config)
 
-    assert profiles.primary.provider == "google_vertexai"
+    assert profiles.primary.provider == "google_genai"
     assert profiles.primary.model == "gemini-2.5-flash"
     assert profiles.primary.timeout == 12
     # provider-specific extras ride along for init_chat_model

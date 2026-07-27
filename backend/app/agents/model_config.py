@@ -29,8 +29,9 @@ logger = get_logger(__name__)
 _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "llm.yaml"
 
 # Profile keys with dedicated fields; everything else a profile carries is
-# passed through to init_chat_model untouched (e.g. `location`,
-# `temperature`, `project`), so provider-specific knobs need no code change.
+# passed through to init_chat_model untouched (e.g. google-genai's
+# `vertexai`, `location`, or `project`), so provider-specific knobs need no
+# code change.
 _KNOWN_KEYS = {"provider", "model", "base_url", "timeout", "max_retries"}
 
 

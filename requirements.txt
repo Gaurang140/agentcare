@@ -8,10 +8,10 @@ openai==2.47.0
 # LangChain chat-model layer for agents/llm.py: init_chat_model factory,
 # message types, runnable retry. langchain-openai reaches Groq (or any
 # OpenAI-compatible endpoint) through the pinned openai SDK above. Other
-# providers (e.g. langchain-google-vertexai for Vertex AI) install
-# separately and are selected via backend/llm.yaml profiles.
+# providers are selected via backend/llm.yaml profiles.
 langchain==1.3.14
 langchain-openai==1.4.1
+langchain-google-genai==4.2.7
 pyyaml==6.0.3
 langgraph==1.2.9
 langgraph-checkpoint-sqlite==3.1.0

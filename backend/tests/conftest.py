@@ -25,6 +25,7 @@ os.environ.setdefault("TESTING", "1")
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -282,7 +283,12 @@ class _FakeWithRawResponse:
         return _FakeRawResponse(self._completions.create(**kwargs))
 
     def parse(self, **kwargs) -> _FakeRawResponse:
-        return _FakeRawResponse(self._completions.create(**kwargs))
+        completion = self._completions.create(**kwargs)
+        response_format = kwargs.get("response_format")
+        if isinstance(response_format, type) and issubclass(response_format, BaseModel):
+            content = completion.choices[0].message.content
+            completion.choices[0].message.parsed = response_format.model_validate_json(content)
+        return _FakeRawResponse(completion)
 
 
 class _FakeCompletions:
