@@ -2,7 +2,7 @@
 loop that always returns to the coordinator until it picks a terminal step.
 
 Node functions here are thin adapters: each specialist's real logic lives in
-its own `app/agents/<name>.py::run(state, db)` (Tasks 7-10). The adapters
+its own `app/agents/<name>.py::run(state, db)`. The adapters
 exist only because a compiled LangGraph node's signature is `(state,
 config)`, not `(state, db)` - the db session for one workflow run travels
 through `config["configurable"]["db"]` rather than through AgentState
