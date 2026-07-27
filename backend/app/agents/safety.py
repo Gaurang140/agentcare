@@ -1,10 +1,12 @@
 """Safety agent: composes the patient-facing confirmation from freshly
 re-queried DB rows (never the in-memory state dict, which may be stale),
-then runs it past both the LLM safety reviewer and the deterministic
-sanitizer. The deterministic sanitizer always has the final word: an LLM
-that claims "safe: true" over a poisoned sentence does not get to publish
-it, and an LLM outage never blocks finalize (MOSAIC fallback pattern) - the
-deterministic sanitizer alone is enough to answer safely.
+then runs it past the LLM safety reviewer, Model Armor when it is configured
+(`safety/model_armor.py`, the GCP path) and the deterministic sanitizer. The
+deterministic sanitizer always has the final word: an LLM that claims
+"safe: true" over a poisoned sentence does not get to publish it, a cloud
+screening service that is down or wrong does not get to either, and neither
+outage blocks finalize (MOSAIC fallback pattern) - the deterministic
+sanitizer alone is enough to answer safely.
 
 Owns no domain tools - it only reviews. Its DB reads go straight through the
 session, mirroring how patient_tools.get_patient_summary composes a
@@ -28,7 +30,8 @@ from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
 from app.logging_setup import get_logger
 from app.models import Appointment, PatientDocument, PatientProfile, Reminder
-from app.safety.guardrails import sanitize_agent_output
+from app.safety import model_armor
+from app.safety.guardrails import SANITIZED_SENTENCE, sanitize_agent_output
 from app.tools.audit_tools import write_audit
 
 logger = get_logger(__name__)
@@ -129,6 +132,41 @@ def _compose_draft(db: Session, patient_id: int, appointment_ref: dict | None, l
     return " ".join(lines)
 
 
+def _model_armor_screen(db: Session, workflow_id: int | None, candidate: str) -> str:
+    """Model Armor's look at the drafted answer, immediately before the
+    deterministic sanitizer.
+
+    Order matters and this is not the last word. The sanitizer runs on
+    whatever comes back from here, so a Model Armor outage, a wrong verdict
+    or a whole cloud going dark can never publish a diagnosis: the
+    deterministic patterns still read the text afterwards.
+
+    A flagged draft is replaced with `SANITIZED_SENTENCE`, the same referral
+    the sanitizer swaps a forbidden sentence for. Reusing that constant is
+    deliberate: the patient sees one referral wording, not a second one that
+    happens to mean the same thing. The audit row carries the filter
+    categories and nothing else, never the draft.
+
+    Disabled or no opinion (`None`) returns the draft unchanged, so with
+    `MODEL_ARMOR_TEMPLATE` empty this function costs one settings read and
+    the path is exactly what it was.
+    """
+    verdict = model_armor.screen_response(candidate)
+    if verdict is None or not verdict.flagged:
+        return candidate
+
+    logger.warning("safety_model_armor_blocked_draft", categories=list(verdict.categories))
+    write_audit(
+        db,
+        None,
+        "safety.model_armor_blocked",
+        "workflow_run",
+        workflow_id,
+        {"categories": list(verdict.categories)},
+    )
+    return SANITIZED_SENTENCE
+
+
 def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
     write_audit(db, None, "agent.safety.completed", "workflow_run", workflow_id, summary)
     db.commit()
@@ -156,6 +194,7 @@ def run(state: AgentState, db: Session) -> dict:
             llm_ok = False
             logger.warning("safety_llm_failed_using_deterministic_only", error=str(exc))
 
+        candidate = _model_armor_screen(db, workflow_id, candidate)
         final_text, flagged = sanitize_agent_output(candidate)
         safety_flags = list(violations)
         if flagged:

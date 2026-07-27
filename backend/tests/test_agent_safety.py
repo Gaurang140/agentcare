@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.agents import safety
-from app.models import AppointmentSlot, PatientProfile
+from app.models import AppointmentSlot, AuditEvent, PatientProfile
 from app.safety.guardrails import SANITIZED_SENTENCE
 from app.tools.appointment_tools import book_appointment, cancel_appointment
 from app.tools.followup_tools import create_reminder
@@ -146,6 +146,113 @@ def test_safety_prompt_carries_english_language_instruction_when_preferred(db, s
 
     sent_user_content = client.chat.completions.calls[0]["messages"][1]["content"]
     assert "Respond in English (en)." in sent_user_content
+
+
+# --- Model Armor screens the draft, the deterministic sanitizer still last ---
+
+
+_CONFIRMATION = "Your appointment is confirmed."
+
+
+def _armor_audit(db) -> AuditEvent | None:
+    return db.query(AuditEvent).filter_by(action="safety.model_armor_blocked").first()
+
+
+def test_model_armor_flagged_draft_becomes_the_referral_text_with_an_audit_row(
+    db, seeded, fake_llm, model_armor_on, fake_model_armor
+):
+    state = _booked_state(db)
+    fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
+    fake_model_armor(response={"pi_and_jailbreak": True})
+
+    result = safety.run(state, db)
+
+    assert result["final_response"] == SANITIZED_SENTENCE
+    row = _armor_audit(db)
+    assert row is not None
+    assert row.metadata_json == {"categories": ["pi_and_jailbreak"]}
+
+
+def test_model_armor_audit_row_carries_categories_and_not_the_draft(
+    db, seeded, fake_llm, model_armor_on, fake_model_armor
+):
+    state = _booked_state(db)
+    fake_llm(
+        [{"safe": True, "violations": [], "rewritten": "Max Mustermann, you have diabetes."}]
+    )
+    fake_model_armor(response={"pi_and_jailbreak": True})
+
+    safety.run(state, db)
+
+    row = _armor_audit(db)
+    assert "Mustermann" not in str(row.metadata_json)
+    assert "diabetes" not in str(row.metadata_json)
+
+
+def test_clean_model_armor_verdict_leaves_the_draft_untouched(
+    db, seeded, fake_llm, model_armor_on, fake_model_armor
+):
+    state = _booked_state(db)
+    fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
+    client = fake_model_armor(response={"pi_and_jailbreak": False, "malicious_uris": False})
+
+    result = safety.run(state, db)
+
+    assert result["final_response"] == _CONFIRMATION
+    assert _armor_audit(db) is None
+    assert client.response_calls[0]["request"].model_response_data.text == _CONFIRMATION
+
+
+def test_model_armor_failure_leaves_the_draft_to_the_deterministic_sanitizer(
+    db, seeded, fake_llm, model_armor_on, fake_model_armor
+):
+    """No opinion is not a block. A screening outage must not turn every
+    confirmation into a referral."""
+    state = _booked_state(db)
+    fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
+    fake_model_armor(response=RuntimeError("deadline exceeded"))
+
+    result = safety.run(state, db)
+
+    assert result["final_response"] == _CONFIRMATION
+    assert _armor_audit(db) is None
+
+
+def test_deterministic_sanitizer_still_has_the_last_word_after_a_clean_armor_verdict(
+    db, seeded, fake_llm, model_armor_on, fake_model_armor
+):
+    """Model Armor saying nothing is wrong does not publish a diagnosis."""
+    state = _booked_state(db)
+    fake_llm(
+        [
+            {
+                "safe": True,
+                "violations": [],
+                "rewritten": "Your appointment is confirmed. You have diabetes.",
+            }
+        ]
+    )
+    fake_model_armor(response={"pi_and_jailbreak": False})
+
+    result = safety.run(state, db)
+
+    assert "diabetes" not in result["final_response"]
+    assert SANITIZED_SENTENCE in result["final_response"]
+    assert "deterministic_sanitizer_rewrote_output" in result["safety_flags"]
+
+
+def test_disabled_model_armor_never_screens_the_draft(db, seeded, fake_llm, fake_model_armor):
+    """With no template configured the path is what it was: no call, no audit
+    row, the same answer."""
+    state = _booked_state(db)
+    fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
+    client = fake_model_armor(response={"pi_and_jailbreak": True})
+
+    result = safety.run(state, db)
+
+    assert result["final_response"] == _CONFIRMATION
+    assert client.response_calls == []
+    assert _armor_audit(db) is None
 
 
 def test_deterministic_fallback_uses_german_template_for_preferred_language_de(
