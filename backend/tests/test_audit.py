@@ -12,7 +12,7 @@ from app.models import AppointmentSlot, AuditEvent
 from app.tools.appointment_tools import book_appointment, cancel_appointment, reschedule_appointment
 from app.tools.audit_tools import write_audit
 from app.tools.escalation_tools import create_escalation, resolve_escalation
-from app.tools.followup_tools import create_followup_task, create_reminder
+from app.tools.followup_tools import create_reminder
 
 
 @pytest.fixture(autouse=True)
@@ -110,17 +110,6 @@ def test_create_reminder_writes_audit(db, seeded):
 
     row = db.query(AuditEvent).filter_by(action="reminder.created", entity_id=reminder["id"]).first()
     assert row is not None
-
-
-def test_create_followup_task_writes_audit(db, seeded):
-    slot = _free_slot(db)
-    booking = book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
-
-    followup = create_followup_task(db, patient_id=1, appointment_id=booking["id"], days_after=14)
-
-    row = db.query(AuditEvent).filter_by(action="reminder.created", entity_id=followup["id"]).first()
-    assert row is not None
-    assert followup["reminder_type"] == "followup"
 
 
 def test_escalation_lifecycle_writes_audit(db, seeded):

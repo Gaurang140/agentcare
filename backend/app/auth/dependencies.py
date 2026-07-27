@@ -58,12 +58,8 @@ def require_role(*roles: str):
     return _dependency
 
 
-def ensure_owner_or_staff(user: User, patient_id: int, db: Session) -> None:
+def ensure_owner_or_staff(user: User, patient_id: int) -> None:
     """Raise PermissionDeniedError unless user is staff or owns patient_id.
-
-    db is accepted (unused here) to keep the signature stable for later
-    tasks that need to look up ownership through a join rather than a
-    direct patient_id column.
     """
     if user.role == "staff":
         return

@@ -316,9 +316,7 @@ def _invoke_graph(
         return None
 
 
-def create_run(
-    db: Session, user: User, request_text: str, document_ids: list[int] | None = None
-) -> WorkflowRun:
+def create_run(db: Session, user: User, request_text: str) -> WorkflowRun:
     """Screen the request and create its WorkflowRun row - synchronously,
     with zero LLM calls or graph invocation either way. An emergency,
     medical-refusal or injection-blocked request is already terminal on
@@ -390,7 +388,7 @@ def start_workflow(
     `execute_workflow` in a FastAPI BackgroundTasks callback with its own
     session so the request returns immediately after `create_run`."""
     document_ids = document_ids or []
-    workflow_run = create_run(db, user, request_text, document_ids)
+    workflow_run = create_run(db, user, request_text)
     if workflow_run.status == "running":
         execute_workflow(db, workflow_run.id, document_ids)
     return workflow_run

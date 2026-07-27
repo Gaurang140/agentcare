@@ -17,13 +17,12 @@ row as the finished batch. All-or-nothing is what makes the skip correct.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 from sqlalchemy.orm import Session
 
-from app.exceptions import NotFoundError
-from app.models import Appointment, Reminder
+from app.models import Reminder
 from app.tools.audit_tools import write_audit
 
 
@@ -135,26 +134,6 @@ def create_reminders_batch(
         raise
 
     return summaries
-
-
-def create_followup_task(
-    db: Session, patient_id: int, appointment_id: int, days_after: int = 14
-) -> dict:
-    """A "followup" reminder timed days_after the appointment's slot start.
-
-    The single-row path, for a caller scheduling this task on its own. The
-    follow-up agent does not use it: that node writes this same row as the
-    last item of its batch, so the post-visit task lives or dies with the
-    reminders around it.
-    """
-    appt = db.get(Appointment, appointment_id)
-    if appt is None:
-        raise NotFoundError(f"Appointment {appointment_id} not found")
-
-    base_time = appt.slot.start_time if appt.slot else _naive_utcnow()
-    scheduled_at = base_time + timedelta(days=days_after)
-
-    return create_reminder(db, patient_id, appointment_id, "followup", scheduled_at)
 
 
 def send_due_reminders(db: Session) -> dict:

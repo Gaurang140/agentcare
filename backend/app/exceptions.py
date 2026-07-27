@@ -34,11 +34,6 @@ class ConflictError(AppError):
     code = "conflict"
 
 
-class SafetyBlockedError(AppError):
-    status_code = 422
-    code = "safety_blocked"
-
-
 class ValidationError(AppError):
     """Bad client input that isn't a pydantic body-validation error, e.g. a
     rejected file upload (wrong extension, over the size cap)."""

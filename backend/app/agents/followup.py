@@ -117,10 +117,8 @@ def run(state: AgentState, db: Session) -> dict:
             )
             for spec in plan.reminders[:_MAX_REMINDERS]
         ]
-        # The post-visit task is the last item of the same batch, not a
-        # separate write: `appointment["start_time"]` is the slot's own start
-        # time, so the row is timed exactly as create_followup_task would
-        # time it, and it now shares the batch's transaction.
+        # The post-visit task is the last item of the same batch, so it
+        # shares the batch's transaction with the appointment reminders.
         items.append(
             ReminderItem(
                 "followup", start_time + timedelta(days=_clamp_days(plan.followup_days_after))

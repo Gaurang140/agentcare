@@ -40,7 +40,6 @@ _RUN_INDEX_MARKERS = ("uq_appointments_workflow_run", "appointments.workflow_run
 
 # The statuses that still hold a slot. Anything else - today only "cancelled" -
 # has already given its slot back, so it must not be moved or freed again.
-# patient_tools.py and agents/appointment.py read "active" the same way.
 _ACTIVE_STATUSES = ("pending", "confirmed")
 
 

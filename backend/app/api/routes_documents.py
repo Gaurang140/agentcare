@@ -38,7 +38,7 @@ def list_documents(
 ) -> DocumentListResponse:
     target_id = current_user.id
     if patient_id is not None:
-        ensure_owner_or_staff(current_user, patient_id, db)
+        ensure_owner_or_staff(current_user, patient_id)
         target_id = patient_id
 
     docs = (
@@ -63,6 +63,6 @@ def get_document(
     if doc is None:
         raise NotFoundError("Document not found")
 
-    ensure_owner_or_staff(current_user, doc.patient_id, db)
+    ensure_owner_or_staff(current_user, doc.patient_id)
 
     return _to_meta(doc)

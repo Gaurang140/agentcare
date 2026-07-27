@@ -108,7 +108,7 @@ def reschedule(
     appt = db.get(Appointment, appointment_id)
     if appt is None:
         raise NotFoundError(f"Appointment {appointment_id} not found")
-    ensure_owner_or_staff(current_user, appt.patient_id, db)
+    ensure_owner_or_staff(current_user, appt.patient_id)
 
     result = reschedule_appointment(db, appointment_id, payload.new_slot_id)
     write_audit(
@@ -132,7 +132,7 @@ def cancel(
     appt = db.get(Appointment, appointment_id)
     if appt is None:
         raise NotFoundError(f"Appointment {appointment_id} not found")
-    ensure_owner_or_staff(current_user, appt.patient_id, db)
+    ensure_owner_or_staff(current_user, appt.patient_id)
 
     result = cancel_appointment(db, appointment_id)
     write_audit(

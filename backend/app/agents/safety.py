@@ -9,8 +9,7 @@ outage blocks finalize (MOSAIC fallback pattern) - the deterministic
 sanitizer alone is enough to answer safely.
 
 Owns no domain tools - it only reviews. Its DB reads go straight through the
-session, mirroring how patient_tools.get_patient_summary composes a
-response from persisted rows without a dedicated tool wrapper.
+session without a dedicated tool wrapper.
 
 Language preference (PatientProfile.preferred_language) is read fresh here
 too: the LLM path gets a "Respond in <language>." instruction appended to
@@ -68,9 +67,8 @@ class SafetyOutput(BaseModel):
 
 def _preferred_language(db: Session, patient_id: int) -> str:
     """"de" or "en", matching PatientProfile.preferred_language; "en" when
-    the patient has no profile row (mirrors
-    patient_tools.get_patient_summary) or the stored value isn't one of the
-    two supported languages."""
+    the patient has no profile row or the stored value isn't one of the two
+    supported languages."""
     profile = db.query(PatientProfile).filter_by(user_id=patient_id).first()
     language = profile.preferred_language if profile else _DEFAULT_LANGUAGE
     return language if language in _LANGUAGE_INSTRUCTIONS else _DEFAULT_LANGUAGE

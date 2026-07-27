@@ -1,6 +1,30 @@
 """Register / login / me happy path, and the RBAC-adjacent negative cases
 that make sure staff can actually reach the routes patients are denied."""
 
+from app.models import AuditEvent
+
+
+def test_registration_writes_audit_event(client, db_session):
+    response = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Audit Patient",
+            "email": "registration-audit@example.com",
+            "password": "s3cret-pw-123",
+            "dob": "1991-04-12",
+            "phone": None,
+            "preferred_language": "en",
+            "emergency_contact": None,
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    row = db_session.query(AuditEvent).filter_by(action="user.registered").one()
+    assert row.actor_id == response.json()["id"]
+    assert row.entity_type == "user"
+    assert row.entity_id == response.json()["id"]
+    assert row.metadata_json == {"role": "patient"}
+
 
 def test_register_login_me_happy_path(client):
     register_resp = client.post(

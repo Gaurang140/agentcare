@@ -107,7 +107,7 @@ def workflow_events(
     run = db.get(WorkflowRun, workflow_id)
     if run is None:
         raise NotFoundError(f"WorkflowRun {workflow_id} not found")
-    ensure_owner_or_staff(current_user, run.patient_id, db)
+    ensure_owner_or_staff(current_user, run.patient_id)
 
     # Staff and the owning patient both read this stream, so the internal
     # detail is gated on the role here rather than split across two

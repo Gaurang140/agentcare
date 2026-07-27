@@ -13,6 +13,7 @@ from app.db.session import get_db
 from app.exceptions import ConflictError, PermissionDeniedError
 from app.models import PatientProfile, User
 from app.schemas.auth import LoginRequest, RegisterRequest, UserSummary
+from app.tools.audit_tools import write_audit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -61,6 +62,14 @@ def register(
             emergency_contact=payload.emergency_contact,
         )
         db.add(profile)
+        write_audit(
+            db,
+            user.id,
+            "user.registered",
+            "user",
+            user.id,
+            {"role": user.role},
+        )
         db.commit()
     except IntegrityError as exc:
         db.rollback()

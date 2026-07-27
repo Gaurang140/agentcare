@@ -86,7 +86,7 @@ def create_request(
         for filename, content in uploads
     ]
 
-    workflow_run = workflow_service.create_run(db, current_user, text, document_ids)
+    workflow_run = workflow_service.create_run(db, current_user, text)
     if workflow_run.status == "running":
         background_tasks.add_task(run_workflow_background, workflow_run.id, document_ids)
 
@@ -186,7 +186,7 @@ def get_workflow(
     run = db.get(WorkflowRun, workflow_id)
     if run is None:
         raise NotFoundError(f"WorkflowRun {workflow_id} not found")
-    ensure_owner_or_staff(current_user, run.patient_id, db)
+    ensure_owner_or_staff(current_user, run.patient_id)
 
     # Staff and the owning patient both read this route (the staff detail
     # sheet and the portal share it), so the internal detail is gated on the
@@ -237,7 +237,7 @@ def resume(
     run = db.get(WorkflowRun, workflow_id)
     if run is None:
         raise NotFoundError(f"WorkflowRun {workflow_id} not found")
-    ensure_owner_or_staff(current_user, run.patient_id, db)
+    ensure_owner_or_staff(current_user, run.patient_id)
 
     resumed = workflow_service.resume_workflow(db, workflow_id)
     write_audit(db, current_user.id, "workflow.resumed", "workflow_run", workflow_id, {})

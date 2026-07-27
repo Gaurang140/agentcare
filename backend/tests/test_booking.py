@@ -21,7 +21,6 @@ from app.tools.appointment_tools import (
     reschedule_appointment,
 )
 from app.tools.department_tools import find_department, list_departments
-from app.tools.patient_tools import get_patient_summary
 
 
 def _free_slot(db) -> AppointmentSlot:
@@ -412,13 +411,3 @@ def test_list_departments_returns_seeded_departments(db, seeded):
     assert "Cardiology" in names
     assert len(names) >= 5
 
-
-def test_get_patient_summary_counts_reflect_activity(db, seeded):
-    slot = _free_slot(db)
-    book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
-
-    summary = get_patient_summary(db, patient_id=1)
-
-    assert summary["id"] == 1
-    assert summary["appointments_count"] == 1
-    assert summary["upcoming_appointments"] == 1
