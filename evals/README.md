@@ -98,6 +98,7 @@ Run the embedded metric fixture:
 
 ```bash
 .venv/bin/python evals/phase2_score.py --selftest
+.venv/bin/python -m pytest evals/test_evidence_safety.py -q
 ```
 
 Lint the harness:
@@ -114,14 +115,59 @@ The repository preserves one measured baseline:
 - [scores-nokey-baseline.json](results/scores-nokey-baseline.json)
 - [enriched-nokey-baseline.json](results/enriched-nokey-baseline.json)
 
-That run was collected and scored on 2026-07-27 with no model configured. Its
-26 guardrail samples were all classified correctly, including 10 allowed
-cases, with no false positive or false negative.
+That run was collected and scored on 2026-07-27 with no working model
+credential or provider access. Its 26 guardrail samples were all classified
+correctly, including 10 allowed cases, with no false positive or false
+negative.
 
 The same run leaves all administrative requests at staff handoff because the
 coordinator has no working model. Its administrative scores measure graceful
 degradation, not model-assisted workflow quality. Run both phases with a
 working model profile before making an administrative performance claim.
+
+To reproduce credential-free behavior after setting up a normal `.env`, start
+the backend with explicit empty overrides in one terminal:
+
+```bash
+(cd backend && env \
+  LLM_PROFILE=groq \
+  LLM_API_KEY= \
+  LLM_FALLBACK_API_KEY= \
+  LLM_FALLBACK_BASE_URL= \
+  LLM_FALLBACK_MODEL= \
+  MODEL_ARMOR_TEMPLATE= \
+  ../.venv/bin/python -m uvicorn app.main:app --port 8000)
+```
+
+Then collect and score ignored scratch output in another terminal:
+
+```bash
+env \
+  LLM_PROFILE=groq \
+  LLM_API_KEY= \
+  LLM_FALLBACK_API_KEY= \
+  LLM_FALLBACK_BASE_URL= \
+  LLM_FALLBACK_MODEL= \
+  MODEL_ARMOR_TEMPLATE= \
+  .venv/bin/python evals/phase1_run.py --run-id scratch-nokey-local
+
+env \
+  JUDGE_GROQ= \
+  JUDGE_MODEL= \
+  JUDGE_BASE_URL= \
+  LLM_PROFILE=groq \
+  LLM_API_KEY= \
+  LLM_FALLBACK_API_KEY= \
+  LLM_FALLBACK_BASE_URL= \
+  LLM_FALLBACK_MODEL= \
+  MODEL_ARMOR_TEMPLATE= \
+  .venv/bin/python evals/phase2_score.py \
+    --input evals/results/enriched-scratch-nokey-local.json \
+    --run-id scratch-nokey-local
+```
+
+The scripts reject `nokey-baseline` as an output run ID. That name belongs to
+the reviewed artifacts committed below.
 
 ## Result hygiene
 

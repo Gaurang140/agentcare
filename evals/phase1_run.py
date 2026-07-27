@@ -41,7 +41,7 @@ what an ordinary request does, pausing on an agent_failure handoff.
 Usage:
 
     ../.venv/bin/python evals/phase1_run.py                 # all 66 samples
-    ../.venv/bin/python evals/phase1_run.py --run-id nokey-baseline
+    ../.venv/bin/python evals/phase1_run.py --run-id scratch-local
     ../.venv/bin/python evals/phase1_run.py --only guardrail --limit 5
 
 Standard library plus httpx, which is already pinned in requirements.txt.
@@ -59,6 +59,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+
+try:
+    from .evidence import PreservedEvidenceError, require_writable_run_id
+except ImportError:
+    from evidence import PreservedEvidenceError, require_writable_run_id
 
 EVALS_DIR = Path(__file__).resolve().parent
 DEFAULT_DATASET = EVALS_DIR / "golden_dataset.json"
@@ -341,8 +346,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    dataset = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
     run_id = args.run_id or _default_run_id()
+    try:
+        require_writable_run_id(run_id)
+    except PreservedEvidenceError as exc:
+        print(f"phase 1 stopped: {exc}", file=sys.stderr)
+        return 2
+
+    dataset = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
 
     try:
         enriched = run_phase1(dataset, args.base_url, args.password, args.only, args.limit)

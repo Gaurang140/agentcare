@@ -45,6 +45,11 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    from .evidence import PreservedEvidenceError, require_writable_run_id
+except ImportError:
+    from evidence import PreservedEvidenceError, require_writable_run_id
+
 EVALS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EVALS_DIR.parent
 DEFAULT_RESULTS_DIR = EVALS_DIR / "results"
@@ -720,7 +725,8 @@ def render_summary(scores: dict) -> str:
     parts.append("")
     if degradation["degraded"]:
         parts.append(
-            f"Status: degraded run, no model configured. {degradation['paused_on_agent_failure']} of "
+            "Status: degraded run, no working model credential or provider access. "
+            f"{degradation['paused_on_agent_failure']} of "
             f"{degradation['admin_total']} administrative samples stopped at the coordinator and "
             "parked on an agent_failure handoff to staff, so the intent, steps and department "
             "numbers above measure that degradation and not the agents. The guardrail numbers are "
@@ -773,9 +779,36 @@ def render_summary(scores: dict) -> str:
     parts.append("```bash")
     parts.append("cd backend && ../.venv/bin/alembic upgrade head && cd ..")
     parts.append(".venv/bin/python scripts/seed_demo.py")
-    parts.append("cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 8000")
-    parts.append(f".venv/bin/python evals/phase1_run.py --run-id {run.get('run_id')}")
-    parts.append(f".venv/bin/python evals/phase2_score.py --run-id {run.get('run_id')}")
+    output_run_id = f"scratch-{run.get('run_id') or 'eval'}"
+    if degradation["degraded"]:
+        no_key_env = (
+            "LLM_PROFILE=groq LLM_API_KEY= LLM_FALLBACK_API_KEY= "
+            "LLM_FALLBACK_BASE_URL= LLM_FALLBACK_MODEL= MODEL_ARMOR_TEMPLATE="
+        )
+        parts.append("# Terminal 1: force the backend into credential-free mode.")
+        parts.append(
+            f"(cd backend && env {no_key_env} "
+            "../.venv/bin/python -m uvicorn app.main:app --port 8000)"
+        )
+        parts.append("# Terminal 2: write ignored scratch outputs, never the committed baseline.")
+        parts.append(
+            f"env {no_key_env} .venv/bin/python evals/phase1_run.py "
+            f"--run-id {output_run_id}"
+        )
+        parts.append(
+            "env JUDGE_GROQ= JUDGE_MODEL= JUDGE_BASE_URL= "
+            f"{no_key_env} .venv/bin/python evals/phase2_score.py "
+            f"--input evals/results/enriched-{output_run_id}.json "
+            f"--run-id {output_run_id}"
+        )
+    else:
+        parts.append("(cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 8000)")
+        parts.append(f".venv/bin/python evals/phase1_run.py --run-id {output_run_id}")
+        parts.append(
+            f".venv/bin/python evals/phase2_score.py "
+            f"--input evals/results/enriched-{output_run_id}.json "
+            f"--run-id {output_run_id}"
+        )
     parts.append("```")
     parts.append("")
     return "\n".join(parts)
@@ -1021,8 +1054,15 @@ def main(argv: list[str] | None = None) -> int:
     input_path = Path(args.input) if args.input else _latest_enriched(results_dir)
     enriched = json.loads(input_path.read_text(encoding="utf-8"))
 
+    input_run_id = (enriched.get("run") or {}).get("run_id")
+    run_id = args.run_id or input_run_id or input_path.stem.replace("enriched-", "")
+    try:
+        require_writable_run_id(run_id)
+    except PreservedEvidenceError as exc:
+        print(f"phase 2 stopped: {exc}", file=sys.stderr)
+        return 2
+
     scores = score(enriched, judge=not args.no_judge)
-    run_id = args.run_id or scores["run"].get("run_id") or input_path.stem.replace("enriched-", "")
     scores["run"]["run_id"] = run_id
 
     results_dir.mkdir(parents=True, exist_ok=True)

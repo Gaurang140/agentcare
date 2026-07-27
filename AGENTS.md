@@ -1,10 +1,11 @@
 # AGENTS.md: rules for AI coding agents working in this repo
 
 AgentCare is an agentic hospital-administration system: FastAPI + LangGraph backend
-(six coordinated agents), Next.js 16 frontend, persistent SQL, deployed to GCP.
+(six coordinated agents), Next.js 16 frontend and persistent SQL. It has a
+reviewed GCP deployment path but has not been deployed to a live GCP project.
 It handles administration only: registration, department routing, appointment
-booking, document coordination, reminders, follow-up. It never diagnoses,
-prescribes, or doses. Keep that boundary in every line you write, including
+booking, document coordination, reminders and follow-up. It never diagnoses,
+prescribes or doses. Keep that boundary in every line you write, including
 prompts, tests, seeds and docs.
 
 ## Repo map
@@ -22,9 +23,9 @@ backend/app/
   api/       # routers; RBAC enforced here, never in the frontend
 frontend/    # Next.js 16 App Router, Tailwind v4, shadcn; proxy.ts (not middleware.ts)
 infra/       # terraform (OpenTofu-compatible HCL, GCP resources) + k8s/
-             #   (kustomize base + gcp overlay); deploy pipeline is
-             #   .github/workflows/deploy.yml (manual dispatch only)
+             #   (kustomize base + gcp overlay)
 scripts/     # seed_demo.py and helpers
+docs/        # architecture, security, demo and GCP deployment guides
 ```
 
 ## Hard rules
@@ -34,12 +35,14 @@ scripts/     # seed_demo.py and helpers
 2. **Administrative language only.** No diagnosis/prescription/dosage wording
    anywhere. The deterministic guardrails in `backend/app/safety/` are the first
    gate; do not weaken them.
-3. **Structured LLM output only** through `agents/llm.py::chat_json` (json_schema
-   strict on Groq, json_object fallback, pydantic-validated). Models are built
-   by the langchain `init_chat_model` factory from the profiles in
-   `backend/llm.yaml` (env vars win; see `agents/model_config.py`). Never
-   regex-parse JSON out of prose. Never build a chat model or call a provider
-   SDK anywhere else.
+3. **Keep the chat-model boundary in `agents/llm.py`.** Agent schemas go through
+   `chat_json`; the optional prompt-injection classifier goes through
+   `classify_injection`. Both build models with LangChain's `init_chat_model`
+   factory from profiles in `backend/llm.yaml` (env vars win; see
+   `agents/model_config.py`). Never regex-parse JSON out of prose, construct a
+   chat model or call a chat-provider SDK elsewhere. Google Model Armor is a
+   separate optional safety provider under `backend/app/safety/model_armor.py`,
+   not a chat model.
 4. **LangGraph 1.2.9 specifics:** checkpointer `from_conn_string` is a context
    manager held open in the FastAPI lifespan (ExitStack); the graph is built and
    compiled once. Any state key written by more than one node uses an
@@ -64,10 +67,10 @@ scripts/     # seed_demo.py and helpers
 ```bash
 # backend (venv at .venv, Python 3.12)
 .venv/bin/pip install -r requirements.txt
-cd backend && ../.venv/bin/alembic upgrade head     # migrate (sqlite default)
+(cd backend && ../.venv/bin/alembic upgrade head)   # migrate (sqlite default)
 .venv/bin/python scripts/seed_demo.py               # from repo root, idempotent
-cd backend && ../.venv/bin/python -m uvicorn app.main:app --reload
-cd backend && ../.venv/bin/python -m pytest -q      # full suite, must stay green
+(cd backend && ../.venv/bin/python -m uvicorn app.main:app --reload)
+(cd backend && ../.venv/bin/python -m pytest -q)    # full suite, must stay green
 .venv/bin/ruff check backend                        # must stay clean
 .venv/bin/python -m compileall backend -q           # must stay clean
 # full stack
@@ -91,5 +94,5 @@ session; pushing is a human decision.
 ## Docs voice
 
 No "leverage", "robust", "ecosystem"; no em-dashes; no serial comma. Plain,
-experienced engineering voice. Architecture diagrams: one `.mmd` mermaid source
-of truth, restrained node style.
+experienced engineering voice. Keep one canonical architecture diagram in the
+judge-facing Markdown documentation and use restrained Mermaid node styling.

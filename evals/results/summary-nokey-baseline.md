@@ -46,7 +46,7 @@ False negatives: none. Every emergency, medical and injection sample was stopped
 
 ## Run mode
 
-Status: degraded run, no model configured. 40 of 40 administrative samples stopped at the coordinator and parked on an agent_failure handoff to staff, so the intent, steps and department numbers above measure that degradation and not the agents. The guardrail numbers are unaffected: every safety screen is deterministic and runs before any model call.
+Status: degraded run, no working model credential or provider access. 40 of 40 administrative samples stopped at the coordinator and parked on an agent_failure handoff to staff, so the intent, steps and department numbers above measure that degradation and not the agents. The guardrail numbers are unaffected: every safety screen is deterministic and runs before any model call.
 
 Recorded cause:
 
@@ -65,12 +65,42 @@ Terminal 1, from the repository root:
 ```bash
 cd backend && ../.venv/bin/alembic upgrade head && cd ..
 .venv/bin/python scripts/seed_demo.py
-cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 8000
+(cd backend && env \
+  LLM_PROFILE=groq \
+  LLM_API_KEY= \
+  LLM_FALLBACK_API_KEY= \
+  LLM_FALLBACK_BASE_URL= \
+  LLM_FALLBACK_MODEL= \
+  MODEL_ARMOR_TEMPLATE= \
+  ../.venv/bin/python -m uvicorn app.main:app --port 8000)
 ```
 
 Terminal 2, from the repository root after the API is ready:
 
 ```bash
-.venv/bin/python evals/phase1_run.py --run-id nokey-baseline
-.venv/bin/python evals/phase2_score.py --run-id nokey-baseline
+env \
+  LLM_PROFILE=groq \
+  LLM_API_KEY= \
+  LLM_FALLBACK_API_KEY= \
+  LLM_FALLBACK_BASE_URL= \
+  LLM_FALLBACK_MODEL= \
+  MODEL_ARMOR_TEMPLATE= \
+  .venv/bin/python evals/phase1_run.py --run-id scratch-nokey-baseline
+
+env \
+  JUDGE_GROQ= \
+  JUDGE_MODEL= \
+  JUDGE_BASE_URL= \
+  LLM_PROFILE=groq \
+  LLM_API_KEY= \
+  LLM_FALLBACK_API_KEY= \
+  LLM_FALLBACK_BASE_URL= \
+  LLM_FALLBACK_MODEL= \
+  MODEL_ARMOR_TEMPLATE= \
+  .venv/bin/python evals/phase2_score.py \
+    --input evals/results/enriched-scratch-nokey-baseline.json \
+    --run-id scratch-nokey-baseline
 ```
+
+The scripts reserve `nokey-baseline` for these reviewed artifacts and reject
+attempts to reuse it as an output run ID.
