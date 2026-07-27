@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     # llm_api_key is also set; empty runs the deterministic layer alone.
     injection_guard_model: str = "meta-llama/llama-prompt-guard-2-86m"
 
+    # Google Model Armor (safety/model_armor.py): the GCP provider for that
+    # same layer-2 slot, plus a screen of the drafted answer. The template is
+    # the full resource path
+    # projects/{project}/locations/{location}/templates/{id}; empty (the
+    # default) disables the layer entirely, so nothing off GCP ever calls it.
+    # The calling service account needs roles/modelarmor.user.
+    model_armor_template: str = ""
+    model_armor_location: str = "europe-west3"
+
     # LLM fallback endpoint (optional; e.g. a local LM Studio server). Used
     # only when the primary client exhausts its retries.
     llm_fallback_base_url: str = ""

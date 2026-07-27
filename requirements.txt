@@ -26,6 +26,9 @@ de_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/de
 # Uploaded documents on the GCP path (STORAGE_BACKEND=gcs). The local default
 # never imports it; the gcp overlay needs it in the image (services/storage.py).
 google-cloud-storage==3.13.0
+# Guardrail provider on the GCP path only; imported lazily and solely when
+# MODEL_ARMOR_TEMPLATE is set (backend/app/safety/model_armor.py).
+google-cloud-modelarmor==0.7.1
 httpx==0.28.1
 email-validator==2.3.0
 apscheduler==3.11.3
