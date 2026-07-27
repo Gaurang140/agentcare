@@ -66,14 +66,14 @@ one record.
 2. Create a new request and attach the same `ecg-report.pdf`.
 3. Submit it.
 4. Switch to the staff **Audit trail**.
-5. Open the newest `document.duplicate_detected` event.
+5. Keep the newest `document.duplicate_detected` event collapsed.
 
 **Say:** “The portal has no separate upload action. A second request submits
 the same bytes, and the backend reuses the existing patient document by
 checksum instead of storing a second copy.”
 
-**Point out:** The audit action and existing document entity. Do not expose or
-read the checksum aloud.
+**Point out:** The collapsed audit action and existing document entity. The
+audit metadata intentionally omits the checksum.
 
 ### 1:10 to 1:25: deterministic emergency path
 

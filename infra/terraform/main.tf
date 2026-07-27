@@ -1,8 +1,5 @@
-# Root module: wires the six infra pieces for one GCP project. No secret
-# VALUE is ever created here - the iam module grants access to Secret
-# Manager, but the secrets themselves are created out-of-band with gcloud
-# (see docs/deployment-gcp.md), so no credential ever passes through
-# Terraform state.
+# Root module: wires the GCP resources. Secret values stay outside Terraform
+# state and are supplied to the one Kubernetes Secret used by the workloads.
 
 provider "google" {
   project = var.project_id
@@ -40,10 +37,9 @@ module "iam" {
   source = "./modules/iam"
 
   project_id         = var.project_id
-  github_repository  = var.github_repository
   bucket_name        = module.gcs.bucket_name
-  enable_cloud_sql   = var.enable_cloud_sql
   enable_model_armor = var.enable_model_armor
+  enable_vertex_ai   = var.enable_vertex_ai
 }
 
 module "gke" {

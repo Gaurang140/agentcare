@@ -1,7 +1,6 @@
-# Primary database path while the GCP trial credit covers it (docs/decisions.md
-# ADR-03); enable_cloud_sql defaults to true in the root variables. Neon
-# free-tier Postgres is the post-credit swap: set enable_cloud_sql=false and
-# point DATABASE_URL there. Every resource below is count-gated on that flag.
+# Private-IP Cloud SQL is the canonical GCP database path. Every resource
+# below is count-gated so the remaining configuration can be validated without
+# provisioning a database when a caller supplies one explicitly.
 
 data "google_compute_network" "vpc" {
   count   = var.enable_cloud_sql ? 1 : 0
@@ -39,7 +38,7 @@ resource "google_sql_database_instance" "postgres" {
   settings {
     # Smallest tier available. ENTERPRISE (not the newer default
     # ENTERPRISE_PLUS) is required for shared-core machine types like
-    # db-f1-micro. About $8/mo, dev-only, no SLA (docs/decisions.md ADR-03).
+    # db-f1-micro. This is a small dev/demo tier with no SLA.
     tier    = "db-f1-micro"
     edition = "ENTERPRISE"
 

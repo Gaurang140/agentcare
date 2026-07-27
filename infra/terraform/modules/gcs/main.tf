@@ -1,4 +1,4 @@
-# Patient document storage (docs/decisions.md ADR-04). No public access:
+# Patient document storage. No public access:
 # uniform bucket-level access turns off per-object ACLs (IAM only), and
 # public_access_prevention enforces that no binding can ever grant
 # allUsers/allAuthenticatedUsers, even by mistake.

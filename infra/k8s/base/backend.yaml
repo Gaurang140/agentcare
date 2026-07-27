@@ -25,6 +25,7 @@ spec:
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
     spec:
+      serviceAccountName: agentcare-backend
       securityContext:
         # Pod-level PodSecurityContext takes only the fields listed in the API
         # schema; readOnlyRootFilesystem is not one of them and lives on each
@@ -54,6 +55,9 @@ spec:
                 name: agentcare-config
             - secretRef:
                 name: agentcare-secrets
+          env:
+            - name: SKIP_STARTUP_MIGRATIONS
+              value: "true"
           resources:
             requests:
               cpu: "250m"

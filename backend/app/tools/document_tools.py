@@ -74,7 +74,7 @@ def store_document(
             "document.duplicate_detected",
             "patient_document",
             existing.id,
-            {"patient_id": patient_id, "filename": filename, "checksum": checksum},
+            {"patient_id": patient_id, "filename": filename},
         )
         db.commit()
         return {

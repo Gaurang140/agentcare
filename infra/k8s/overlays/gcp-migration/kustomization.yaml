@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# This overlay owns the one Kubernetes migration Job and only the resources it
+# needs. Apply it and wait for success before applying overlays/gcp. The Job
+# reads DATABASE_URL from the pre-created Secret and needs no application
+# ConfigMap.
+resources:
+  - migration-job.yaml
+
+images:
+  - name: agentcare-backend
+    newName: REGION-docker.pkg.dev/PROJECT/agentcare/backend
+    newTag: TAG

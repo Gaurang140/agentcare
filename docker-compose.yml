@@ -20,16 +20,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    env_file:
+      - .env.example
+      - path: .env
+        required: false
     environment:
       DATABASE_URL: postgresql+psycopg://agentcare:agentcare@db:5432/agentcare
-      JWT_SECRET: change_me_generate_a_long_random_string
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env or the shell before starting Compose}
       FRONTEND_ORIGIN: http://localhost:3000
-      # From the repo-root .env; .env itself is dockerignored, so this
-      # passthrough is the only way the key reaches the container.
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
-      LLM_MODEL: ${LLM_MODEL:-openai/gpt-oss-120b}
-      LLM_PROFILE: ${LLM_PROFILE:-}
     ports:
       - "8000:8000"
 

@@ -9,7 +9,7 @@ variable "region" {
 }
 
 variable "enable_cloud_sql" {
-  description = "Create the instance and its private-IP networking. Off by default: the demo path runs on Neon free-tier Postgres (docs/decisions.md ADR-03)."
+  description = "Create the instance and its private-IP networking."
   type        = bool
   default     = false
 }

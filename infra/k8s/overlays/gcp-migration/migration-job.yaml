@@ -1,0 +1,42 @@
+# This is the sole Kubernetes migration and seed owner. The long-running
+# backend Deployment skips startup migrations.
+#
+# Job specs are immutable. Delete a prior backend-migrate Job before applying
+# this overlay again. ttlSecondsAfterFinished cleans up completed runs
+# eventually but does not unblock a still-running Job.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: backend-migrate
+  labels:
+    app: backend-migrate
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: backend-migrate
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: migrate
+          image: agentcare-backend:latest
+          securityContext:
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+          args: ["python", "-c", "print('migrate+seed done')"]
+          envFrom:
+            - secretRef:
+                name: agentcare-secrets
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"

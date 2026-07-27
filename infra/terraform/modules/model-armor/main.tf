@@ -40,8 +40,8 @@ resource "google_model_armor_template" "this" {
     }
 
     # sdp_settings is deliberately absent: Presidio detects and redacts PII
-    # in-process before any text leaves the backend (ADR-13), and a second PII
-    # detector in the cloud would duplicate that job while making it depend on
-    # a network call. Do not add it.
+    # in-process before any text leaves the backend, and a second PII detector
+    # in the cloud would duplicate that job while making it depend on a network
+    # call. Do not add it.
   }
 }

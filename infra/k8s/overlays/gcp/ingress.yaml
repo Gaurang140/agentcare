@@ -1,10 +1,6 @@
-# Optional. A GCE external Application Load Balancer costs roughly 18 USD/mo
-# once provisioned (forwarding rule + the LB itself), on top of the two
-# small Deployments. For a demo, skip this file's resources entirely and use
-# either `kubectl port-forward svc/frontend 3000:3000` (zero cost, see
-# infra/k8s/README.md) or `kubectl patch svc frontend -p
-# '{"spec":{"type":"LoadBalancer"}}'` for a quick public IP without a domain
-# or TLS cert.
+# The GCP application overlay includes a public external Application Load
+# Balancer. It accrues charges while present; check current pricing before
+# applying.
 #
 # /api/* routes straight to the backend Service so SSE traffic hits the
 # BackendConfig's long timeout (backendconfig.yaml) directly, instead of

@@ -40,6 +40,7 @@ def test_duplicate_document_detected(db, seeded):
     )
     assert len(dup_events) == 1
     assert dup_events[0].metadata_json["filename"] == "ecg_copy.pdf"
+    assert "checksum" not in dup_events[0].metadata_json
 
 
 def test_duplicate_detection_is_scoped_per_patient(db, seeded):

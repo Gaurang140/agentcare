@@ -156,11 +156,13 @@ It exposes:
 
 The backend entrypoint migrates and idempotently seeds the database.
 
-Stop without deleting the database volume:
+Follow backend and frontend logs with
+`docker compose logs --follow backend frontend`. Stop without deleting the
+database volume with `docker compose down`. Reset it with
+`docker compose down --volumes`.
 
-```bash
-docker compose down
-```
+**Data-loss warning:** `--volumes` permanently deletes the local Compose
+database. Use it only for an intentional synthetic-data reset.
 
 ### 2B. Run backend and frontend directly
 
@@ -301,9 +303,16 @@ judge key. See [evals/README.md](evals/README.md).
 Environment variables override YAML fields. `.env.example` documents the full
 surface.
 
+For the Compose `local` profile, `LLM_BASE_URL` must be reachable from inside
+the backend container. `localhost` points at the container itself, so use a
+container DNS name or `http://host.docker.internal:PORT/v1` where Docker
+supports that host gateway.
+
 For Vertex, select `LLM_PROFILE=vertex`, set `GOOGLE_CLOUD_PROJECT` and
 `GOOGLE_CLOUD_LOCATION` then provide Application Default Credentials. Do not
-put a Google credential value in `.env`.
+put a Google credential value in `.env`. A host ADC login is not automatically
+mounted into the Compose backend container; direct local backend execution is
+the documented local Vertex path unless the operator explicitly mounts ADC.
 
 `chat_json` is the application policy boundary. LangChain
 `with_structured_output` owns provider formatting and ordinary Pydantic
@@ -320,9 +329,10 @@ GCP is the sole deployment target. The repository contains GKE Autopilot,
 Cloud SQL, Artifact Registry, GCS, IAM and Model Armor configuration under
 `infra/terraform` and `infra/k8s`.
 
-Those files are configured, not proof of a live environment. Billing, API
-enablement, secrets, workload identity, database setup, public DNS, TLS,
-deployment and smoke tests remain operator actions.
+Those files are configured, not proof of a live environment. Manual deployment
+is canonical. The migration overlay must succeed before the application
+overlay is applied. Billing, API enablement, secrets, database setup, public
+DNS, TLS and smoke tests remain operator actions.
 
 Use [docs/deployment-gcp.md](docs/deployment-gcp.md) as the only cloud
 runbook. The manifest-local reference is

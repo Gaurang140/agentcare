@@ -9,14 +9,12 @@
 # uses for GCS_BUCKET: replace it before applying. The real value is the
 # `model_armor_template_name` output from the terraform in infra/terraform/,
 # and it is a full resource path, projects/PROJECT/locations/LOCATION/templates/ID.
-# Left unreplaced the layer simply stays off: the adapter treats its own
-# placeholder as unconfigured, so there is no call and no warning per request,
-# and the deterministic layers decide alone exactly as they do off GCP.
+# Replace the sentinel before rendering. Leaving it in place would silently
+# disable the provider layer instead of proving the configured GCP path.
 #
 # MODEL_ARMOR_LOCATION must match the template's region, because the client
 # builds a regional endpoint out of it. europe-west3 matches the deployment's
-# EU data residency (docs/decisions.md ADR-04) and is a supported Model Armor
-# region.
+# EU data residency and is a supported Model Armor region.
 apiVersion: v1
 kind: ConfigMap
 metadata:

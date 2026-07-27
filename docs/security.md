@@ -35,10 +35,10 @@ No prompt is treated as an authorization or safety control.
 | Model to application | Generated fields and prose | Pydantic validation, transition guards and output sanitizer |
 | Agent to domain data | Tool arguments and repeated execution | Transactions, conditional updates, idempotency checks and audit |
 | Staff to paused graph | Approval and note | Staff RBAC, persisted decision claim and same-thread resume |
-| Runtime to GCP | Pod or CI identity | Intended Workload Identity bindings and scoped IAM |
+| Runtime to GCP | Backend pod identity | Declarative Workload Identity binding and scoped IAM |
 
 The last row is configured but not live-verified. The deployment runbook lists
-the manual runtime binding still required.
+the operator checks required before trusting the binding.
 
 ## Deterministic healthcare boundary
 
@@ -220,10 +220,10 @@ The logging processor recursively redacts values whose keys contain
 designed to store identifiers and category counts rather than request secrets
 or redacted PII values.
 
-The GCP design separates configuration from credentials and uses keyless CI
-federation. Kubernetes runtime secrets and pod workload identity still require
-operator setup. Repository configuration alone does not establish that
-boundary.
+The GCP design separates configuration from credentials. Pods read one
+Kubernetes Secret. Terraform declares the backend KSA-to-GSA binding and the
+GCP overlay declares the KSA annotation, but repository configuration alone
+does not prove that the runtime identity works in a live cluster.
 
 ## Known limitations
 

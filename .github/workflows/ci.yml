@@ -88,12 +88,10 @@ jobs:
         run: cd backend && alembic current
 
   manifests:
-    # deploy.yml is workflow_dispatch only, so until this job existed a
-    # manifest that kustomize renders happily but the API server rejects was
-    # only discovered mid-deploy. Rendering is not validation: kustomize does
-    # no schema check at all. kubeconform validates the rendered output
-    # offline against the published Kubernetes JSON schemas, and -strict
-    # rejects unknown fields the same way `kubectl apply` does.
+    # Rendering is not validation: kustomize does no schema check at all.
+    # kubeconform validates the rendered output offline against the published
+    # Kubernetes JSON schemas, and -strict rejects unknown fields the same way
+    # `kubectl apply` does.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -281,10 +281,13 @@ GCP is the sole cloud target. The committed design maps:
 - domain SQL and Postgres checkpoints to Cloud SQL
 - uploaded documents to GCS
 - provider screening to Model Armor
-- CI authentication to Workload Identity Federation
+- the backend Kubernetes service account to a runtime Google service account
+  through GKE Workload Identity
 
 These adapters and manifests are configured in the repository. They do not
 prove that a cluster, database, bucket, Model Armor template or Vertex model is
-live. Public DNS, TLS readiness, runtime workload identity, secret material,
-database creation, migration and smoke tests remain operator responsibilities.
+live. Terraform declares the KSA-to-GSA binding, while the migration Job and
+application workloads are applied in separate ordered stages. Public DNS, TLS
+readiness, secret material, database creation, migration and smoke tests
+remain operator responsibilities. Deployment itself is manual.
 See [GCP deployment](deployment-gcp.md) for the canonical procedure.

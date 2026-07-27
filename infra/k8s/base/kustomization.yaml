@@ -3,9 +3,9 @@ kind: Kustomization
 
 resources:
   - configmap.yaml
+  - service-account.yaml
   - backend.yaml
   - frontend.yaml
-  - migration-job.yaml
   # secret.example.yaml is intentionally NOT listed here. It is a template
   # for the `kubectl create secret` command in its own comments, not a
   # manifest to apply - including it would make `kubectl apply -k` overwrite

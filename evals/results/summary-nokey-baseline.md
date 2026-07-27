@@ -60,10 +60,17 @@ Status: pending. No judge key set. Export JUDGE_GROQ or LLM_API_KEY, then re-run
 
 ## How to reproduce
 
+Terminal 1, from the repository root:
+
 ```bash
 cd backend && ../.venv/bin/alembic upgrade head && cd ..
 .venv/bin/python scripts/seed_demo.py
 cd backend && ../.venv/bin/python -m uvicorn app.main:app --port 8000
+```
+
+Terminal 2, from the repository root after the API is ready:
+
+```bash
 .venv/bin/python evals/phase1_run.py --run-id nokey-baseline
 .venv/bin/python evals/phase2_score.py --run-id nokey-baseline
 ```

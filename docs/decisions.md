@@ -181,7 +181,7 @@ covered by authorization tests.
 - Cloud SQL for Postgres
 - GCS for documents
 - Artifact Registry for images
-- Workload Identity for runtime and CI identity
+- Workload Identity for the backend runtime identity
 - Model Armor for optional provider screening
 
 Infrastructure source lives in `infra/terraform` and Kubernetes source lives
@@ -193,9 +193,11 @@ cloud procedures would create unverified configuration branches.
 **Trade-off:** GKE and Cloud SQL create real cost while running. The backend
 must remain one replica while APScheduler jobs have no distributed lock.
 
-The configuration is committed but not evidence of live deployment. Operator
-work still includes billing, API enablement, database and secret creation,
-pod workload identity, DNS, TLS, migration and smoke tests.
+The backend KSA/GSA relationship is declarative. Kubernetes migrations are a
+separate Job-only stage that must succeed before the application overlay.
+Deployment remains manual. The configuration is committed but not evidence
+of live deployment. Operator work still includes billing, API enablement,
+database and secret creation, DNS, TLS, migration and smoke tests.
 
 ## Process-local background execution
 

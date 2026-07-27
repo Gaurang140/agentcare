@@ -18,6 +18,10 @@ patches:
   # the terraform in infra/terraform/ just paid to create.
   - path: configmap-model-armor.yaml
 
+  # Terraform binds this KSA name to the backend Google service account. The
+  # operator replaces PROJECT_ID before rendering the environment artifact.
+  - path: serviceaccount-workload-identity.yaml
+
   # Points the backend Service at the BackendConfig above so the GCE Ingress
   # applies its 3600s timeout to SSE traffic. Only affects traffic through
   # the Ingress, not in-cluster calls (e.g. the frontend's own /api rewrite).
@@ -31,11 +35,8 @@ patches:
           cloud.google.com/backend-config: '{"default": "backend-backendconfig"}'
 
 # REGION-docker.pkg.dev/PROJECT/agentcare/{backend,frontend} are placeholders.
-# CI never edits this file by hand: .github/workflows/deploy.yml runs
-# `kustomize edit set image` in this directory to rewrite both name and tag
-# to the real Artifact Registry path and the git sha, right before
-# `kubectl apply -k`. Local/manual applies should do the same, or edit these
-# two entries directly.
+# The manual runbook rewrites both names and tags to immutable Artifact
+# Registry images before rendering.
 images:
   - name: agentcare-backend
     newName: REGION-docker.pkg.dev/PROJECT/agentcare/backend

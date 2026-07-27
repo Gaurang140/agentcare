@@ -20,10 +20,9 @@ executable in this guide is OpenTofu. Kubernetes source is in `infra/k8s`.
 | Compute | Regional GKE Autopilot cluster |
 | Database | Cloud SQL for PostgreSQL 17 with private IP |
 | Documents | GCS bucket with public access prevention |
-| Runtime identity | Backend and frontend Google service accounts |
-| CI identity | GitHub Workload Identity Federation and deploy service account |
+| Runtime identity | Backend KSA/GSA pair through GKE Workload Identity |
 | Safety provider | Model Armor template |
-| Workloads | Backend, frontend, migration Job, Services and GCE Ingress |
+| Workloads | Ordered migration Job, then backend, frontend, Services and GCE Ingress |
 
 The backend remains one replica because APScheduler jobs run in-process without
 a distributed lock.
@@ -35,16 +34,15 @@ The committed configuration does not complete these items:
 1. GCP project selection, billing and API enablement
 2. Cloud SQL database, database user and connection URL
 3. secret values and the `agentcare-secrets` Kubernetes Secret
-4. Kubernetes service account binding for backend Workload Identity
-5. GCS bucket name and Model Armor template in the overlay
-6. image registry names and immutable image tags
-7. `FRONTEND_ORIGIN`
-8. `LLM_PROFILE` plus Google project/location when Vertex is selected
-9. public DNS and a real domain for the managed TLS certificate
-10. migrations, live health checks and workflow smoke tests
+4. GCS bucket, Model Armor template and project sentinels in the overlays
+5. image registry names and immutable image tags in both overlays
+6. `FRONTEND_ORIGIN`
+7. optional Vertex API, IAM flag, profile and Google project/location
+8. public DNS and a real domain for the managed TLS certificate
+9. ordered migration, live health checks and workflow smoke tests
 
-Secret Manager and the Kubernetes Secret are not synchronized by the current
-manifests. Runtime pods read the Kubernetes Secret.
+Runtime pods read one Kubernetes Secret. The runtime KSA, GSA annotation and
+KSA-to-GSA IAM binding are declarative.
 
 ## Cost warning
 
@@ -62,14 +60,14 @@ Run from the repository root:
 ```bash
 export PROJECT_ID="your-gcp-project-id"
 export REGION="europe-west3"
-export GITHUB_REPOSITORY="owner/repository"
+export ENABLE_VERTEX_AI="false"
 ```
 
 Confirm the values before any mutating command:
 
 ```bash
-printf 'project=%s\nregion=%s\nrepository=%s\n' \
-  "$PROJECT_ID" "$REGION" "$GITHUB_REPOSITORY"
+printf 'project=%s\nregion=%s\nvertex=%s\n' \
+  "$PROJECT_ID" "$REGION" "$ENABLE_VERTEX_AI"
 ```
 
 ## 2. Check local tools
@@ -122,18 +120,23 @@ gcloud services enable \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   modelarmor.googleapis.com \
-  secretmanager.googleapis.com \
   servicenetworking.googleapis.com \
   sqladmin.googleapis.com \
   storage.googleapis.com \
   sts.googleapis.com
 ```
 
+When `ENABLE_VERTEX_AI=true`, also enable Vertex AI:
+
+```bash
+gcloud services enable aiplatform.googleapis.com
+```
+
 Confirm the relevant services are enabled:
 
 ```bash
 gcloud services list --enabled \
-  --filter='NAME:(artifactregistry.googleapis.com container.googleapis.com sqladmin.googleapis.com modelarmor.googleapis.com)'
+  --filter='NAME:(artifactregistry.googleapis.com container.googleapis.com sqladmin.googleapis.com modelarmor.googleapis.com aiplatform.googleapis.com)'
 ```
 
 ## 5. Initialize, validate and plan
@@ -149,7 +152,7 @@ tofu -chdir=infra/terraform plan \
   -var="project_id=$PROJECT_ID" \
   -var="region=$REGION" \
   -var="gcs_location=$REGION" \
-  -var="github_repository=$GITHUB_REPOSITORY"
+  -var="enable_vertex_ai=$ENABLE_VERTEX_AI"
 ```
 
 Review the plan. It should target only the intended project and region.
@@ -176,13 +179,16 @@ export BACKEND_GSA="$(
 export MODEL_ARMOR_TEMPLATE="$(
   tofu -chdir=infra/terraform output -raw model_armor_template_name
 )"
+export DB_HOST="$(
+  tofu -chdir=infra/terraform output -raw cloud_sql_private_ip_address
+)"
 ```
 
 Inspect them without exposing credentials:
 
 ```bash
-printf 'images=%s\nbucket=%s\nbackend_identity=%s\nmodel_armor=%s\n' \
-  "$IMAGE_REPO" "$DOCUMENTS_BUCKET" "$BACKEND_GSA" "$MODEL_ARMOR_TEMPLATE"
+printf 'images=%s\nbucket=%s\nbackend_identity=%s\nmodel_armor=%s\ndb_host=%s\n' \
+  "$IMAGE_REPO" "$DOCUMENTS_BUCKET" "$BACKEND_GSA" "$MODEL_ARMOR_TEMPLATE" "$DB_HOST"
 ```
 
 These outputs confirm resource addresses, not runtime readiness.
@@ -208,13 +214,11 @@ gcloud sql users create agentcare \
   --password="$DB_PASSWORD"
 ```
 
-Read the private address:
+The `cloud_sql_private_ip_address` output captured in section 6 is the direct
+PostgreSQL host. Confirm it is non-empty before constructing the URL:
 
 ```bash
-export DB_HOST="$(
-  gcloud sql instances describe agentcare-postgres \
-    --format='value(ipAddresses[0].ipAddress)'
-)"
+test -n "$DB_HOST"
 printf 'cloud-sql-private-ip=%s\n' "$DB_HOST"
 ```
 
@@ -235,23 +239,7 @@ gcloud sql backups create --instance=agentcare-postgres
 gcloud sql backups list --instance=agentcare-postgres
 ```
 
-## 8. Store secret material
-
-Terraform grants the backend identity Secret Manager access, but the running
-Deployment currently reads a Kubernetes Secret. If Secret Manager is part of
-the operator's inventory, create each secret and add its value over standard
-input so the value does not enter this document:
-
-```bash
-gcloud secrets create llm-api-key --replication-policy=automatic
-gcloud secrets versions add llm-api-key --data-file=-
-
-gcloud secrets create jwt-secret --replication-policy=automatic
-gcloud secrets versions add jwt-secret --data-file=-
-```
-
-Press Ctrl-D after entering each value. An existing secret should receive a
-new version instead of another create command.
+## 8. Prepare secret material
 
 Prepare the runtime Kubernetes values in a temporary file:
 
@@ -301,36 +289,18 @@ unset DB_PASSWORD
 The generated manifest output is piped directly to the cluster. Do not save it
 inside the repository.
 
-## 10. Bind backend Workload Identity
+## 10. Confirm declarative Workload Identity
 
-The Terraform module creates the Google service account, but the Kubernetes
-service account and pod binding are manual gaps.
+Terraform grants `roles/iam.workloadIdentityUser` on the backend GSA to
+`default/agentcare-backend`. The base Deployment sets
+`serviceAccountName: agentcare-backend`. The GCP overlay adds the
+`iam.gke.io/gcp-service-account` annotation.
 
-```bash
-kubectl create serviceaccount agentcare-backend \
-  --dry-run=client -o yaml |
-  kubectl apply -f -
-
-kubectl annotate serviceaccount agentcare-backend \
-  "iam.gke.io/gcp-service-account=$BACKEND_GSA" \
-  --overwrite
-
-gcloud iam service-accounts add-iam-policy-binding "$BACKEND_GSA" \
-  --role=roles/iam.workloadIdentityUser \
-  --member="serviceAccount:${PROJECT_ID}.svc.id.goog[default/agentcare-backend]"
-```
-
-The current base Deployment does not set `serviceAccountName`. After applying
-the workload, patch it and wait for the replacement pod:
-
-```bash
-kubectl patch deployment backend \
-  --type=merge \
-  -p '{"spec":{"template":{"spec":{"serviceAccountName":"agentcare-backend"}}}}'
-```
-
-Repeat that patch after any manifest operation that removes the field.
-Without it, GCS and Model Armor calls use the namespace default identity.
+Before rendering, replace the `PROJECT_ID` sentinel in
+`infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml`. Do not create,
+annotate, bind or patch the service account with imperative commands. Inspect
+the rendered relationship in section 13 and verify the running pod after
+rollout.
 
 ## 11. Fill non-secret deployment configuration
 
@@ -341,27 +311,39 @@ Before applying, replace the environment-specific values in the working copy:
 | `infra/k8s/base/configmap.yaml` | Real `FRONTEND_ORIGIN` when the public origin is known |
 | `infra/k8s/overlays/gcp/configmap-storage.yaml` | `GCS_BUCKET=$DOCUMENTS_BUCKET` |
 | `infra/k8s/overlays/gcp/configmap-model-armor.yaml` | `MODEL_ARMOR_TEMPLATE=$MODEL_ARMOR_TEMPLATE` |
+| `infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml` | Replace `PROJECT_ID` |
+| `infra/k8s/overlays/gcp/ingress.yaml` | Replace the sample domain |
 
 Confirm no sentinel remains in rendered configuration:
 
 ```bash
-grep -R -n 'REPLACE_ME\|FRONTEND_ORIGIN_PLACEHOLDER' \
-  infra/k8s/base infra/k8s/overlays/gcp
+grep -R -n 'REPLACE_ME\|PLACEHOLDER\|PROJECT_ID\|example\.com' \
+  infra/k8s/base infra/k8s/overlays/gcp infra/k8s/overlays/gcp-migration
 ```
 
 The command should return no match before a public deployment.
 
+### Local model and ADC truth
+
+For local Compose use, an OpenAI-compatible `LLM_BASE_URL` must be reachable
+from inside the backend container. Container `localhost` is not the host
+machine; use a container DNS name or a supported host gateway. Host ADC from
+`gcloud auth application-default login` is not automatically mounted by
+Compose. Direct local backend execution is the documented local Vertex path
+unless the operator explicitly mounts ADC.
+
 ### Groq profile
 
 The YAML default is `groq`. The Kubernetes Secret must contain
-`LLM_API_KEY`. The base ConfigMap already supplies the default endpoint and
-model.
+`LLM_API_KEY`. The base ConfigMap selects only `LLM_PROFILE=groq`; endpoint and
+model defaults remain in `backend/llm.yaml`.
 
 ### Vertex profile
 
 Vertex uses ADC through the pod's Workload Identity, not a Google credential
-value in the Kubernetes Secret. Add these non-secret values to
-`agentcare-config` before rollout:
+value in the Kubernetes Secret. Set `ENABLE_VERTEX_AI=true` before the
+OpenTofu plan, enable `aiplatform.googleapis.com` and add these non-secret
+values to `agentcare-config` before rollout:
 
 ```yaml
 LLM_PROFILE: "vertex"
@@ -397,9 +379,14 @@ docker buildx build \
   --push ./frontend
 ```
 
-Point the overlay at those exact images:
+Point both overlays at those exact images:
 
 ```bash
+cd infra/k8s/overlays/gcp-migration
+kustomize edit set image \
+  "agentcare-backend=$IMAGE_REPO/backend:$IMAGE_TAG"
+cd ../../../..
+
 cd infra/k8s/overlays/gcp
 kustomize edit set image \
   "agentcare-backend=$IMAGE_REPO/backend:$IMAGE_TAG" \
@@ -411,33 +398,50 @@ Do not commit environment-specific image rewrites.
 
 ## 13. Render and apply
 
-Render before touching the cluster:
+Render both stages before touching the cluster:
 
 ```bash
+kubectl kustomize infra/k8s/overlays/gcp-migration \
+  >/tmp/agentcare-migration-rendered.yaml
 kubectl kustomize infra/k8s/overlays/gcp >/tmp/agentcare-rendered.yaml
+if grep -Eq 'REPLACE_ME|PLACEHOLDER|PROJECT_ID|REGION-docker|/PROJECT/|:TAG|example\.com' \
+  /tmp/agentcare-migration-rendered.yaml /tmp/agentcare-rendered.yaml; then
+  echo "refusing apply: unresolved deployment sentinel" >&2
+  exit 1
+fi
 kubectl apply --dry-run=server -f /tmp/agentcare-rendered.yaml
 ```
 
-The migration Job spec is immutable. Delete any prior Job before apply:
+Inspect the application render for its declarative identity and the absence of
+a Job:
+
+```bash
+grep -n 'kind: ServiceAccount\|serviceAccountName: agentcare-backend\|iam.gke.io/gcp-service-account' \
+  /tmp/agentcare-rendered.yaml
+if grep -q 'kind: Job' /tmp/agentcare-rendered.yaml; then
+  echo "application render unexpectedly contains a Job" >&2
+  exit 1
+fi
+```
+
+The migration Job spec is immutable. Delete any prior Job, server-dry-run the
+migration artifact, apply it and wait:
 
 ```bash
 kubectl delete job backend-migrate --ignore-not-found
-kubectl apply -k infra/k8s/overlays/gcp
-```
-
-Wait for migration before judging application readiness:
-
-```bash
+kubectl apply --dry-run=server -f /tmp/agentcare-migration-rendered.yaml
+kubectl apply -f /tmp/agentcare-migration-rendered.yaml
 kubectl wait \
   --for=condition=complete job/backend-migrate \
   --timeout=300s
 kubectl logs job/backend-migrate
 ```
 
-Apply the backend service-account patch from section 10, then wait for both
-workloads:
+Do not deploy the application if the Job fails. Only after success, apply the
+application artifact and wait for both workloads:
 
 ```bash
+kubectl apply -f /tmp/agentcare-rendered.yaml
 kubectl rollout status deployment/backend --timeout=300s
 kubectl rollout status deployment/frontend --timeout=300s
 kubectl get pods
@@ -458,7 +462,8 @@ kubectl describe managedcertificate agentcare-cert
 The certificate remains provisioning until DNS resolves to the load balancer.
 Public DNS and TLS have not been verified by the repository.
 
-For a private operator smoke test without an Ingress, use port forwarding:
+To test the frontend independently of public Ingress readiness, use port
+forwarding:
 
 ```bash
 kubectl port-forward svc/frontend 3000:3000
@@ -662,8 +667,8 @@ Delete Kubernetes resources first so the load balancer is removed:
 
 ```bash
 kubectl delete -k infra/k8s/overlays/gcp
+kubectl delete job backend-migrate --ignore-not-found
 kubectl delete secret agentcare-secrets
-kubectl delete serviceaccount agentcare-backend
 ```
 
 Confirm that no Ingress remains:
@@ -679,15 +684,38 @@ tofu -chdir=infra/terraform destroy \
   -var="project_id=$PROJECT_ID" \
   -var="region=$REGION" \
   -var="gcs_location=$REGION" \
-  -var="github_repository=$GITHUB_REPOSITORY"
+  -var="enable_vertex_ai=$ENABLE_VERTEX_AI"
 ```
 
 If the documents bucket contains objects, destroy stops. Review the bucket,
-then delete its contents only when data retention permits:
+then delete its contents only when data retention permits. Re-read the output,
+require the exact project-derived bucket name and type the resolved target:
 
 ```bash
-gcloud storage ls "gs://$DOCUMENTS_BUCKET"
-gcloud storage rm --recursive "gs://$DOCUMENTS_BUCKET/**"
+FRESH_DOCUMENTS_BUCKET="$(
+  tofu -chdir=infra/terraform output -raw documents_bucket_name
+)"
+EXPECTED_DOCUMENTS_BUCKET="${PROJECT_ID}-agentcare-documents"
+
+test -n "$FRESH_DOCUMENTS_BUCKET" || {
+  echo "refusing purge: empty bucket output" >&2
+  exit 1
+}
+test "$FRESH_DOCUMENTS_BUCKET" = "$EXPECTED_DOCUMENTS_BUCKET" || {
+  echo "refusing purge: expected $EXPECTED_DOCUMENTS_BUCKET, got $FRESH_DOCUMENTS_BUCKET" >&2
+  exit 1
+}
+
+BUCKET_URI="gs://${FRESH_DOCUMENTS_BUCKET}"
+printf 'resolved purge target: %s\n' "$BUCKET_URI"
+gcloud storage ls "$BUCKET_URI"
+printf 'Type DELETE %s to continue: ' "$BUCKET_URI"
+read -r PURGE_CONFIRMATION
+test "$PURGE_CONFIRMATION" = "DELETE $BUCKET_URI" || {
+  echo "purge cancelled" >&2
+  exit 1
+}
+gcloud storage rm --recursive "${BUCKET_URI}/**"
 ```
 
 Object deletion is irreversible. Run destroy again after the bucket is empty.
