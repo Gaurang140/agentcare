@@ -79,7 +79,7 @@ from app.models import AuditEvent
 Add this behavior test:
 
 ```python
-def test_registration_writes_audit_event(client, db):
+def test_registration_writes_audit_event(client, db_session):
     response = client.post(
         "/api/auth/register",
         json={
@@ -94,7 +94,7 @@ def test_registration_writes_audit_event(client, db):
     )
 
     assert response.status_code == 201, response.text
-    row = db.query(AuditEvent).filter_by(action="user.registered").one()
+    row = db_session.query(AuditEvent).filter_by(action="user.registered").one()
     assert row.actor_id == response.json()["id"]
     assert row.entity_type == "user"
     assert row.entity_id == response.json()["id"]
