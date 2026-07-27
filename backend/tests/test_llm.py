@@ -17,86 +17,19 @@ from pydantic import BaseModel
 
 from app.agents.llm import LLMOutputError, chat_json, set_llm_client_for_tests
 
+# The scripted openai-SDK-shaped fake lives in conftest.py, shared with the
+# agent-node tests.
+from conftest import FakeLLMClient as FakeClient
+from conftest import _fake_completion
+
 
 class _Verdict(BaseModel):
     ok: bool
     reason: str
 
 
-def _completion(content: str):
-    """A real openai ChatCompletion, because agents/llm.py wraps the fake
-    client in a langchain ChatOpenAI that parses real SDK response types."""
-    from openai.types.chat import ChatCompletion, ChatCompletionMessage
-    from openai.types.chat.chat_completion import Choice
-
-    return ChatCompletion(
-        id="fake",
-        created=0,
-        model="fake-model",
-        object="chat.completion",
-        choices=[
-            Choice(
-                finish_reason="stop",
-                index=0,
-                message=ChatCompletionMessage(role="assistant", content=content),
-            )
-        ],
-    )
-
-
 def _ok(payload: dict):
-    return _completion(json.dumps(payload))
-
-
-class _FakeRawResponse:
-    def __init__(self, response) -> None:
-        self._response = response
-        self.headers: dict = {}
-
-    def parse(self):
-        return self._response
-
-
-class _FakeWithRawResponse:
-    def __init__(self, completions: "_FakeCompletions") -> None:
-        self._completions = completions
-
-    def create(self, **kwargs) -> _FakeRawResponse:
-        return _FakeRawResponse(self._completions.create(**kwargs))
-
-    def parse(self, **kwargs) -> _FakeRawResponse:
-        return _FakeRawResponse(self._completions.create(**kwargs))
-
-
-class _FakeCompletions:
-    """Replays a scripted list of responses/exceptions, one per call."""
-
-    def __init__(self, script: list) -> None:
-        self._script = list(script)
-        self.calls: list[dict] = []
-
-    @property
-    def with_raw_response(self) -> _FakeWithRawResponse:
-        return _FakeWithRawResponse(self)
-
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        if not self._script:
-            raise AssertionError("fake client called more times than scripted")
-        item = self._script.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-
-class _FakeChat:
-    def __init__(self, completions: _FakeCompletions) -> None:
-        self.completions = completions
-
-
-class FakeClient:
-    def __init__(self, script: list) -> None:
-        self.chat = _FakeChat(_FakeCompletions(script))
+    return _fake_completion(json.dumps(payload))
 
 
 def _bad_request_error(message: str = "response_format not supported") -> openai.BadRequestError:
