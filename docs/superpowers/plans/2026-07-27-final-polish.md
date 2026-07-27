@@ -413,7 +413,7 @@ rtk git commit -m "consolidate agent and workflow boundaries"
 
 ---
 
-## Task 3: Activate the current Vertex AI model path through LangChain
+## Task 3: Delegate structured output to LangChain and activate Vertex AI
 
 **Files:**
 
@@ -421,10 +421,160 @@ rtk git commit -m "consolidate agent and workflow boundaries"
 - Modify: `backend/llm.yaml`
 - Modify: `backend/app/agents/llm.py`
 - Modify: `backend/app/agents/model_config.py`
+- Modify: `backend/tests/conftest.py`
 - Modify: `backend/tests/test_model_config.py`
 - Modify: `backend/tests/test_llm.py`
 
-### Step 1: Add a failing committed-profile test
+### Step 1: Add a failing recursively strict schema test
+
+The current `_strict_schema()` only sets `additionalProperties: false` on the
+top-level object. Groq strict mode requires it on every object, including
+`FollowupOutput.$defs.ReminderSpec`.
+
+Add a no-network integration test in `backend/tests/test_llm.py` that:
+
+1. creates a real `openai.OpenAI` client using `httpx.Client` with
+   `httpx.MockTransport`;
+2. captures the JSON request body and returns a valid chat-completion response
+   whose message content contains:
+
+```json
+{
+  "reminders": [
+    {"type": "appointment", "days_before_appointment": 1}
+  ],
+  "followup_days_after": 14
+}
+```
+
+3. injects that SDK client through `set_llm_client_for_tests`;
+4. calls `chat_json("system", "user", FollowupOutput)`;
+5. asserts the result is the expected `FollowupOutput`;
+6. asserts:
+
+```python
+schema = captured["response_format"]["json_schema"]["schema"]
+assert schema["additionalProperties"] is False
+assert schema["$defs"]["ReminderSpec"]["additionalProperties"] is False
+```
+
+Use the real SDK client for this boundary because the scripted fake sees
+arguments before the SDK converts a Pydantic class into its wire schema. The
+mock transport must not contact any network.
+
+### Step 2: Run the nested-schema test and record RED
+
+From `backend/`:
+
+```bash
+rtk "../../../.venv/bin/python" -m pytest tests/test_llm.py::test_chat_json_sends_recursively_strict_schema -q
+```
+
+Expected: fail because the existing manual schema leaves nested
+`ReminderSpec` open.
+
+### Step 3: Make the scripted fake support SDK Pydantic parsing
+
+`backend/tests/conftest.py::_FakeWithRawResponse.parse` currently returns an
+ordinary `ChatCompletion`; the real OpenAI SDK returns a parsed completion when
+`response_format` is a Pydantic class.
+
+Extend only the fake's `parse()` path:
+
+- consume the scripted completion once;
+- when `kwargs["response_format"]` is a Pydantic model class, validate the
+  response message content with that class;
+- expose the validated instance as the completion message's `parsed` value in
+  the same shape the SDK provides;
+- let `pydantic.ValidationError` propagate for invalid native-schema output;
+- leave `create()` and JSON-object behavior unchanged.
+
+Use public OpenAI response model classes or a direct test-only message
+attribute supported by the pinned model. Do not import OpenAI private parsing
+helpers. Preserve one recorded fake call per model request.
+
+### Step 4: Replace manual schema plumbing with `with_structured_output`
+
+Keep the public `chat_json(system, user, schema_model, max_retries=None)` API.
+It is AgentCare's policy boundary, not a generic JSON utility.
+
+Inside `backend/app/agents/llm.py`:
+
+- delete `_strict_schema`;
+- stop calling `model.bind(response_format=...)` directly;
+- build the native runnable with:
+
+```python
+model.with_structured_output(
+    schema_model,
+    method="json_schema",
+    strict=True,
+    include_raw=True,
+)
+```
+
+- build the compatibility runnable with:
+
+```python
+model.with_structured_output(
+    schema_model,
+    method="json_mode",
+    include_raw=True,
+)
+```
+
+- wrap the complete structured runnable with `_with_retry`, still restricted
+  to the existing transport exception tuple;
+- on `openai.BadRequestError`, add `_schema_in_prompt(...)` and retry through
+  JSON mode;
+- if `include_raw` returns `parsing_error`, or native SDK parsing raises
+  `pydantic.ValidationError`, issue the existing single corrective re-prompt;
+- append the raw `AIMessage` before the correction when it is available;
+- after a second validation failure, raise `LLMOutputError`;
+- keep primary-to-fallback switching and force the fallback model through
+  prompt-guided JSON mode once;
+- accept either a schema-model instance or a provider-returned dict, validating
+  a dict with `schema_model.model_validate`.
+
+Do not remove `chat_json`, `_schema_in_prompt`, `_with_retry`, profile
+resolution, test overrides, or `LLMOutputError`. Do not introduce LangChain's
+agent factory; the explicit LangGraph nodes remain the orchestrator.
+
+### Step 5: Update and extend structured-output regression tests
+
+Preserve every existing behavior test. Adjust native-path fake assertions to
+expect the Pydantic class; the `httpx.MockTransport` test owns exact wire-schema
+assertions.
+
+Add a validation-repair test after JSON-schema rejection:
+
+```python
+client = FakeClient(
+    [
+        _bad_request_error(),
+        _ok({"ok": "not-a-boolean"}),
+        _ok({"ok": True, "reason": "corrected in json mode"}),
+    ]
+)
+```
+
+Assert the corrected `_Verdict` is returned, the first call is native, calls
+two and three use `{"type": "json_object"}`, and the third call contains a
+correction message.
+
+Keep green the existing tests for native structured output, 400-to-JSON-mode
+fallback, validation repair, two-invalid-response failure, transport retry
+count, fallback-model JSON mode, and network-free test overrides.
+
+From `backend/`:
+
+```bash
+rtk "../../../.venv/bin/python" -m pytest tests/test_llm.py -q
+```
+
+Expected: all LLM tests pass. Record the nested-schema RED and complete GREEN.
+
+### Step 6: Add a failing committed Vertex profile test
 
 In `backend/tests/test_model_config.py`, add:
 
@@ -439,10 +589,18 @@ def test_committed_yaml_provides_vertex_profile(monkeypatch):
     assert profiles.primary.params == {"vertexai": True}
 ```
 
-### Step 2: Add a failing model-factory boundary test
+Run it before changing YAML:
 
-In `backend/tests/test_llm.py`, add a test that monkeypatches the module-level
-`init_chat_model`, calls `_build_chat_model` with:
+```bash
+rtk "../../../.venv/bin/python" -m pytest tests/test_model_config.py::test_committed_yaml_provides_vertex_profile -q
+```
+
+Expected: fail because `vertex` is still only a commented example.
+
+### Step 7: Add the model-factory boundary test
+
+In `backend/tests/test_llm.py`, monkeypatch module-level `init_chat_model`, call
+`_build_chat_model` with:
 
 ```python
 ModelProfile(
@@ -452,29 +610,17 @@ ModelProfile(
 )
 ```
 
-and asserts the factory receives:
+Assert the fake factory receives:
 
 ```python
 ("gemini-2.5-flash",)
 {"model_provider": "google_genai", "vertexai": True}
 ```
 
-The fake factory returns a sentinel object and the test asserts that sentinel
-is returned. This is a local boundary test; it must not contact Google.
+The factory returns a sentinel and the test asserts the sentinel is returned.
+This test must not contact Google.
 
-### Step 3: Run the focused tests and record RED
-
-From `backend/`:
-
-```bash
-rtk "../../../.venv/bin/python" -m pytest tests/test_model_config.py::test_committed_yaml_provides_vertex_profile tests/test_llm.py -q
-```
-
-Expected: the committed-profile test fails because `vertex` is still only a
-commented example. If the factory-boundary test already passes, record that
-honestly; the required RED is the missing active profile.
-
-### Step 4: Add only the required provider integration
+### Step 8: Add only the required provider integration
 
 In `requirements.txt` add:
 
@@ -496,21 +642,21 @@ In `backend/llm.yaml`, replace the commented Gemini example with:
     vertexai: true
 ```
 
-Keep `groq` as `default_profile`. Authentication remains Application Default
+Keep `groq` as `default_profile`. Authentication is Application Default
 Credentials with `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` supplied by
 the deployment environment.
 
-### Step 5: Correct provider guidance and test fixtures
+### Step 9: Correct provider guidance and fixtures
 
-Update stale `llm.py` examples to name `langchain-google-genai`, not the
-deprecated Vertex-specific package. Update any test-only profile spelling from
-`google_vertexai` to `google_genai` when the test is meant to demonstrate the
-current Google provider. Preserve the generic missing-package error behavior.
+Update stale examples to name `langchain-google-genai`, not the deprecated
+Vertex-specific package. Update test-only provider spelling from
+`google_vertexai` to `google_genai` where it represents current Gemini on
+Vertex. Preserve the generic missing-package error.
 
 Do not add provider-specific conditionals to `_build_chat_model`; `params`
-already passes `vertexai` through `init_chat_model`.
+already carries `vertexai` through `init_chat_model`.
 
-### Step 6: Install and verify the pinned integration
+### Step 10: Install and verify
 
 From the repository root:
 
@@ -523,18 +669,20 @@ From `backend/`:
 ```bash
 rtk "../../../.venv/bin/python" -m pytest tests/test_model_config.py tests/test_llm.py -q
 rtk "../../../.venv/bin/ruff" check app tests
+rtk "../../../.venv/bin/python" -m compileall -q app
 rtk "../../../.venv/bin/python" -m pytest -q
 rtk "../../../.venv/bin/python" -m pip check
 ```
 
-Expected: all tests pass and dependency resolution is clean. This verifies
-configuration and construction only, not a live Vertex response.
+Expected: all checks pass. This verifies Groq-compatible wire formatting over a
+local mock plus Vertex configuration/construction; it is not a live Groq or
+Vertex model test.
 
-### Step 7: Commit
+### Step 11: Commit
 
 ```bash
 rtk git add requirements.txt backend
-rtk git commit -m "add configurable Vertex AI model profile"
+rtk git commit -m "delegate structured output and add Vertex profile"
 ```
 
 ---

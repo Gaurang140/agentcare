@@ -124,6 +124,15 @@ The Vertex profile relies on Application Default Credentials plus
 profile reaches `init_chat_model` with the correct provider and parameters; no
 documentation may describe that as a live GCP model test.
 
+`chat_json(...)` remains the application's single structured-model policy
+boundary, but it delegates schema conversion, provider request formatting and
+happy-path parsing to LangChain's `with_structured_output(...)`. AgentCare
+continues to own the behavior LangChain does not supply: transport-only retry,
+strict-schema to JSON-mode compatibility fallback, one corrective re-prompt,
+fallback-model selection and stable application exceptions. This removes the
+OpenAI-shaped manual schema code and makes the Vertex profile a real
+provider-neutral path rather than configuration that only constructs a model.
+
 ## Frontend cleanup
 
 Replace the ineffective `useTheme()` call in the Sonner wrapper with the
@@ -181,6 +190,11 @@ Behavior changes use red-green TDD:
   redaction/audit side effects;
 - Vertex profile test fails before the profile is active and verifies the
   `init_chat_model` boundary without network calls.
+- a real OpenAI SDK client over `httpx.MockTransport` proves LangChain produces
+  recursively strict nested JSON Schema for the Groq-compatible endpoint;
+- existing validation repair, JSON-mode compatibility fallback, transport
+  retry and fallback-model tests remain behavior contracts while the inner
+  implementation moves to `with_structured_output`.
 
 Mechanical deletions and prose changes use existing behavior suites plus static
 verification.
