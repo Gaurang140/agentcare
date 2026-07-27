@@ -988,10 +988,11 @@ rewording around broken configuration.
 - Add: `infra/k8s/base/service-account.yaml`
 - Add: `infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml`
 - Add: `infra/k8s/overlays/gcp-migration/kustomization.yaml`
+- Add: `infra/k8s/overlays/gcp-migration/migration-job.yaml`
 - Modify: `infra/k8s/base/backend.yaml`
 - Modify: `infra/k8s/base/configmap.yaml`
 - Modify: `infra/k8s/base/kustomization.yaml`
-- Modify: `infra/k8s/base/migration-job.yaml`
+- Delete: `infra/k8s/base/migration-job.yaml`
 - Modify: `infra/k8s/overlays/gcp/kustomization.yaml`
 - Modify: `infra/terraform/main.tf`
 - Modify: `infra/terraform/variables.tf`
@@ -1052,10 +1053,12 @@ Compose keeps the existing migrate/seed startup default. The Kubernetes
 backend Deployment sets the switch to true.
 
 Remove the migration Job from the application base Kustomization. Put that
-Job behind `infra/k8s/overlays/gcp-migration`, with its own immutable backend
-image transform. It remains the only Kubernetes migration/seed owner. The GCP
-runbook must delete/apply/wait/log the Job before applying the application
-overlay. Do not deploy the application before the Job succeeds.
+Job entirely in `infra/k8s/overlays/gcp-migration`, with its own immutable
+backend image transform. Keeping the manifest self-contained in the overlay
+also avoids Kustomize load-restriction coupling to the application base. It
+remains the only Kubernetes migration/seed owner. The GCP runbook must
+delete/apply/wait/log the Job before applying the application overlay. Do not
+deploy the application before the Job succeeds.
 
 ### Step 4: Make runtime workload identity declarative
 
@@ -1125,7 +1128,9 @@ rtk git diff --check
 ```
 
 Commands are run from the directory their paths assume. Inspect all search
-matches rather than hiding them. Commit as:
+matches rather than hiding them. If OpenTofu is unavailable, use an installed
+compatible Terraform binary for local `fmt` and `validate`, and disclose the
+exact binary and version without claiming an OpenTofu run. Commit as:
 
 ```bash
 rtk git add -A
@@ -1197,12 +1202,15 @@ From the repository root:
 
 ```bash
 rtk kubectl kustomize infra/k8s/overlays/gcp
+rtk kubectl kustomize infra/k8s/overlays/gcp-migration
 rtk tofu -chdir=infra/terraform fmt -check -recursive
 rtk tofu -chdir=infra/terraform validate
 ```
 
-If `tofu` is unavailable, report that exact environmental limitation; do not
-claim validation passed. Do not deploy or mutate GCP from this task.
+If `tofu` is unavailable, report that exact environmental limitation. An
+installed compatible Terraform binary may be used for local `fmt` and
+`validate` when its exact version is recorded; do not claim OpenTofu itself
+ran. Do not deploy or mutate GCP from this task.
 
 ### Step 4: Record exact evidence
 
@@ -1212,7 +1220,8 @@ The task report records:
 - Ruff, compile, and `pip check` outputs;
 - frontend lint, type-check, and build results;
 - Alembic head and fresh-upgrade result;
-- Kustomize and OpenTofu results;
+- both Kustomize overlay results and the exact OpenTofu/Terraform-compatible
+  validation result;
 - hygiene scan results;
 - any warning, skipped check, or environmental limitation.
 
