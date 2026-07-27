@@ -10,12 +10,10 @@ metadata:
 spec:
   # single replica: in-process APScheduler has no distributed lock; scale out only after moving jobs to a worker
   replicas: 1
-  # Never overlap old and new scheduler processes during a rollout.
+  # Planned upgrades delete the old Pod before creating its replacement.
+  # Recreate is not a distributed lock for node failure or manual operations.
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+    type: Recreate
   selector:
     matchLabels:
       app: backend

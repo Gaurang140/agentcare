@@ -76,8 +76,11 @@ Ingress, a `FrontendConfig` that redirects HTTP to HTTPS and the long-timeout
 backend `/metrics` endpoint through Google Managed Service for Prometheus. The
 backend container sets `SKIP_STARTUP_MIGRATIONS=true`.
 
-Backend rollouts set `maxSurge: 0` and `maxUnavailable: 1`. This causes brief
-downtime but preserves the one-process scheduler invariant.
+The backend uses `Recreate`, so a planned upgrade deletes the old Pod before
+creating its replacement. This causes brief downtime and avoids rolling
+overlap, but it is not a distributed singleton guarantee for failures or
+manual Pod operations. Keep one replica until scheduled work moves to an
+external worker or gains a distributed lock.
 
 ## Verify
 

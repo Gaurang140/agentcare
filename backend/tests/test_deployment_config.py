@@ -63,10 +63,7 @@ def test_kubernetes_backend_uses_declared_service_account_and_skips_migrations()
         )
     )
     deployment = _resource(documents, "Deployment", "backend")
-    assert deployment["spec"]["strategy"] == {
-        "type": "RollingUpdate",
-        "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1},
-    }
+    assert deployment["spec"]["strategy"] == {"type": "Recreate"}
     pod_spec = deployment["spec"]["template"]["spec"]
 
     assert pod_spec["serviceAccountName"] == "agentcare-backend"
@@ -254,9 +251,9 @@ def test_ci_defaults_to_read_only_and_verifies_kubeconform_archive():
     )
     assert "sha256sum -c" in install
     assert "| tar " not in install
-    assert "v0.7.0" in install
-    assert "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3" in install
-    assert "v0.6.7" not in install
+    assert "v0.8.0" in install
+    assert "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883" in install
+    assert "v0.7.0" not in install
 
 
 def test_ci_validates_terraform_with_pinned_opentofu():

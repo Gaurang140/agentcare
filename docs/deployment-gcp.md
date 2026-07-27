@@ -26,8 +26,11 @@ executable in this guide is OpenTofu. Kubernetes source is in `infra/k8s`.
 | Workloads | Ordered migration Job, then backend, frontend, Services and TLS-1.2 HTTPS-redirecting GCE Ingress |
 
 The backend remains one replica because APScheduler jobs run in-process without
-a distributed lock. Its rollout strategy forbids a surge replica, so upgrades
-have brief backend downtime instead of running two schedulers at once.
+a distributed lock. Its `Recreate` strategy deletes the old deployment Pod
+before creating its replacement, so planned upgrades have brief backend
+downtime instead of a rolling overlap. This is not a general singleton
+guarantee for node failure or manual Pod operations; do not scale the backend
+until scheduled work uses an external worker or a distributed lock.
 
 ## Manual gaps
 

@@ -133,10 +133,10 @@ jobs:
           archive="$RUNNER_TEMP/kubeconform-linux-amd64.tar.gz"
           bin_dir="$RUNNER_TEMP/kubeconform-bin"
           curl -sfL \
-            https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz \
             -o "$archive"
-          # Published in the v0.7.0 release's CHECKSUMS asset.
-          echo "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  $archive" \
+          # Published in the v0.8.0 release's CHECKSUMS asset.
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  $archive" \
             | sha256sum -c -
           mkdir -p "$bin_dir"
           tar xzf "$archive" -C "$bin_dir" kubeconform
