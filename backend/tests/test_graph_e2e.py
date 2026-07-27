@@ -680,3 +680,28 @@ def test_graph_exception_creates_escalation_and_marks_run_failed(db, seeded, fak
         .first()
     )
     assert escalation is not None
+
+
+def test_graph_invocation_requests_synchronous_durability(db, seeded, fake_llm, monkeypatch):
+    """A crash between super-steps must not lose the step that just finished.
+
+    LangGraph's default mode writes checkpoints asynchronously, which leaves a
+    window where a booking that already claimed a slot comes back as a run
+    that never took the step. "sync" persists before the next super-step runs.
+    """
+    fake_llm([])
+    captured: dict = {}
+
+    class _RecordingGraph:
+        def invoke(self, graph_input, config, **kwargs):
+            captured["config"] = config
+            captured["kwargs"] = kwargs
+            return {"final_response": "ok", "completed_steps": ["coordinator"]}
+
+    monkeypatch.setattr(workflow_service, "get_graph", lambda: _RecordingGraph())
+
+    workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", []
+    )
+
+    assert captured["kwargs"].get("durability") == "sync"

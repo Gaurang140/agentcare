@@ -299,7 +299,11 @@ def _invoke_graph(
 
     try:
         with _observability(config, workflow_run.id):
-            return graph.invoke(graph_input, config)
+            # Persist each checkpoint before the next super-step runs. The
+            # default mode writes asynchronously, which leaves a window where a
+            # crash loses the step that just finished. A booking that already
+            # claimed a slot must not come back as a run that never took it.
+            return graph.invoke(graph_input, config, durability="sync")
     except Exception as exc:  # noqa: BLE001 - last-resort safety net, never a 500
         logger.error("workflow_graph_crashed", workflow_id=workflow_run.id, error=str(exc))
         db.rollback()
