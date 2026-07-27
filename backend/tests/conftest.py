@@ -374,6 +374,10 @@ def _armor_sanitization_result(matched: dict[str, bool]):
 
     return modelarmor_v1.SanitizationResult(
         filter_match_state=states[any(matched.values())],
+        # The real API always reports whether the filters ran; SUCCESS here
+        # keeps the fake faithful (the adapter reads a clean no-match as
+        # clean only under SUCCESS - see model_armor._verdict).
+        invocation_result=modelarmor_v1.InvocationResult.SUCCESS,
         filter_results=filter_results,
     )
 

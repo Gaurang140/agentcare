@@ -195,12 +195,28 @@ def _filter_matched(filter_result: Any) -> bool:
     return False
 
 
-def _verdict(response: Any) -> ModelArmorVerdict:
+def _verdict(response: Any) -> ModelArmorVerdict | None:
+    """Read a sanitize response honestly. `invocation_result` reports whether
+    the filters actually ran, irrespective of match state (SUCCESS: all ran;
+    PARTIAL: some skipped or failed; FAILURE: all skipped or failed). A
+    positive match always stands - a filter that matched demonstrably ran.
+    A "no match" is a clean verdict only under SUCCESS; from a FAILURE,
+    PARTIAL or unset invocation it is no opinion (None), because reading a
+    degraded execution as clean silently overstates protection."""
     result = response.sanitization_result
     categories = tuple(
         sorted(name for name, item in result.filter_results.items() if _filter_matched(item))
     )
-    return ModelArmorVerdict(flagged=_is_match(result.filter_match_state), categories=categories)
+    if _is_match(result.filter_match_state):
+        return ModelArmorVerdict(flagged=True, categories=categories)
+    invocation = getattr(result, "invocation_result", None)
+    if getattr(invocation, "name", str(invocation)) != "SUCCESS":
+        logger.warning(
+            "model_armor_incomplete_execution_no_opinion",
+            invocation_result=getattr(invocation, "name", str(invocation)),
+        )
+        return None
+    return ModelArmorVerdict(flagged=False, categories=categories)
 
 
 def _screen(text: str, *, operation: str) -> ModelArmorVerdict | None:
