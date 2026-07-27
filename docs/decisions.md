@@ -214,3 +214,42 @@ backend replicas would duplicate scheduled jobs.
 
 Move dispatch and periodic jobs to a durable external worker before scaling
 the backend horizontally.
+
+## Terraform as the sole infrastructure CLI
+
+**Decision:** Standardize local instructions, CI and the GCP runbook on
+HashiCorp Terraform 1.15.8. Keep the existing Terraform language source,
+module boundaries, provider constraints and dependency lock file unchanged.
+
+**Why:** The project has no live infrastructure state to migrate, and its
+operator prefers Terraform. One executable name removes an unnecessary choice
+from setup, validation, deployment and teardown.
+
+**Scope:**
+
+- Replace the previous infrastructure CLI setup and commands with pinned
+  Terraform setup and `terraform` commands.
+- Keep every declared GCP resource and all six modules under
+  `infra/terraform/modules`.
+- Keep `.terraform.lock.hcl` in version control.
+- Remove only Terraform variables or child outputs proven to have no
+  references and no operator use.
+- Remove generated `.terraform` cache data from the working copy; `terraform
+  init` recreates it.
+- Preserve ignored internal planning artifacts in a separate local archive
+  commit before removing their working copies. The archive is not merged into
+  `main` or pushed automatically.
+
+**Non-goals:** This decision does not change GCP resources, Kubernetes
+manifests, application code, agents, APIs, database behavior, safety controls,
+deployment ordering or secret handling. It does not turn Terraform into an
+application-release runner.
+
+**Verification:** Terraform formatting, offline initialization and validation
+must pass. CI and tracked operator documentation must use Terraform
+consistently. Existing backend, frontend, manifest and deployment configuration
+checks remain green.
+
+**Trade-off:** The repository no longer continuously validates a second
+Terraform-compatible CLI. The infrastructure remains ordinary Terraform
+language, but Terraform is the only supported operator path.
