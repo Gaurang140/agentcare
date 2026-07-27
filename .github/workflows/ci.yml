@@ -104,20 +104,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: set up OpenTofu
-        uses: opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4 # v2.0.2
+      - name: set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
-          tofu_version: "1.12.1"
-          tofu_wrapper: false
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
 
       - name: check formatting
-        run: tofu fmt -check -recursive
+        run: terraform fmt -check -recursive
 
       - name: initialize providers without remote state
-        run: tofu init -backend=false -input=false
+        run: terraform init -backend=false -input=false
 
       - name: validate configuration
-        run: tofu validate -no-color
+        run: terraform validate -no-color
 
   manifests:
     # Rendering is not validation: kustomize does no schema check at all.

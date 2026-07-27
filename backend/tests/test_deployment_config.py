@@ -256,7 +256,7 @@ def test_ci_defaults_to_read_only_and_verifies_kubeconform_archive():
     assert "v0.7.0" not in install
 
 
-def test_ci_validates_terraform_with_pinned_opentofu():
+def test_ci_validates_terraform_with_pinned_hashicorp_setup():
     workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
     job = workflow["jobs"]["infrastructure"]
     assert job["defaults"]["run"]["working-directory"] == "infra/terraform"
@@ -264,22 +264,22 @@ def test_ci_validates_terraform_with_pinned_opentofu():
     setup = next(
         step
         for step in job["steps"]
-        if step.get("name") == "set up OpenTofu"
+        if step.get("name") == "set up Terraform"
     )
     assert setup["uses"] == (
-        "opentofu/setup-opentofu@a1320f892987e89d278cc92dc5adc984fb93aca4"
+        "hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e"
     )
     assert setup["with"] == {
-        "tofu_version": "1.12.1",
-        "tofu_wrapper": False,
+        "terraform_version": "1.15.8",
+        "terraform_wrapper": False,
     }
 
     commands = "\n".join(
         step["run"] for step in job["steps"] if isinstance(step.get("run"), str)
     )
-    assert "tofu fmt -check -recursive" in commands
-    assert "tofu init -backend=false -input=false" in commands
-    assert "tofu validate -no-color" in commands
+    assert "terraform fmt -check -recursive" in commands
+    assert "terraform init -backend=false -input=false" in commands
+    assert "terraform validate -no-color" in commands
 
 
 def test_ci_pins_first_party_actions_to_full_release_commits():
