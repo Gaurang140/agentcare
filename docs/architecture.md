@@ -1,272 +1,290 @@
 # AgentCare architecture
 
-AgentCare is an agentic hospital-administration system. A patient sends a plain-language
-request ("book me a cardiology appointment next week"), and a set of coordinated agents
-turn it into real database work: department routing, appointment booking, document
-coordination, reminders and post-visit follow-up. It handles administration only. It never
-diagnoses, prescribes or doses, and that boundary is enforced in code, not just in prompts.
+AgentCare is an administrative workflow system. It accepts patient requests,
+persists their business state and coordinates database-backed work through an
+explicit LangGraph state machine. It never owns clinical decisions.
 
-The backend is FastAPI plus LangGraph 1.2.9 (six agents behind one coordinator), persisted
-to SQLAlchemy over SQLite locally or Postgres in a container. The frontend is Next.js 16
-(App Router, Tailwind v4, shadcn) talking to the backend through a same-origin rewrite. Every
-mutation and every agent step writes an append-only audit row, and a live SSE timeline plus a
-`/metrics` endpoint make a run observable while it happens.
+This document owns runtime structure, graph control flow, state ownership and
+deployment boundaries. Setup lives in the [project guide](../README.md).
+Cloud commands live only in the [GCP runbook](deployment-gcp.md).
 
-## System flow
-
-The diagram below is a copy of `docs/architecture.mmd`, which is the source of truth. Edit the
-`.mmd` file first, then regenerate this block.
+## Runtime component view
 
 ```mermaid
-flowchart TD
-    browser["Browser"]
+flowchart TB
+    UI["Next.js patient portal and staff console"]
+    API["FastAPI routes<br/>authentication and backend RBAC"]
+    WS["workflow_service<br/>screen, create, execute, resume"]
+    GRAPH["Compiled LangGraph StateGraph"]
+    MODEL["chat_json<br/>LangChain model factory and structured output"]
+    SAFE["Safety boundary<br/>request, injection, PII and output controls"]
+    TOOLS["Transactional SQL tools"]
+    DOMAIN[("Domain database<br/>SQLite or Postgres")]
+    AUDIT[("Append-only audit_events")]
+    CP[("LangGraph checkpointer<br/>SQLite file or PostgresSaver")]
+    STORAGE["Document storage<br/>local or GCS adapter"]
+    SSE["SSE workflow timeline"]
+    JOBS["APScheduler reminders and stall sweep"]
 
-    subgraph frontend["Next.js 16 App Router"]
-        proxy["proxy.ts cookie gate (UX only)"]
-        rewrites["next.config.ts rewrites /api/*"]
-    end
-
-    subgraph api["FastAPI app (app/main.py)"]
-        mw["CORS + request-id middleware"]
-        rbac["Auth + RBAC dependencies"]
-        routers["Routers under /api"]
-        metrics["/metrics"]
-        sse["SSE /workflows/id/events"]
-    end
-
-    subgraph service["workflow_service"]
-        screen["screen_request (deterministic pre-LLM safety)"]
-        run["create_run then execute_workflow"]
-    end
-
-    subgraph lg["LangGraph graph (compiled once)"]
-        coord["coordinator (decision only)"]
-        routing["routing"]
-        appt["appointment"]
-        doc["document"]
-        followup["followup"]
-        safety["safety_finalize"]
-        esc["escalate (interrupt: waits for staff)"]
-    end
-
-    tools["DB tools + audit writer"]
-    sql[("SQL: SQLite or Postgres")]
-    store["Storage adapter: local or GCS"]
-    ckpt[("Checkpointer: SqliteSaver or PostgresSaver")]
-    sched["APScheduler jobs (reminders, stall sweep)"]
-
-    browser --> proxy --> rewrites --> mw --> rbac --> routers --> run
-    run --> screen
-    screen -->|allowed| coord
-    screen -->|emergency or medical refusal| tools
-    coord --> routing --> coord
-    coord --> appt --> coord
-    coord --> doc --> coord
-    coord --> followup --> coord
-    coord --> safety --> tools
-    coord --> esc --> tools
-    esc -. "staff approved: run continues" .-> coord
-    routing --> tools
-    appt --> tools
-    doc --> tools
-    followup --> tools
-    tools --> sql
-    tools --> store
-    lg <--> ckpt
-    sched --> sql
-    routers --> metrics
-    sse --> sql
-    browser -. SSE stream .-> sse
+    UI --> API
+    API --> WS
+    WS --> SAFE
+    WS --> GRAPH
+    GRAPH --> MODEL
+    GRAPH --> TOOLS
+    TOOLS --> DOMAIN
+    TOOLS --> AUDIT
+    TOOLS --> STORAGE
+    GRAPH <--> CP
+    AUDIT --> SSE --> UI
+    JOBS --> DOMAIN
 ```
 
-Request path: the browser only ever talks to the Next.js origin. `next.config.ts` rewrites
-`/api/*` to the backend so the httpOnly `access_token` cookie rides along same-origin, and
-`proxy.ts` redirects a cookie-less browser away from `/portal/*` and `/staff/*`. That proxy
-gate is UX only. The backend RBAC dependencies are the sole access control. FastAPI applies
-CORS with an explicit origin list, stamps a request id into the structlog context, then routes
-to a handler. `POST /api/requests` stores uploads, screens and creates a `WorkflowRun` row
-synchronously, then hands graph execution to a `BackgroundTasks` callback with its own session,
-so the request returns `{workflow_id, status}` before any LLM call.
+The browser uses the Next.js origin. Its `/api/*` rewrite forwards requests to
+FastAPI so the httpOnly session cookie stays same-origin. `frontend/proxy.ts`
+improves navigation for users without a cookie, but backend dependencies are
+the authorization boundary.
 
-## The six agents
+`POST /api/requests` validates uploads, authenticates the patient, persists
+the request and returns a workflow identifier. FastAPI then runs graph work in
+a background callback that opens its own SQLAlchemy session. The request
+therefore returns before any model call.
 
-The graph is a coordinator loop. `START` enters the coordinator, which is a pure decision node:
-it appends one of six plan words to `state["plan"]` and never calls a node itself. A conditional
-edge maps the latest plan word to the next node. Each specialist runs its own DB work, then
-returns to the coordinator. `safety_finalize` ends a run; `escalate` stops one, and whether it
-ends there is a human's call (see "Human in the loop" below). Any node that sets
-`state["error"]` forces `escalate` regardless of the coordinator's last decision, so the graph
-stays safe even if the coordinator's own LLM call misreads an error. Each agent catches its own
-exceptions and reports them as `state["error"]` rather than raising, so a node boundary never
-crashes the graph.
+The graph and checkpointer are created once during application lifespan.
+Each workflow receives a stable `thread_id` in the form `wf-{workflow_id}`.
 
-| Agent | Prompt (`app/agents/prompts.py`) | Tools it owns | Structured output |
-|---|---|---|---|
-| Coordinator | `COORDINATOR` | none, audit only | `CoordinatorOutput{next_step, reasoning}` |
-| Routing | `ROUTING` | `department_tools` (`list_departments`, `find_department`) + escalation, audit | `RoutingOutput{intent, department, confidence, reason}` |
-| Appointment | `APPOINTMENT` | `appointment_tools` (`get_available_slots`, `book`, `reschedule`, `cancel`) + escalation, audit | `AppointmentOutput{slot_id, reason}` |
-| Document | `DOCUMENT` | `document_tools` (`check_required_documents`; classification reads the persisted row) + audit | `DocumentOutput{document_type, confidence}` |
-| Follow-up | `FOLLOWUP` | `followup_tools` (`create_reminder`, `create_followup_task`) + audit | `FollowupOutput{reminders[], followup_days_after}` |
-| Safety | `SAFETY` | none domain-owned; re-queries DB rows and runs `sanitize_agent_output` | `SafetyOutput{safe, violations, rewritten}` |
+## Safety before graph execution
 
-Every structured field is required in the JSON schema. Optional-looking fields such as
-`department` and `slot_id` are typed `T | None` with no Python default, because Groq strict mode
-puts every property in `required` and a defaulted field would drop out and 400 the request.
-The single LLM entry point is `app/agents/llm.py::chat_json`. Nothing else calls
-`chat.completions` anywhere.
+`workflow_service.create_run` applies these gates in order:
 
-Each node builds its system message with `app/agents/memory.py::build_system_prompt`: the base
-prompt above plus that agent's active procedural rules (`agent_rules`, staff-editable through
-`/api/staff/agent-rules`, see ADR-14), fetched fresh on every call so a staff edit applies on the
-very next request. The safety node also re-reads `PatientProfile.preferred_language` and
-threads a "Respond in German/English" instruction into its user content; the deterministic
-fallback draft it composes when the LLM call fails is rendered in that same language, so a
-German-preferring patient never silently gets an English reply.
+1. `screen_request` checks deterministic emergency and medical-scope rules.
+2. Emergency text creates an emergency escalation and localized guidance.
+3. A request for diagnosis, prescription or dosage receives a refusal.
+4. Remaining text enters the injection screen.
+5. A blocked injection creates a safety escalation.
+6. Allowed administrative work receives a `WorkflowRun` and enters the graph.
 
-## Workflow lifecycle
+Emergency and medical refusals are terminal before graph execution. The
+injection layer always runs deterministic rules first. Model Armor can occupy
+the optional provider slot when configured. Otherwise a compatible classifier
+can occupy it. Provider failure falls back to the deterministic result.
 
-1. Screen. `workflow_service.create_run` calls `screen_request` (deterministic, no LLM) first.
-   An emergency or a medical-advice ask is terminal right here: the run gets its response and,
-   for an emergency, an `emergency` escalation, with no graph and no LLM call.
-2. Create run. An allowed request becomes a `WorkflowRun` row with status `running`, a
-   `thread_id` of `wf-{id}` and a `workflow.started` audit event.
-3. Background execute. The HTTP route adds `run_workflow_background` as a `BackgroundTasks`
-   callback. It opens its own session and calls `execute_workflow`, which invokes the compiled
-   graph with `config["configurable"] = {thread_id, db}`. The db session travels through config,
-   never through the checkpointed state (a Session is not serializable and has no place in a
-   checkpoint).
-4. Nodes. The coordinator loop runs routing, appointment, document and follow-up as needed,
-   each writing an `agent.<name>.completed` audit row on exit.
-5. Finalize or escalate. `safety_finalize` composes the patient-facing answer from freshly
-   re-queried rows, runs it past the LLM reviewer and the deterministic sanitizer, then ends the
-   run. `escalate` opens an escalation and stops on an interrupt, waiting for a staff decision.
-6. Staff decision. `resume_with_decision` re-enters the paused thread with
-   `Command(resume={...})`. An approved uncertainty case goes back to the coordinator and
-   finishes; anything else closes on a template. Details below.
-7. Crash-resume. `resume_workflow` calls `graph.invoke(None, config)` with the same `thread_id`,
-   re-entering from the last saved super-step checkpoint. It is a no-op on an already-finished
-   thread, so nothing re-executes or duplicates, and it refuses a run in `waiting_approval`,
-   which moves only on a decision. A background task or scheduler sweep that never finished
-   shows up as a run stuck in `running`, which the stall job escalates after 30 minutes. That
-   job matches `running` only, so it never takes a paused run out of a human's hands.
+PII redaction is later and per model call. It does not alter the stored request
+or create a globally redacted graph state. Nodes that include patient text
+prepare a redacted copy at their own model boundary.
 
-The graph is built and compiled once at startup (`workflow_service.get_graph`). Its checkpointer
-is opened as a context manager and held for the process lifetime through a module-level
-`ExitStack`, closed by the FastAPI lifespan on shutdown.
+## LangGraph topology
 
-## Human in the loop
+```mermaid
+stateDiagram-v2
+    [*] --> coordinator
+    coordinator --> routing
+    coordinator --> appointment
+    coordinator --> document
+    coordinator --> followup
+    coordinator --> safety_finalize
+    coordinator --> escalate
+    routing --> coordinator
+    appointment --> coordinator
+    document --> coordinator
+    followup --> coordinator
+    safety_finalize --> [*]
+    escalate --> coordinator: approved uncertainty
+    escalate --> [*]: rejected or failed
+```
 
-The `escalate` node calls LangGraph's `interrupt()` after it has opened or reused the escalation
-row. The run is checkpointed mid-graph, `WorkflowRun.status` becomes `waiting_approval` and
-nothing moves until `POST /api/staff/escalations/{id}/resolve` records a decision and hands it
-to the paused thread through `workflow_service.resume_with_decision`.
+The graph contains six model-assisted roles:
 
-LangGraph re-executes a resumed node from its first line, so everything above the interrupt runs
-twice. That is why the escalation is reused rather than created blind, and why nothing above the
-interrupt writes unconditionally. The first pass may open the row and its `escalation.created`
-audit event; the second pass finds that row, skips the create branch and adds nothing.
-
-What the decision does:
-
-| Case | Decision | Outcome |
+| Role | Responsibility | Domain effects |
 |---|---|---|
-| uncertainty (no `state["error"]`) | approve | `escalation_id` and `final_response` clear, the note becomes `state["staff_guidance"]`, a conditional edge sends the run back to the coordinator and the request completes |
-| uncertainty | reject | closes on `staff_decision_response(..., approved=False)`, status `escalated` |
-| agent_failure (`state["error"]` set) | either | closes on the template, status `failed`. There is nothing to carry on with, so a human takes the case by hand |
+| Coordinator | Select the next valid plan step | Audit only |
+| Routing | Classify intent and resolve a department | Reads departments, can escalate |
+| Appointment | Book, reschedule or cancel a slot | Transactional appointment and slot writes |
+| Document | Classify uploads and check requirements | Updates document classification |
+| Follow-up | Create reminders and follow-up tasks | Transactional reminder writes |
+| Safety/finalization | Re-query facts, review and sanitize the response | Final response and audit |
 
-`staff_guidance` is appended to the coordinator and routing user prompts, which is what lets a
-re-run land somewhere different from the one that gave up. The note itself is staff-facing: it
-lives on `Escalation.resolution_note`, and neither that column nor `staff_guidance` is in the
-patient projections in `routes_workflows.py`. What the patient reads is the answer the resumed
-run produced or one of the two templates in `agents/responses.py`.
+The deterministic `escalate` node is not a model-assisted role. It creates or
+reuses an escalation, changes the run to `waiting_approval` and pauses through
+LangGraph `interrupt()`.
 
-A resumed run that escalates again is a second legitimate handoff. It opens its own escalation
-row rather than reusing the one staff already closed (`state["resolved_escalation_ids"]`), and
-waits again. The emergency and injection screens sit outside all of this: they are decided
-before the graph starts and answer at once.
+All model-assisted roles call
+`backend/app/agents/llm.py::chat_json`. That function is the application policy
+boundary. It builds models through LangChain `init_chat_model`, delegates
+provider formatting and normal structured parsing to
+`with_structured_output`, then applies AgentCare retry, compatibility,
+corrective-prompt and fallback policy.
 
-## Data model
+## Transition guards
 
-`patient_id` is always `users.id`. A patient login and its clinical record are the same identity.
+The coordinator proposes a plan word, but code decides whether that transition
+is legal. These guards do not depend on a prompt being followed:
 
-| Table | Who writes | Who reads |
+- An agent error routes directly to `escalate`.
+- An existing unresolved escalation routes directly to `escalate`.
+- An empty, unknown or out-of-order plan routes to `escalate`.
+- Appointment work must follow routing.
+- Booking and rescheduling require a resolved department.
+- Follow-up work must follow routing.
+- Finalization must follow follow-up.
+- A request with uploads must run the document role before finalization.
+
+The checks use completed-step history rather than a single current-state flag.
+That keeps legitimate revisits and checkpoint re-entry valid.
+
+The graph is invoked with `durability="sync"`. A completed node side effect is
+checkpointed before the next super-step starts.
+
+## Patient request sequence
+
+```mermaid
+sequenceDiagram
+    actor Patient
+    participant UI as Next.js
+    participant API as FastAPI
+    participant DB as Domain SQL
+    participant BG as Background callback
+    participant G as LangGraph
+    participant M as Model boundary
+
+    Patient->>UI: Submit text and optional files
+    UI->>API: POST /api/requests
+    API->>API: Authenticate, validate and screen
+    API->>DB: Store request, workflow and audit
+    API-->>UI: workflow_id and current status
+    API->>BG: Schedule execution with a new DB session
+    BG->>G: invoke(initial state, thread_id)
+    loop coordinator and specialists
+        G->>M: Redacted model-bound copy
+        M-->>G: Validated structured result
+        G->>DB: Tool mutation and audit in one transaction
+    end
+    G->>DB: Persist final response and status
+    DB-->>UI: Audit-backed SSE updates
+```
+
+Uploads are validated as a group before storage. A rejected file therefore
+does not leave a partially stored request. Stored document bytes are
+deduplicated by patient and checksum.
+
+## Staff interrupt and resume
+
+```mermaid
+sequenceDiagram
+    participant G as LangGraph
+    participant CP as Checkpointer
+    participant DB as Domain SQL
+    actor Staff
+    participant API as Staff API
+
+    G->>DB: Create or reuse open escalation
+    G->>CP: interrupt() persists paused state
+    G-->>DB: Run becomes waiting_approval
+    Staff->>API: Approve or reject escalation
+    API->>DB: Persist reviewer, note and audit
+    API->>G: Command(resume=decision), same thread_id
+    G->>CP: Load paused thread
+    alt approved uncertainty
+        G->>G: Return to coordinator with staff guidance
+    else rejected or agent failure
+        G->>DB: Close with deterministic response
+    end
+```
+
+LangGraph restarts an interrupted node from its beginning. The escalation
+node therefore reuses the already-created row and does not repeat its first
+audit write. The staff decision claim is also persisted so concurrent or
+replayed resolution requests cannot decide the same escalation twice.
+
+Crash resume is distinct from staff resume. A running workflow resumes from
+its checkpoint with `invoke(None, config)` and the same `thread_id`. A paused
+workflow moves only through the staff decision path. A new `thread_id` would
+create a separate execution instead of continuing the original.
+
+## Checkpoint state and domain state
+
+The two stores solve different problems:
+
+| Store | Owns | Does not own |
 |---|---|---|
-| `users` | auth register | auth, RBAC, every patient-data query |
-| `patient_profiles` | auth register | patient self-service, safety draft |
-| `departments`, `doctors`, `required_documents` | staff catalog admin (`department_tools`) | routing agent, document agent, slot listing |
-| `appointment_slots` | staff slot generation, appointment tools (claim and free) | appointment agent availability |
-| `appointments` | appointment tools (book, reschedule, cancel) | patient portal, safety draft, follow-up |
-| `patient_documents` | `store_document` on upload, document agent (type update) | document agent, documents route, safety draft |
-| `workflow_runs` | `workflow_service` | SSE timeline, patient and staff workflow views |
-| `reminders` | follow-up tools, `send_due_reminders` (sent flag) | reminders route, safety draft |
-| `escalations` | escalation tools (create, resolve) | staff escalation queue, workflow detail |
-| `audit_events` | `write_audit`, from every tool, node and mutating route | SSE timeline, staff audit view |
+| LangGraph checkpointer | Node state, super-step position, interrupt payload and resume identity | Patient records, appointments or audit history |
+| Domain SQL | Users, requests, appointments, documents, reminders, escalations and audits | Graph execution position |
 
-Slot claims use a single conditional `UPDATE ... WHERE status = 'free'`, so two concurrent
-bookings for one slot can never both win. The loser's update touches zero rows and raises
-`ConflictError`. `write_audit` flushes but never commits, so an audit row lands in the same
-transaction as the change it records.
+SQLite development uses a separate checkpoint file to avoid file-locking
+conflicts with the domain database. When `DATABASE_URL` is Postgres,
+`PostgresSaver` uses the same Postgres server and database, runs `.setup()` and
+keeps checkpoint tables logically separate from application tables.
 
-## Deployment views
+The SQLAlchemy session is passed through LangGraph configurable runtime data.
+It is not serialized into graph state.
 
-Status: the application code and the local container stack are implemented and run today. The repo
-has a `backend/Dockerfile`, a `frontend/Dockerfile` and a `docker-compose.yml` at its root. The GCP
-path below is committed as Infrastructure as Code and validates cleanly (`tofu validate` /
-`terraform validate`, `kubectl kustomize`), but nothing has been applied against a real GCP
-project: there is no live cluster, database or bucket yet, and the GCS SDK is still not installed
-in the app image (`GCSStorage` imports it lazily and raises a clear `AppError` if selected without
-it, since `STORAGE_BACKEND` defaults to `local`).
+## Persisted entities
 
-- Local (implemented now). SQLite at `agentcare.db`, a separate LangGraph checkpoint file at
-  `checkpoints.db`, uploads under `./uploads`, `uvicorn app.main:app` and `next dev`. No keys
-  needed beyond an LLM endpoint. This is the default from `.env.example`.
-- Docker Compose with Postgres (implemented now). `docker compose up --build` starts five services:
-  `postgres:16-alpine` with a health check, the FastAPI backend, the standalone Next.js frontend,
-  Prometheus and Grafana. The backend container entrypoint runs `alembic upgrade head` and the
-  idempotent seed before `uvicorn`, so the database is ready as soon as the container reports
-  healthy. `DATABASE_URL` switches SQLAlchemy and the checkpointer to Postgres over
-  `psycopg[binary]`, so checkpoints live in the same database and `PostgresSaver.setup()` runs once.
-  The frontend builds with `output: "standalone"`. Prometheus scrapes the backend `/metrics`
-  endpoint every 15 seconds, and Grafana loads a provisioned AgentCare dashboard. Ports: frontend
-  3000, backend 8000, Prometheus 9090, Grafana 3001 (`admin` / `admin`).
-- GCP (manifests and modules committed and validated, cluster not yet provisioned). Backend and
-  frontend each run as a `Deployment` behind a `ClusterIP` `Service` on a GKE Autopilot cluster
-  (`infra/k8s/base/backend.yaml`, `frontend.yaml`; `infra/terraform/modules/gke-autopilot`).
-  Both stay at one replica. The backend runs its APScheduler jobs (reminders, stalled-workflow
-  sweep) in the same process that serves requests, with no distributed lock, so a second replica
-  would fire every job twice; scaling it out means moving those jobs to a worker first
-  (`infra/k8s/base/backend.yaml`). A `backend-migrate` `Job`
-  runs the backend image's own entrypoint (`alembic upgrade head` then the idempotent seed) ahead
-  of rollout, reusing the container instead of duplicating migration logic
-  (`infra/k8s/base/migration-job.yaml`). A GCE Ingress routes `/api` to the backend Service and `/`
-  to the frontend Service, and the backend Service carries a `BackendConfig` with a 3600-second
-  timeout so the load balancer's 30-second default does not cut the SSE workflow-events stream
-  (`infra/k8s/overlays/gcp/ingress.yaml`, `backendconfig.yaml`). Postgres runs on Cloud SQL for
-  PostgreSQL 17, the primary path under the deployment's GCP trial credit
-  (`infra/terraform/modules/cloud-sql`, `enable_cloud_sql` defaults `true`); Neon free-tier
-  Postgres is the documented post-credit swap, one `DATABASE_URL` change and no code change.
-  Documents live in a GCS bucket in `europe-west3` for EU data residency, with uniform
-  bucket-level access (`infra/terraform/modules/gcs`). Secret values (the LLM key, `JWT_SECRET`, `DATABASE_URL`) live in Secret Manager, created and
-  rotated out-of-band; the backend runtime service account can read them
-  (`roles/secretmanager.secretAccessor`), and each value is copied by hand into a plain Kubernetes
-  `Secret` the backend Deployment reads through `envFrom` (`infra/k8s/base/secret.example.yaml` is
-  the template, deliberately excluded from kustomize's resource list). CI deploys through `.github/workflows/deploy.yml` on a manual
-  `workflow_dispatch`, authenticating with Workload Identity Federation
-  (`infra/terraform/modules/iam`) so no service-account JSON key ever exists. See
-  `docs/decisions.md` and `docs/deployment-gcp.md` for the reasoning and verified costs.
+| Entity | Purpose |
+|---|---|
+| `users` | Authenticated identity and role |
+| `patient_profiles` | Patient-owned preferences |
+| `departments`, `doctors` | Staff-maintained routing catalog |
+| `appointment_slots`, `appointments` | Availability and claimed bookings |
+| `required_documents`, `patient_documents` | Requirements, metadata and storage references |
+| `workflow_runs` | Request text, status, response and stable thread identity |
+| `reminders` | Due work and delivery state |
+| `escalations` | Human handoff, reviewer and persisted decision |
+| `agent_rules` | Staff-controlled procedural instructions |
+| `audit_events` | Append-only record of mutations and agent progress |
 
-## Observability
+Appointment claims use a conditional SQL update against a free slot. Only one
+concurrent claim can succeed. Reminder batches, workflow resumes, staff
+decisions and upload reuse also carry explicit idempotency behavior.
 
-- Audit trail. The append-only `audit_events` table is the primary record. Every tool mutation,
-  agent node exit and mutating route writes one row through `write_audit`.
-- SSE timeline. `GET /api/workflows/{id}/events` streams new audit rows for one run, polling
-  every second, heartbeating every 15 seconds and closing with `event: done` at a terminal
-  status. It opens a fresh session per poll so it sees whatever the background task has since
-  committed, and sends `Cache-Control: no-cache` plus `X-Accel-Buffering: no` for proxies.
-- Metrics. `prometheus-fastapi-instrumentator` exposes `/metrics` with request rate, latency and
-  error counters. A Prometheus plus Grafana compose stack is the designed local dashboard, and
-  Google Managed Service for Prometheus is the documented GKE path.
-- Tracing (optional, env-gated). When both Langfuse keys are set, `workflow_service._observability`
-  attaches a Langfuse `CallbackHandler` and stamps the `workflow_id` into the trace through
-  `propagate_attributes`. With the keys empty (the default) the path is inert and never imports
-  `langchain`.
+`write_audit` flushes inside the caller's transaction and does not commit by
+itself. The business mutation and its audit row therefore succeed or roll back
+together. Registration follows the same rule for the user, profile and
+`user.registered` event.
+
+## Audit and observability flow
+
+Every domain tool mutation and agent node exit writes an `AuditEvent`.
+Mutating API routes also record their changes. The event stores actor, action,
+entity identity, timestamp and non-secret context.
+
+The patient workflow timeline streams matching events over SSE. The staff
+audit view reads the same table. Prometheus metrics describe HTTP behavior,
+while optional Langfuse traces describe graph and model execution. Neither
+replaces the append-only domain audit.
+
+## Synchronous core and asynchronous edges
+
+The SQLAlchemy and LangGraph transaction core is intentionally synchronous.
+Tool methods share one ordinary SQLAlchemy session, transaction ownership is
+explicit and graph invocation uses synchronous durability semantics. Changing
+only an endpoint to `async def` would not make those internal calls
+asynchronous.
+
+Native asynchronous behavior exists where it has a concrete boundary:
+
+- FastAPI lifespan startup and shutdown
+- HTTP middleware
+- SSE delivery and polling
+
+Graph work leaves the request response path through FastAPI
+`BackgroundTasks`, but the graph and its database work remain synchronous.
+A true async conversion would require async nodes, awaited database and model
+operations plus `.ainvoke` or `.astream`.
+
+## GCP deployment boundaries
+
+GCP is the sole cloud target. The committed design maps:
+
+- container images to Artifact Registry
+- frontend and backend workloads to GKE Autopilot
+- domain SQL and Postgres checkpoints to Cloud SQL
+- uploaded documents to GCS
+- provider screening to Model Armor
+- CI authentication to Workload Identity Federation
+
+These adapters and manifests are configured in the repository. They do not
+prove that a cluster, database, bucket, Model Armor template or Vertex model is
+live. Public DNS, TLS readiness, runtime workload identity, secret material,
+database creation, migration and smoke tests remain operator responsibilities.
+See [GCP deployment](deployment-gcp.md) for the canonical procedure.
