@@ -1,6 +1,6 @@
 # Private-IP Cloud SQL is the canonical GCP database path. Every resource
 # below is count-gated so the remaining configuration can be validated without
-# provisioning a database when a caller supplies one explicitly.
+# provisioning a database.
 
 data "google_compute_network" "vpc" {
   count   = var.enable_cloud_sql ? 1 : 0

@@ -15,8 +15,7 @@ from app.tools.audit_tools import write_audit
 _PDF_EXTRACT_CHARS = 1500
 
 # Filename substring -> document_type, checked before any caller-supplied
-# (LLM-classified, Task 10) type. Order matters only in that the first hint
-# group to match wins.
+# LLM classification. The first matching hint group wins.
 _FILENAME_TYPE_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("ecg",), "ecg_report"),
     (("blut", "blood"), "blood_test"),

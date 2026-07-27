@@ -99,11 +99,9 @@ def list_workflows(
     db: Annotated[Session, Depends(get_db)],
 ) -> list[WorkflowRunSummary]:
     """Ownership-filtered list of the caller's own workflow runs, most
-    recent first - the patient portal's "my recent requests" list (Task 14
-    brief: no such patient-facing endpoint existed before this; staff keep
-    their own unfiltered queue at GET /api/staff/requests). Reuses
-    WorkflowRunSummary from app.schemas.staff rather than redeclaring an
-    identical schema - the shape is generic to any caller, not staff-specific."""
+    recent first. Staff use their unfiltered queue at GET /api/staff/requests.
+    Reuses WorkflowRunSummary from app.schemas.staff rather than redeclaring
+    an identical schema because the shape is not staff-specific."""
     runs = (
         db.query(WorkflowRun)
         .filter(WorkflowRun.patient_id == current_user.id)

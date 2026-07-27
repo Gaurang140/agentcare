@@ -5,9 +5,8 @@
 # (backend/app/safety/model_armor.py). The deterministic layers keep deciding
 # first and last, so this template is a second opinion, never the only one.
 #
-# Enabling the API is not managed here: this configuration enables no APIs at
-# all, they are a one-time `gcloud services enable` per project (Step 2 of
-# docs/deployment-gcp.md, which now lists modelarmor.googleapis.com).
+# Enabling the API is an operator prerequisite documented in
+# docs/deployment-gcp.md; this configuration does not enable project APIs.
 resource "google_model_armor_template" "this" {
   count       = var.enable_model_armor ? 1 : 0
   project     = var.project_id

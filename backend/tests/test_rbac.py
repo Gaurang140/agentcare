@@ -1,4 +1,4 @@
-"""RBAC enforcement tests, verbatim from the Task 4 brief."""
+"""RBAC enforcement coverage for patient, staff, and internal routes."""
 
 
 def test_staff_route_denied_for_patient(patient_client):

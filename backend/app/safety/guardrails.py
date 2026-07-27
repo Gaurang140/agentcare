@@ -60,8 +60,8 @@ SANITIZED_SENTENCE = "For medical questions, please speak with your care team."
 
 
 # --- Keyword lists (EN + DE) -------------------------------------------------
-# The brief's exact lists, plus a small number of sensible synonyms (each
-# addition commented so it's clear what's brief-mandated vs. extended).
+# Deterministic bilingual lists include common clinical synonyms. Keep
+# additions explicit so safety behavior remains reviewable.
 
 EMERGENCY_KEYWORDS = [
     "chest pain",

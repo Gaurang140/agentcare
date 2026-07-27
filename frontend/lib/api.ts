@@ -131,9 +131,7 @@ export function submitRequest(formData: FormData): Promise<CreateRequestResponse
   return apiFetch("/api/requests", { method: "POST", body: formData });
 }
 
-/** Ownership-filtered: always the caller's own runs, most recent first
- * (added to routes_workflows.py alongside this task - no patient-facing
- * list endpoint existed before). */
+/** Ownership-filtered: always the caller's own runs, most recent first. */
 export function listWorkflows(): Promise<WorkflowRunSummary[]> {
   return apiFetch("/api/workflows");
 }
@@ -231,10 +229,7 @@ export function staffCreateDepartment(payload: DepartmentCreate): Promise<Depart
   return apiFetch("/api/staff/departments", { method: "POST", body: JSON.stringify(payload) });
 }
 
-/** No route listed doctors before Task 15 (only create/toggle existed) - the
- * catalog page's doctor list and the slot-generation form's doctor picker
- * both need real data, so `GET /api/staff/doctors` was added alongside the
- * frontend that needs it (see backend/app/api/routes_staff.py). */
+/** Fetch doctor choices for the staff catalog and slot-generation form. */
 export function staffListDoctors(departmentId?: number): Promise<DoctorOut[]> {
   return apiFetch(`/api/staff/doctors${query({ department_id: departmentId })}`);
 }

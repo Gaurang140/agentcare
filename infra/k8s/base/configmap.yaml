@@ -21,9 +21,8 @@ data:
   UPLOAD_DIR: "./uploads"
   GCS_BUCKET: ""
   # Model Armor fills the injection guard's layer-2 slot and screens the
-  # drafted answer, but only on GCP: an empty template disables it, which is
-  # the right default for the base (nothing here assumes a GCP project). The
-  # gcp overlay patches in the real template name.
+  # drafted answer. The reusable base disables it until the GCP overlay
+  # patches in a real template name.
   MODEL_ARMOR_TEMPLATE: ""
   MODEL_ARMOR_LOCATION: "europe-west3"
   ENVIRONMENT: "prod"

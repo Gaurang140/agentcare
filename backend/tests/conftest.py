@@ -62,11 +62,11 @@ def session_factory(engine):
 @pytest.fixture(scope="session", autouse=True)
 def _override_get_db(session_factory):
     """Point the app's get_db dependency at the tmp test db for every test -
-    and also app.db.session.SessionLocal itself, since Task 12's background
-    task and scheduler jobs open their own session directly through that
-    module attribute (looked up at call time, not bound at import time)
-    rather than through the get_db dependency. Without this, that code path
-    would silently write to the real dev db file instead of the test db.
+    and also app.db.session.SessionLocal itself, since background callbacks
+    and scheduler jobs open their own session directly through that module
+    attribute (looked up at call time, not bound at import time) rather than
+    through the get_db dependency. Without this, that code path would silently
+    write to the real dev db file instead of the test db.
     """
     import app.db.session as db_session_module
 
@@ -228,7 +228,7 @@ def seeded(db: Session) -> dict[str, int]:
 
     In a fresh db this makes patient_id=1 the first seeded patient (Max
     Mustermann), patient_id=2 the second (Erika Musterfrau), and Cardiology
-    the first department (id=1), matching the brief's test pseudocode.
+    the first department (id=1), providing stable identifiers for tests.
     """
     return seed(db)
 

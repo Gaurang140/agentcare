@@ -87,10 +87,9 @@ class InjectionResult:
 
 
 # --- Layer 1: deterministic patterns (EN + DE) ------------------------------
-# Each pattern is the brief's phrasing verbatim, wrapped in `\b` word
-# boundaries and matched case-insensitively so "Ignore ALL Previous
-# Instructions" fires the same as the lowercase form, but a pattern never
-# matches inside a longer, unrelated word.
+# Patterns use `\b` word boundaries and case-insensitive matching so "Ignore
+# ALL Previous Instructions" fires like the lowercase form, while avoiding
+# matches inside longer, unrelated words.
 
 _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (

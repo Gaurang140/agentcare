@@ -1,7 +1,6 @@
-"""TDD for the prompt-injection guard (Task F1): the deterministic layer 1
-patterns, the optional layer 2 classifier, and the two wiring points -
-workflow_service.create_run (patient request text) and agents/document.run
-(a document's extracted text).
+"""Prompt-injection coverage for deterministic layer 1 patterns, the optional
+layer 2 classifier, and both wiring points: workflow_service.create_run for
+patient request text and agents/document.run for extracted document text.
 """
 
 from __future__ import annotations
@@ -755,8 +754,8 @@ def test_group_screen_blocked_by_model_armor_names_no_reading(
 
 
 def test_model_armor_is_not_called_when_no_template_is_configured(fake_model_armor):
-    """The default everywhere off GCP, and the no-key demo path: layer 1
-    alone, no network call in the request path at all."""
+    """Without a configured provider, layer 1 runs with no network call in
+    the request path."""
     client = fake_model_armor(prompt={"pi_and_jailbreak": True})
 
     result = screen_injection(_LAYER_TWO_ONLY_TEXT)

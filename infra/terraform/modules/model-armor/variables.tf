@@ -9,7 +9,7 @@ variable "location" {
 }
 
 variable "enable_model_armor" {
-  description = "Create the screening template. Mirrors the root enable_model_armor flag; with it off the backend runs its deterministic layers alone, which is the same code path as every non-GCP deployment."
+  description = "Create the screening template. Mirrors the root enable_model_armor flag; when false the backend runs its deterministic layers without provider screening."
   type        = bool
   default     = true
 }

@@ -119,9 +119,8 @@ interface WorkflowTimelineProps {
   emptyLabel?: string;
 }
 
-/** Renders the workflow's audit-event timeline: one row per step, newest
- * at the bottom, auto-scrolled into view as events arrive. Readable, not
- * fancy, per the brief - this is the demo centerpiece. */
+/** Renders the workflow's audit-event timeline with the newest step at the
+ * bottom and scrolls it into view as events arrive. */
 export function WorkflowTimeline({ events, emptyLabel = "Waiting for the first step..." }: WorkflowTimelineProps) {
   const containerRef = useRef<HTMLUListElement>(null);
 

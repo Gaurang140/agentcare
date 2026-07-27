@@ -1,7 +1,7 @@
 """FastAPI auth dependencies: current-user resolution and role/ownership gates.
 
-Every patient-data query in later tasks is expected to route through
-ensure_owner_or_staff, per the Task 4 brief.
+Patient-data routes use ensure_owner_or_staff to enforce ownership or staff
+access before returning protected records.
 """
 
 import hmac

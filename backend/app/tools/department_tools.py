@@ -24,8 +24,7 @@ def list_departments(db: Session) -> list[dict]:
 def list_doctors(db: Session, department_id: int | None = None) -> list[dict]:
     """Every doctor, alphabetical by name, optionally scoped to one
     department. Backs the staff catalog page's doctor list and the doctor
-    picker used to generate slots - no route exposed this before (only
-    create_doctor/set_doctor_active existed, both mutations)."""
+    picker used to generate slots."""
     query = db.query(Doctor)
     if department_id is not None:
         query = query.filter(Doctor.department_id == department_id)

@@ -1,10 +1,5 @@
 # GKE Autopilot, not Standard: no node pools to size or patch, Google
 # manages the nodes and bills per pod resource request instead of per VM.
-#
-# Cost note: the Autopilot control-plane fee is covered by the per-billing-
-# account Google Cloud free-tier credit for one zonal or regional cluster;
-# pods are still billed per vCPU/memory/storage request regardless of that
-# credit. Keep this the only cluster in the project to stay inside it.
 resource "google_container_cluster" "this" {
   project  = var.project_id
   name     = var.cluster_name

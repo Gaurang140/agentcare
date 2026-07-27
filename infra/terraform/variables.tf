@@ -16,7 +16,7 @@ variable "gcs_location" {
 }
 
 variable "enable_cloud_sql" {
-  description = "Provision the private-IP Cloud SQL for PostgreSQL instance. Set to false only when validating the remaining infrastructure or supplying another database explicitly."
+  description = "Provision the canonical private-IP Cloud SQL for PostgreSQL instance. Set to false only for infrastructure validation that intentionally omits the database."
   type        = bool
   default     = true
 }

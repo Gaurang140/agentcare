@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     # same layer-2 slot, plus a screen of the drafted answer. The template is
     # the full resource path
     # projects/{project}/locations/{location}/templates/{id}; empty (the
-    # default) disables the layer entirely, so nothing off GCP ever calls it.
+    # default) disables the layer entirely, so an unconfigured environment
+    # never calls it.
     # The calling service account needs roles/modelarmor.user.
     model_armor_template: str = ""
     model_armor_location: str = "europe-west3"

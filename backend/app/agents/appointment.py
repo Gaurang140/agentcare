@@ -59,11 +59,10 @@ def _slot_prompt(llm_request_text: str, slots: list[dict]) -> str:
 
 
 def _pick_valid_slot(system: str, llm_request_text: str, slots: list[dict]) -> int | None:
-    """Ask the LLM for a slot id, validated against the real list. Retries
-    once on an invented id, per the brief; never trusts an id it didn't hand
-    the LLM in the first place. `system` is built once per run() call (see
-    _handle_book_or_reschedule) and reused across every retry so a rules
-    lookup doesn't repeat per attempt."""
+    """Ask the LLM for a slot id, attempting at most _SLOT_PICK_ATTEMPTS
+    validated selections and never trusting an id it was not given. `system`
+    is built once per run() call (see _handle_book_or_reschedule) and reused
+    across every retry so a rules lookup does not repeat per attempt."""
     valid_ids = {s["slot_id"] for s in slots}
     for _ in range(_SLOT_PICK_ATTEMPTS):
         picked = chat_json(system, _slot_prompt(llm_request_text, slots), AppointmentOutput)

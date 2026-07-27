@@ -3,9 +3,9 @@ filename, content) -> str` returning a storage reference.
 
 LocalStorage is fully implemented and is the default (STORAGE_BACKEND=local).
 GCSStorage matches the same interface for STORAGE_BACKEND=gcs; the
-google-cloud-storage dependency is intentionally not installed yet, so it is
-imported lazily inside __init__ and fails with a clear AppError, not an
-ImportError, if the backend is selected without the package present.
+google-cloud-storage dependency is imported lazily inside __init__ so a
+partial runtime environment fails with a clear AppError, not an ImportError,
+if the GCS backend is selected without the pinned dependency available.
 """
 
 from __future__ import annotations
@@ -60,9 +60,8 @@ class GCSStorage:
             from google.cloud import storage as gcs_sdk
         except ImportError as exc:
             raise AppError(
-                "google-cloud-storage is not installed. Add "
-                "google-cloud-storage>=2.16 to requirements.txt to use "
-                "STORAGE_BACKEND=gcs."
+                "google-cloud-storage is unavailable. Install the pinned "
+                "requirements.txt dependencies to use STORAGE_BACKEND=gcs."
             ) from exc
 
         self.bucket_name = bucket_name or settings.gcs_bucket

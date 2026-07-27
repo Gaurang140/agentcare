@@ -2,7 +2,7 @@
 
 Importing this package registers every table on Base.metadata (required for
 Alembic autogenerate) and makes each model importable as `from app.models
-import X`, per the Task 3 brief.
+import X`.
 """
 
 from app.models.agent_rule import AGENT_NAMES, AgentRule

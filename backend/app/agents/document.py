@@ -8,17 +8,17 @@ file content to re-extract from at this point in the workflow, only the DB
 row, which is the real-DB-work the tool layer already did.
 
 Extracted text comes from a file a patient uploaded, so it is screened by
-the prompt-injection guard (Task F1) before it goes into the classification
-prompt. A poisoned document is left typed "other" and its own audit event is
-written, but it never kills the run - the rest of the uploaded documents
-still get classified and the workflow continues.
+the prompt-injection guard before it goes into the classification prompt. A
+poisoned document is left typed "other" and its own audit event is written,
+but it never kills the run - the rest of the uploaded documents still get
+classified and the workflow continues.
 
-Whatever survives the injection guard is then redacted (Task F2,
-`safety/pii.py::redact_for_llm`) before it reaches the classification
-prompt, since extracted text is still patient-submitted content on its way
-to the LLM provider. Counts are summed across every document processed in
-one `run()` call and reported in a single "safety.pii_redacted" audit row,
-not one row per document.
+Whatever survives the injection guard is then redacted by
+`safety/pii.py::redact_for_llm` before it reaches the classification prompt,
+since extracted text is still patient-submitted content on its way to the
+LLM provider. Counts are summed across every document processed in one
+`run()` call and reported in a single "safety.pii_redacted" audit row, not
+one row per document.
 
 The filename goes through the same two gates as the body, and for the same
 reason: it is a string the uploading client chose and it lands in the

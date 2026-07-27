@@ -1,6 +1,6 @@
 """RBAC and happy-path coverage for the staff routes: requests queue,
-escalations (replacing the Task 4 stub), the audit trail, the minimal
-catalog admin, and the internal reminders trigger's dual auth path.
+escalations, the audit trail, catalog administration, and the internal
+reminders trigger's dual auth path.
 """
 
 from __future__ import annotations
@@ -36,9 +36,9 @@ def test_staff_requests_allowed_for_staff(staff_client):
     assert isinstance(resp.json(), list)
 
 
-def test_staff_escalations_replaces_stub_and_lists_open_ones(staff_client, db_session):
+def test_staff_escalations_lists_open_ones(staff_client, db_session):
     esc = Escalation(
-        workflow_run_id=None, reason="task 12 test escalation", severity="uncertainty", status="open"
+        workflow_run_id=None, reason="synthetic test escalation", severity="uncertainty", status="open"
     )
     db_session.add(esc)
     db_session.commit()
@@ -179,13 +179,13 @@ def test_staff_audit_lists_events_for_staff(staff_client):
 
 def test_create_department_doctor_and_generate_slots(staff_client):
     dept_resp = staff_client.post(
-        "/api/staff/departments", json={"name": "Task12-Neurology", "description": "brain"}
+        "/api/staff/departments", json={"name": "Synthetic-Neurology", "description": "brain"}
     )
     assert dept_resp.status_code == 201, dept_resp.text
     dept_id = dept_resp.json()["id"]
 
     doctor_resp = staff_client.post(
-        "/api/staff/doctors", json={"department_id": dept_id, "name": "Dr. Task Twelve"}
+        "/api/staff/doctors", json={"department_id": dept_id, "name": "Dr. Test Neurologist"}
     )
     assert doctor_resp.status_code == 201, doctor_resp.text
     doctor_id = doctor_resp.json()["id"]
@@ -210,18 +210,18 @@ def test_create_department_doctor_and_generate_slots(staff_client):
 
 def test_list_doctors_returns_created_doctor_and_filters_by_department(staff_client):
     dept_resp = staff_client.post(
-        "/api/staff/departments", json={"name": "Task15-Oncology", "description": None}
+        "/api/staff/departments", json={"name": "Synthetic-Oncology", "description": None}
     )
     assert dept_resp.status_code == 201, dept_resp.text
     dept_id = dept_resp.json()["id"]
 
     other_dept_resp = staff_client.post(
-        "/api/staff/departments", json={"name": "Task15-Urology", "description": None}
+        "/api/staff/departments", json={"name": "Synthetic-Urology", "description": None}
     )
     other_dept_id = other_dept_resp.json()["id"]
 
     doctor_resp = staff_client.post(
-        "/api/staff/doctors", json={"department_id": dept_id, "name": "Dr. Task Fifteen"}
+        "/api/staff/doctors", json={"department_id": dept_id, "name": "Dr. Test Oncologist"}
     )
     assert doctor_resp.status_code == 201, doctor_resp.text
     doctor_id = doctor_resp.json()["id"]
@@ -248,7 +248,7 @@ def test_list_doctors_denied_for_patient(patient_client):
 
 
 def test_create_department_conflict_on_duplicate_name(staff_client):
-    payload = {"name": "Task12-Duplicate-Dept", "description": None}
+    payload = {"name": "Synthetic-Duplicate-Dept", "description": None}
     first = staff_client.post("/api/staff/departments", json=payload)
     assert first.status_code == 201
 
@@ -279,7 +279,7 @@ def test_catalog_admin_routes_denied_for_patient(patient_client):
 def test_create_list_and_toggle_agent_rule(staff_client, db_session):
     create_resp = staff_client.post(
         "/api/staff/agent-rules",
-        json={"agent_name": "routing", "rule_text": "Task F3 test rule for routing"},
+        json={"agent_name": "routing", "rule_text": "Synthetic routing rule"},
     )
     assert create_resp.status_code == 201, create_resp.text
     body = create_resp.json()
@@ -372,8 +372,8 @@ def test_internal_reminders_run_due_rejects_missing_token_even_from_staff_cookie
     staff_client, monkeypatch
 ):
     """Once a token is configured, the header IS the auth - a staff cookie
-    alone no longer suffices (matches the brief: token when set, else
-    require_role("staff") - not "either, when set")."""
+    alone no longer suffices. Without a configured token, staff-role auth is
+    required instead."""
     monkeypatch.setattr(settings, "internal_task_token", "shared-secret")
     resp = staff_client.post("/api/internal/reminders/run-due")
     assert resp.status_code == 403

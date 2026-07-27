@@ -106,10 +106,9 @@ def test_request_creates_running_workflow_then_background_completes_it(
     assert body["status"] == "running"
     workflow_id = body["workflow_id"]
 
-    # Deterministic per the brief: call the background function directly
-    # rather than depend on TestClient's background-task timing. Safe even
-    # if TestClient already ran it - execute_workflow no-ops on a run that
-    # is no longer "running".
+    # Call the background function directly rather than depend on TestClient's
+    # background-task timing. This remains safe if TestClient already ran it:
+    # execute_workflow no-ops on a run that is no longer "running".
     run_workflow_background(workflow_id, [])
 
     detail = patient_client.get(f"/api/workflows/{workflow_id}")
@@ -179,9 +178,8 @@ def test_upload_rejects_one_bad_file_even_with_a_good_one_alongside(patient_clie
 
 
 def test_list_workflows_is_ownership_filtered(patient_client, db_session, other_patient_doc):
-    """GET /api/workflows (the Task 14 patient-portal list) must return only
-    the caller's own runs, never another patient's, even though both rows
-    live in the same table."""
+    """GET /api/workflows returns only the caller's own runs, never another
+    patient's, even though both rows live in the same table."""
     me = db_session.query(User).filter_by(email="patient@example.com").first()
 
     mine = WorkflowRun(

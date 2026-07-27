@@ -1,4 +1,4 @@
-"""The six agent system prompts, verbatim from the safety-reviewed brief.
+"""The six safety-reviewed agent system prompts.
 
 Each string is owned by exactly one agent module (see the corresponding
 `app/agents/<name>.py`). Do not edit the wording here without a safety

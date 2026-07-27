@@ -1,8 +1,7 @@
-"""TDD for the PII boundary (Task F2): PIIRedactor's five categories, the
-shared `redact_for_llm` wrapper, and the node-level wiring in routing,
-coordinator, appointment and document - the four nodes that build an LLM
-prompt directly from patient-submitted text (`request_text` / a document's
-`extracted_text`).
+"""PII-boundary coverage for PIIRedactor's five categories, the shared
+`redact_for_llm` wrapper, and the routing, coordinator, appointment and
+document nodes that build LLM prompts from patient-submitted request or
+document text.
 """
 
 from __future__ import annotations
@@ -381,7 +380,7 @@ def test_safety_node_draft_reaches_llm_with_no_redaction_tokens(db, seeded, fake
     assert _pii_audit(db, 1) == []
 
 
-# --- Presidio pass (Task T15) ------------------------------------------------
+# --- Presidio pass ------------------------------------------------------------
 # `redact_for_llm` runs the regex families first, then Presidio's analyzer over
 # what is left, so names, locations and anything the regex families cannot
 # describe are redacted too. `PIIRedactor.redact` stays the pure regex pass, so

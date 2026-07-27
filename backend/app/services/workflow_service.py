@@ -1,17 +1,16 @@
 """Runs one patient request through the LangGraph workflow: the deterministic
-safety screen first (Task 7), then the prompt-injection guard (Task F1), then
-- only if both allow the request through - the compiled graph (graph.py),
-with the outcome always landing on a WorkflowRun row. `resume_workflow`
-re-enters the same thread from its last checkpoint, for the crash-recovery
-demo.
+safety screen first, then the prompt-injection guard, then - only if both
+allow the request through - the compiled graph (graph.py), with the outcome
+always landing on a WorkflowRun row. `resume_workflow` re-enters the same
+thread from its last checkpoint for crash recovery.
 
 The compiled graph is a module-level singleton (`get_graph`): it owns one
 checkpointer connection for the process's life, opened lazily on first use
 and closed by `close_graph()` (called from the FastAPI lifespan on shutdown,
 and by tests wanting an isolated checkpoint file between runs). This module
 is the only place that builds it - `start_workflow`/`resume_workflow` take no
-graph parameter, per the Task 11 interface, so any caller (an HTTP route or a
-test calling these functions directly) shares the same graph/checkpointer.
+graph parameter, so any caller (an HTTP route or a test calling these
+functions directly) shares the same graph/checkpointer.
 """
 
 from __future__ import annotations
@@ -92,14 +91,13 @@ def _ensure_langfuse_client() -> None:
 def _observability(config: dict[str, Any], workflow_id: int):
     """Attach Langfuse tracing to this graph invocation when both
     settings.langfuse_public_key/secret_key are set; a no-op otherwise.
-    langfuse.langchain (which additionally requires `langchain`, not pinned
-    in requirements.txt) is only imported on the keys-set path, so the
-    default/CI path never touches it.
+    The Langfuse LangChain callback is imported only on the keys-set path, so
+    the default/CI path never touches tracing infrastructure.
 
-    Tracing is optional infrastructure, so a missing `langchain` install
-    downgrades the run to untraced instead of failing it: the import is
-    attempted before anything else on this path, and its failure leaves both
-    the Langfuse client and the callback out of the invocation."""
+    Tracing is optional infrastructure, so an import failure downgrades the
+    run to untraced instead of failing it. The import is attempted before
+    anything else on this path, and its failure leaves both the Langfuse
+    client and callback out of the invocation."""
     if not (settings.langfuse_public_key and settings.langfuse_secret_key):
         yield
         return
@@ -235,9 +233,9 @@ def _screened_run(
 def _injection_blocked_run(
     db: Session, user: User, request_text: str, injection: InjectionResult
 ) -> WorkflowRun:
-    """Prompt-injection screening path (Task F1): runs after screen_request
-    has already allowed the request through, so - like `_screened_run` - no
-    graph and no coordinator LLM call either way."""
+    """Prompt-injection screening runs after screen_request has allowed the
+    request through, so - like `_screened_run` - this path makes no graph or
+    coordinator LLM call."""
     workflow_run = _new_workflow_run(db, user, request_text, status="escalated")
     workflow_run.current_step = "injection_screen"
     workflow_run.state = {
@@ -325,8 +323,7 @@ def create_run(db: Session, user: User, request_text: str) -> WorkflowRun:
     with status "running" and nothing executed yet. Callers that want the
     graph to actually run call `execute_workflow` next (only when status is
     still "running") - split out so an HTTP route can hand that part to a
-    background task instead of blocking the request on it, per the Task 12
-    brief."""
+    background task instead of blocking the request on it."""
     screen = screen_request(request_text)
 
     if screen.action == "escalate_emergency":
@@ -384,9 +381,9 @@ def start_workflow(
 ) -> WorkflowRun:
     """Synchronous convenience for tests and any non-HTTP caller: `create_run`
     then `execute_workflow`, back to back in the same db session. The HTTP
-    route (Task 12) calls the two halves separately instead, running
-    `execute_workflow` in a FastAPI BackgroundTasks callback with its own
-    session so the request returns immediately after `create_run`."""
+    route calls the two halves separately, running `execute_workflow` in a
+    FastAPI BackgroundTasks callback with its own session so the request
+    returns immediately after `create_run`."""
     document_ids = document_ids or []
     workflow_run = create_run(db, user, request_text)
     if workflow_run.status == "running":

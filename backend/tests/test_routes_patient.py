@@ -142,10 +142,9 @@ def test_reschedule_and_cancel_denied_for_non_owner(patient_client, db_session):
 
 
 # --- Patient profile: view and update ----------------------------------------
-# The brief requires a patient can create AND update their profile. Creation
-# happens at registration; these routes cover the update half. The audit row
-# names which fields changed but never carries the values (phone numbers and
-# contacts are PII; the audit trail stores categories, not data).
+# Profile creation happens at registration; these routes cover later updates.
+# The audit row names which fields changed but never carries the values (phone
+# numbers and contacts are PII; the audit trail stores categories, not data).
 
 
 def test_profile_requires_auth():

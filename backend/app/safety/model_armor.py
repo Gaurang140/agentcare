@@ -19,7 +19,7 @@ What this provider is and is not responsible for:
 | Known injection phrasing, healthcare boundary, emergency and medical refusal | deterministic code, no network and no key needed |
 | Prompt injection and jailbreak detection by model | Model Armor, layer 2 |
 | Malicious URI in patient text | Model Armor (AgentCare screens no URLs otherwise) |
-| PII detection and redaction | Presidio, in-process (ADR-13). The template's SDP settings stay off |
+| PII detection and redaction | Presidio, in-process. The template's SDP settings stay off |
 | Final healthcare-boundary sanitizing of the answer | deterministic `sanitize_agent_output`, last |
 
 Both screens return `None` for "no opinion": the adapter is disabled, the
@@ -29,8 +29,9 @@ as a pass. Nothing here ever raises into a request path, and neither the log
 lines nor the verdict carry the screened text - categories only.
 
 The SDK is imported lazily inside the builder, exactly like
-`services/storage.py::GCSStorage` does with google-cloud-storage, so a
-machine without `google-cloud-modelarmor` installed still runs the whole app.
+`services/storage.py::GCSStorage` does with google-cloud-storage, so an
+incomplete runtime environment degrades to "no opinion" instead of preventing
+the app from starting.
 """
 
 from __future__ import annotations
@@ -116,9 +117,9 @@ _PLACEHOLDER = "REPLACE_ME"
 
 
 def is_enabled() -> bool:
-    """True only with a real template configured. Empty is the default
-    everywhere off GCP, and it keeps the no-key demo path free of any network
-    call. The overlay's own placeholder counts as unconfigured."""
+    """True only with a real template configured. An empty value keeps the
+    local no-key demo path free of network calls, and the overlay's placeholder
+    counts as unconfigured."""
     template = settings.model_armor_template.strip()
     return bool(template) and template != _PLACEHOLDER
 
@@ -144,9 +145,9 @@ def _build_client() -> Any:
 def _sdk_types() -> Any | None:
     """The `modelarmor_v1` module, imported once and held for the process.
 
-    None when the package is not installed, which is the ordinary case off
-    GCP and must not be an error: the request types are built from this
-    module, so a missing package has to fail here rather than at a call.
+    None when the pinned dependency is unavailable in the running environment.
+    That must not fail a request: the request types are built from this module,
+    so an incomplete installation is handled here before a provider call.
     """
     global _sdk, _sdk_unavailable
     if _sdk is not None:

@@ -30,11 +30,9 @@ interface UseWorkflowDetailResult {
   notFound: boolean;
 }
 
-/** Extracted from the patient workflow detail page (Task 14) so the staff
- * queue's row-click drawer (Task 15) can show the exact same live timeline
- * without duplicating the SSE/polling wiring. `workflowId` of `null` skips
- * the fetch entirely - used when nothing is selected yet (e.g. the staff
- * sheet before a row is clicked). */
+/** Shared workflow detail, SSE, and polling state for patient and staff
+ * views. A `workflowId` of `null` skips the fetch until a workflow is
+ * selected. */
 export function useWorkflowDetail(workflowId: number | null): UseWorkflowDetailResult {
   const [detail, setDetail] = useState<WorkflowRunDetail | null>(null);
   const [events, setEvents] = useState<WorkflowEventPayload[]>([]);
@@ -119,8 +117,8 @@ export function useWorkflowDetail(workflowId: number | null): UseWorkflowDetailR
       // The backend closes the stream itself on a terminal status (via its
       // own "done" event) - a plain error here means the connection broke
       // for some other reason (network hiccup, proxy timeout), so fall back
-      // to polling per the brief rather than trying to reconnect a stream
-      // that may never resume where it left off.
+      // to polling rather than reconnecting a stream that may never resume
+      // where it left off.
       source?.close();
       startPolling();
     };

@@ -1,11 +1,10 @@
 """Langfuse tracing is optional and must never take a run down with it.
 
-`langfuse` itself is pinned in requirements.txt, but the callback handler in
-`langfuse.langchain` imports `langchain`, which is not pinned. Setting the two
-Langfuse keys on a machine without `langchain` therefore used to fail every
-workflow through `_invoke_graph`'s last-resort handler. These tests script the
-same booking run as tests/test_graph_e2e.py and force that import to fail the
-way a missing install does.
+Both Langfuse and LangChain are pinned runtime dependencies, but the callback
+is imported only when tracing keys are configured. These tests script the same
+booking run as tests/test_graph_e2e.py and simulate an import failure to verify
+that a partial runtime environment disables tracing without failing workflow
+execution.
 """
 
 from __future__ import annotations

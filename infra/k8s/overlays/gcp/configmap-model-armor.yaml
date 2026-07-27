@@ -1,9 +1,8 @@
 # Model Armor override for the gcp overlay, merged onto the base ConfigMap.
 #
-# The base ships MODEL_ARMOR_TEMPLATE: "", which disables the layer: off GCP
-# there is no template to call and the injection guard runs its deterministic
-# layer alone (backend/app/safety/model_armor.py). On a cluster the template
-# exists, so the backend names it on every call.
+# The base ships MODEL_ARMOR_TEMPLATE: "", which disables provider screening
+# until this overlay supplies the deployed template name. The deterministic
+# injection layer remains active either way (backend/app/safety/model_armor.py).
 #
 # MODEL_ARMOR_TEMPLATE is a placeholder, the same convention configmap-storage.yaml
 # uses for GCS_BUCKET: replace it before applying. The real value is the

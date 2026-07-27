@@ -181,10 +181,8 @@ def list_doctors_route(
     db: Annotated[Session, Depends(get_db)],
     department_id: int | None = None,
 ) -> list[DoctorOut]:
-    # No route listed doctors before this (only create/toggle existed) -
-    # the catalog page's doctor list and the slot-generation form's doctor
-    # picker both need real data to select from, not a client-only cache
-    # of doctors created in the current session. Added alongside Task 15.
+    # The staff catalog and slot-generation form share this optionally
+    # department-filtered source of selectable doctors.
     return [DoctorOut(**row) for row in list_doctors(db, department_id)]
 
 

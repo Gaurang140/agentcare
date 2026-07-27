@@ -40,11 +40,10 @@ interface WorkflowDetailSheetProps {
 }
 
 /** Staff queue's row-click drawer: the same live SSE timeline the patient
- * portal shows (via useWorkflowDetail, extracted from that page in this
- * task), inside a Sheet instead of a full route. ensure_owner_or_staff
- * (backend/app/auth/dependencies.py) lets staff read any patient's
- * workflow, so GET /api/workflows/{id} and its /events stream both just
- * work here without a separate staff-only endpoint. */
+ * portal shows through useWorkflowDetail, inside a Sheet instead of a full
+ * route. ensure_owner_or_staff (backend/app/auth/dependencies.py) lets staff
+ * read any patient's workflow, so GET /api/workflows/{id} and its /events
+ * stream work here without a separate staff-only endpoint. */
 export function WorkflowDetailSheet({
   workflowId,
   patientId,
