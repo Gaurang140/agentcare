@@ -1236,9 +1236,86 @@ If the scan changes nothing, do not create an empty commit.
 
 ---
 
+## Task 7: Make the LLM transport policy provider-neutral
+
+This focused fix is required by the post-Task-6 LLM boundary audit. LangChain
+already owns structured-output schema generation and parsing; this task fixes
+only the application policy around the provider call.
+
+**Files:**
+
+- Modify: `backend/app/agents/llm.py`
+- Modify: `backend/tests/test_llm.py`
+
+### Step 1: Pin the provider gaps with failing tests
+
+Add tests proving:
+
+- the `google_genai` factory receives the profile timeout and exactly one SDK
+  attempt, because the pinned Google integration interprets `1` as no retry
+  and `0` as its default retry policy;
+- Google 5xx, network, timeout and wrapped 429 errors use the existing
+  LangChain retry policy;
+- Google 400/401/403/404 errors do not retry or activate endpoint fallback;
+- exhausted retryable Google errors activate the configured endpoint fallback
+  and re-raise the original error when no fallback exists;
+- only an unsupported `response_format`/`json_schema` error downgrades the
+  OpenAI-compatible request to `json_object`; invalid schemas and unrelated
+  `BadRequestError` responses propagate after one call.
+
+Run the focused tests and record the expected RED failures before editing
+production code.
+
+### Step 2: Normalize only retryable provider failures
+
+Keep LangChain's public `Runnable.with_retry` as the one retry mechanism.
+Wrap the structured runnable with a small `RunnableLambda` adapter because
+`with_retry` accepts exception types rather than a predicate. Convert only
+these failures to a private retry marker:
+
+- the existing OpenAI connection, timeout, 5xx and rate-limit exceptions;
+- Google `ServerError`;
+- `httpx.TransportError`;
+- a Google `ClientError` with status 429 found in the cause/context chain.
+
+After exhaustion, re-raise the original provider exception. Apply the same
+finite predicate before selecting the configured endpoint fallback. Never
+retry or fall back on other Google client errors.
+
+### Step 3: Bound the Google SDK and narrow compatibility downgrade
+
+For `provider: google_genai`, pass the profile timeout and one SDK attempt to
+`init_chat_model`; OpenAI-compatible models continue using zero SDK retries.
+The outer LangChain runnable remains the only backoff loop.
+
+Narrow the `BadRequestError` compatibility path to explicit unsupported
+structured-format signals. Keep automatic `json_object` compatibility for
+servers that reject `json_schema`, but do not weaken an arbitrary invalid
+request. Update comments to describe total attempts accurately. Do not add a
+library, a second retry stack, a YAML field, or an async wrapper.
+
+### Step 4: Verify, review and commit
+
+From `backend/` run:
+
+```bash
+rtk "../../../.venv/bin/python" -m pytest -q tests/test_llm.py tests/test_model_config.py
+rtk "../../../.venv/bin/ruff" check app/agents/llm.py tests/test_llm.py
+rtk "../../../.venv/bin/python" -m compileall -q app/agents/llm.py
+```
+
+Then run the full backend suite before review. Commit as:
+
+```bash
+rtk git add backend/app/agents/llm.py backend/tests/test_llm.py
+rtk git commit -m "make LLM transport policy provider neutral"
+```
+
+---
+
 ## Final Acceptance
 
-After all six task reviews are approved:
+After all task reviews are approved:
 
 1. copy the design and plan into the ignored SDD evidence directory so the
    final review can still read them;
