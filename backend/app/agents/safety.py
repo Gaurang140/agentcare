@@ -27,6 +27,7 @@ from app.agents.prompts import SAFETY
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
+from app.agents.support import record_agent_exit
 from app.logging_setup import get_logger
 from app.models import Appointment, PatientDocument, PatientProfile, Reminder
 from app.safety import model_armor
@@ -165,11 +166,6 @@ def _model_armor_screen(db: Session, workflow_id: int | None, candidate: str) ->
     return SANITIZED_SENTENCE
 
 
-def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
-    write_audit(db, None, "agent.safety.completed", "workflow_run", workflow_id, summary)
-    db.commit()
-
-
 def run(state: AgentState, db: Session) -> dict:
     """Compose, review, sanitize, and set final_response - never raising on
     an LLM failure, since a safe deterministic answer must always ship."""
@@ -203,12 +199,15 @@ def run(state: AgentState, db: Session) -> dict:
             "safety_flags": safety_flags,
             "completed_steps": ["safety"],
         }
-        _exit_audit(
-            db, workflow_id, {"llm_ok": llm_ok, "sanitizer_flagged": flagged, "violations": violations}
+        record_agent_exit(
+            db,
+            "safety",
+            workflow_id,
+            {"llm_ok": llm_ok, "sanitizer_flagged": flagged, "violations": violations},
         )
         return update
     except Exception as exc:  # noqa: BLE001 - node boundary must never crash the graph
         logger.error("safety_agent_failed", workflow_id=workflow_id, error=str(exc))
         db.rollback()
-        _exit_audit(db, workflow_id, {"error": str(exc)})
+        record_agent_exit(db, "safety", workflow_id, {"error": str(exc)})
         return {"error": f"safety agent failed: {exc}", "completed_steps": ["safety"]}

@@ -93,18 +93,6 @@ def create_request(
     return CreateRequestResponse(workflow_id=workflow_run.id, status=workflow_run.status)
 
 
-def _to_workflow_summary(run: WorkflowRun) -> WorkflowRunSummary:
-    return WorkflowRunSummary(
-        id=run.id,
-        patient_id=run.patient_id,
-        status=run.status,
-        current_step=run.current_step,
-        request_text=run.request_text,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
-    )
-
-
 @router.get("", response_model=list[WorkflowRunSummary])
 def list_workflows(
     current_user: Annotated[User, Depends(get_current_user)],
@@ -122,7 +110,7 @@ def list_workflows(
         .order_by(WorkflowRun.created_at.desc())
         .all()
     )
-    return [_to_workflow_summary(run) for run in runs]
+    return [WorkflowRunSummary.model_validate(run) for run in runs]
 
 
 _PATIENT_STATE_KEYS = ("final_response", "appointment", "completed_steps", "uploaded_document_ids")

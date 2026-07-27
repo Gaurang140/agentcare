@@ -16,9 +16,9 @@ from app.agents.prompts import FOLLOWUP
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
 from app.agents.state import AgentState
+from app.agents.support import record_agent_exit
 from app.logging_setup import get_logger
 from app.models import Reminder
-from app.tools.audit_tools import write_audit
 from app.tools.followup_tools import ReminderItem, create_reminders_batch, reminder_summary
 
 logger = get_logger(__name__)
@@ -59,11 +59,6 @@ def _plan_prompt(appointment: dict, missing: list[str]) -> str:
     )
 
 
-def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
-    write_audit(db, None, "agent.followup.completed", "workflow_run", workflow_id, summary)
-    db.commit()
-
-
 def _reminders_already_scheduled(db: Session, appointment_id: int) -> list[dict]:
     """The batch this node has already written for the appointment.
 
@@ -88,7 +83,7 @@ def run(state: AgentState, db: Session) -> dict:
     workflow_id = state.get("workflow_id")
     appointment = state.get("appointment")
     if not appointment or appointment.get("status") != "confirmed":
-        _exit_audit(db, workflow_id, {"skipped": True})
+        record_agent_exit(db, "followup", workflow_id, {"skipped": True})
         return {"completed_steps": ["followup"]}
 
     try:
@@ -101,7 +96,9 @@ def run(state: AgentState, db: Session) -> dict:
             # database, so the whole creation block below is skipped rather
             # than deduplicated row by row.
             update = {"reminders": existing, "completed_steps": ["followup"]}
-            _exit_audit(db, workflow_id, {"reminder_count": len(existing), "reused": True})
+            record_agent_exit(
+                db, "followup", workflow_id, {"reminder_count": len(existing), "reused": True}
+            )
             return update
 
         missing = (state.get("documents_result") or {}).get("missing", [])
@@ -127,10 +124,10 @@ def run(state: AgentState, db: Session) -> dict:
         created = create_reminders_batch(db, patient_id, appointment_id, items)
 
         update = {"reminders": created, "completed_steps": ["followup"]}
-        _exit_audit(db, workflow_id, {"reminder_count": len(created)})
+        record_agent_exit(db, "followup", workflow_id, {"reminder_count": len(created)})
         return update
     except Exception as exc:  # noqa: BLE001 - node boundary must never crash the graph
         logger.error("followup_agent_failed", workflow_id=workflow_id, error=str(exc))
         db.rollback()
-        _exit_audit(db, workflow_id, {"error": str(exc)})
+        record_agent_exit(db, "followup", workflow_id, {"error": str(exc)})
         return {"error": f"followup agent failed: {exc}", "completed_steps": ["followup"]}

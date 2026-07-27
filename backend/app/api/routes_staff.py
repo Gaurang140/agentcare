@@ -48,18 +48,6 @@ router = APIRouter(prefix="/staff", tags=["staff"])
 internal_router = APIRouter(prefix="/internal", tags=["internal"])
 
 
-def _to_summary(run: WorkflowRun) -> WorkflowRunSummary:
-    return WorkflowRunSummary(
-        id=run.id,
-        patient_id=run.patient_id,
-        status=run.status,
-        current_step=run.current_step,
-        request_text=run.request_text,
-        created_at=run.created_at,
-        updated_at=run.updated_at,
-    )
-
-
 def _to_escalation_out(escalation: Escalation) -> EscalationOut:
     return EscalationOut(
         id=escalation.id,
@@ -83,7 +71,7 @@ def list_requests(
     if status is not None:
         query = query.filter(WorkflowRun.status == status)
     runs = query.order_by(WorkflowRun.created_at.desc()).all()
-    return [_to_summary(run) for run in runs]
+    return [WorkflowRunSummary.model_validate(run) for run in runs]
 
 
 @router.get("/escalations", response_model=list[EscalationOut])

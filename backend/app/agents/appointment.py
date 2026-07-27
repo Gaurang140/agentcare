@@ -16,6 +16,7 @@ from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language, staff_review_response
 from app.agents.state import AgentState
+from app.agents.support import record_agent_exit
 from app.exceptions import ConflictError, NotFoundError
 from app.logging_setup import get_logger
 from app.models import Appointment
@@ -80,11 +81,6 @@ def _latest_active_appointment(db: Session, patient_id: int) -> Appointment | No
     )
 
 
-def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
-    write_audit(db, None, "agent.appointment.completed", "workflow_run", workflow_id, summary)
-    db.commit()
-
-
 def _escalate_agent_failure(
     db: Session, workflow_id: int | None, patient_id: int | None, reason: str
 ) -> dict:
@@ -94,7 +90,7 @@ def _escalate_agent_failure(
         "final_response": staff_review_response(db, patient_id),
         "completed_steps": ["appointment"],
     }
-    _exit_audit(db, workflow_id, {"escalated": True, "reason": reason})
+    record_agent_exit(db, "appointment", workflow_id, {"escalated": True, "reason": reason})
     return update
 
 
@@ -163,8 +159,11 @@ def _reuse_existing(
         {"workflow_run_id": workflow_id},
     )
     update = {"appointment": result, "completed_steps": ["appointment"]}
-    _exit_audit(
-        db, workflow_id, {"action": intent, "appointment_id": result["id"], "reused": True}
+    record_agent_exit(
+        db,
+        "appointment",
+        workflow_id,
+        {"action": intent, "appointment_id": result["id"], "reused": True},
     )
     return update
 
@@ -181,7 +180,7 @@ def _handle_cancel(db: Session, workflow_id: int | None, patient_id: int) -> dic
         raise NotFoundError("no active appointment to cancel")
     result = cancel_appointment(db, existing.id, workflow_run_id=workflow_id)
     update = {"appointment": result, "completed_steps": ["appointment"]}
-    _exit_audit(db, workflow_id, {"action": "cancel", "appointment_id": result["id"]})
+    record_agent_exit(db, "appointment", workflow_id, {"action": "cancel", "appointment_id": result["id"]})
     return update
 
 
@@ -262,7 +261,7 @@ def _handle_book_or_reschedule(
             )
 
     update = {"appointment": result, "completed_steps": ["appointment"]}
-    _exit_audit(db, workflow_id, {"action": intent, "appointment_id": result["id"]})
+    record_agent_exit(db, "appointment", workflow_id, {"action": intent, "appointment_id": result["id"]})
     return update
 
 
@@ -280,5 +279,5 @@ def run(state: AgentState, db: Session) -> dict:
     except Exception as exc:  # noqa: BLE001 - node boundary must never crash the graph
         logger.error("appointment_agent_failed", workflow_id=workflow_id, error=str(exc))
         db.rollback()
-        _exit_audit(db, workflow_id, {"error": str(exc)})
+        record_agent_exit(db, "appointment", workflow_id, {"error": str(exc)})
         return {"error": f"appointment agent failed: {exc}", "completed_steps": ["appointment"]}

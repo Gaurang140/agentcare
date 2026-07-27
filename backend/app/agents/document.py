@@ -65,6 +65,7 @@ from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language
 from app.agents.state import AgentState
+from app.agents.support import record_agent_exit
 from app.logging_setup import get_logger
 from app.models import PatientDocument
 from app.safety.injection_guard import InjectionResult, screen_injection_group
@@ -233,11 +234,6 @@ def _block_document(
     )
 
 
-def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
-    write_audit(db, None, "agent.document.completed", "workflow_run", workflow_id, summary)
-    db.commit()
-
-
 def _merge_counts(total: dict[str, int], counts: dict[str, int]) -> None:
     for category, count in counts.items():
         total[category] = total.get(category, 0) + count
@@ -316,10 +312,10 @@ def run(state: AgentState, db: Session) -> dict:
         documents_result["classified"] = classified
 
         update = {"documents_result": documents_result, "completed_steps": ["document"]}
-        _exit_audit(db, workflow_id, {"classified_count": len(classified)})
+        record_agent_exit(db, "document", workflow_id, {"classified_count": len(classified)})
         return update
     except Exception as exc:  # noqa: BLE001 - node boundary must never crash the graph
         logger.error("document_agent_failed", workflow_id=workflow_id, error=str(exc))
         db.rollback()
-        _exit_audit(db, workflow_id, {"error": str(exc)})
+        record_agent_exit(db, "document", workflow_id, {"error": str(exc)})
         return {"error": f"document agent failed: {exc}", "completed_steps": ["document"]}

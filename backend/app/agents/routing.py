@@ -14,11 +14,10 @@ from sqlalchemy.orm import Session
 from app.agents.prompts import ROUTING
 from app.agents.llm import chat_json
 from app.agents.memory import build_system_prompt
-from app.agents.responses import patient_language, staff_review_response
+from app.agents.responses import staff_review_response
 from app.agents.state import AgentState
+from app.agents.support import record_agent_exit, redact_request_for_agent
 from app.logging_setup import get_logger
-from app.safety.pii import redact_for_llm, resolve_language
-from app.tools.audit_tools import write_audit
 from app.tools.department_tools import find_department, list_departments
 from app.tools.escalation_tools import create_escalation
 
@@ -59,43 +58,6 @@ def _user_prompt(request_text: str, departments: list[dict], guidance: str | Non
     return prompt
 
 
-def _exit_audit(db: Session, workflow_id: int | None, summary: dict) -> None:
-    write_audit(db, None, "agent.routing.completed", "workflow_run", workflow_id, summary)
-    db.commit()
-
-
-def _redact_request_text(
-    db: Session, workflow_id: int | None, patient_id: int | None, request_text: str
-) -> str:
-    """Redact `request_text` before it is embedded in the routing prompt;
-    write one "safety.pii_redacted" audit row (counts only, no raw PII) when
-    anything was found.
-
-    The language is settled first, cue-first: a German cue in the request
-    decides, and the patient's stored preference breaks the tie when the
-    request carries none (`safety/pii.py::resolve_language`, the same
-    precedence every other call site uses). The preference cannot outrank the
-    text because `preferred_language` defaults to "en" for every patient who
-    never chose German, and the English model reads "Termin" and the
-    department name as locations. Reading the profile still costs one indexed
-    read per node call, the same read agents/safety.py makes.
-    """
-    redacted, counts = redact_for_llm(
-        request_text,
-        language=resolve_language(request_text, patient_language(db, patient_id)),
-    )
-    if counts:
-        write_audit(
-            db,
-            None,
-            "safety.pii_redacted",
-            "workflow_run",
-            workflow_id,
-            {"node": "routing", "counts": counts},
-        )
-    return redacted
-
-
 def _escalate_uncertain(
     db: Session,
     workflow_id: int | None,
@@ -114,7 +76,7 @@ def _escalate_uncertain(
         "final_response": staff_review_response(db, patient_id),
         "completed_steps": ["routing"],
     }
-    _exit_audit(db, workflow_id, {"escalated": True, "confidence": confidence})
+    record_agent_exit(db, "routing", workflow_id, {"escalated": True, "confidence": confidence})
     return update
 
 
@@ -126,9 +88,7 @@ def run(state: AgentState, db: Session) -> dict:
     workflow_id = state.get("workflow_id")
     try:
         departments = list_departments(db)
-        request_text = _redact_request_text(
-            db, workflow_id, state.get("patient_id"), state.get("request_text", "")
-        )
+        request_text = redact_request_for_agent(db, state, "routing")
         system = build_system_prompt(db, "routing", ROUTING)
         result = chat_json(
             system,
@@ -180,10 +140,12 @@ def run(state: AgentState, db: Session) -> dict:
             "routing_confidence": result.confidence,
             "completed_steps": ["routing"],
         }
-        _exit_audit(db, workflow_id, {"department": department_name, "confidence": result.confidence})
+        record_agent_exit(
+            db, "routing", workflow_id, {"department": department_name, "confidence": result.confidence}
+        )
         return update
     except Exception as exc:  # noqa: BLE001 - node boundary must never crash the graph
         logger.error("routing_agent_failed", workflow_id=workflow_id, error=str(exc))
         db.rollback()
-        _exit_audit(db, workflow_id, {"error": str(exc)})
+        record_agent_exit(db, "routing", workflow_id, {"error": str(exc)})
         return {"error": f"routing agent failed: {exc}", "completed_steps": ["routing"]}

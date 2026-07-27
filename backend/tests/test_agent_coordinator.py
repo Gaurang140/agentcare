@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.agents import coordinator
+from app.agents import coordinator, support
 from app.safety.pii import resolve_language
 
 
@@ -36,7 +36,7 @@ def test_german_preference_pins_the_redaction_language(
 ):
     """Same boundary as the routing node: patient 2 (Erika) prefers German and
     this request carries no German cue word for the redactor to detect."""
-    seen = redaction_language(coordinator)
+    seen = redaction_language(support)
     fake_llm([{"next_step": "finalize", "reasoning": "nothing left"}])
 
     coordinator.run(
@@ -51,7 +51,7 @@ def test_german_request_from_an_english_preferring_patient_runs_german(
 ):
     """Same precedence as the routing node: patient 1 is stored as "en" and a
     German cue in the request still puts it on the German model."""
-    seen = redaction_language(coordinator)
+    seen = redaction_language(support)
     fake_llm([{"next_step": "route_department", "reasoning": "nothing routed yet"}])
 
     coordinator.run(
@@ -71,7 +71,7 @@ def test_unknown_patient_leaves_the_language_to_the_redactor(
 ):
     """No profile row, so nothing can outvote the text and the node passes the
     redactor's own reading of it rather than a default of its own."""
-    seen = redaction_language(coordinator)
+    seen = redaction_language(support)
     fake_llm([{"next_step": "finalize", "reasoning": "nothing left"}])
 
     coordinator.run(

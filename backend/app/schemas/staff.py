@@ -5,10 +5,12 @@ procedural agent-rules CRUD.
 
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class WorkflowRunSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     patient_id: int
     status: str

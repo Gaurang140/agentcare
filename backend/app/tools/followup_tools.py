@@ -45,14 +45,14 @@ def reminder_summary(reminder: Reminder) -> dict:
     }
 
 
-def create_reminder(
+def _add_reminder(
     db: Session,
     patient_id: int,
     appointment_id: int | None,
     reminder_type: str,
     scheduled_at: datetime,
-) -> dict:
-    """Schedule one reminder for a patient (optionally tied to an appointment)."""
+) -> Reminder:
+    """Construct, flush, and audit one reminder without owning its transaction."""
     reminder = Reminder(
         patient_id=patient_id,
         appointment_id=appointment_id,
@@ -61,7 +61,6 @@ def create_reminder(
     )
     db.add(reminder)
     db.flush()
-
     write_audit(
         db,
         None,
@@ -73,6 +72,24 @@ def create_reminder(
             "appointment_id": appointment_id,
             "reminder_type": reminder_type,
         },
+    )
+    return reminder
+
+
+def create_reminder(
+    db: Session,
+    patient_id: int,
+    appointment_id: int | None,
+    reminder_type: str,
+    scheduled_at: datetime,
+) -> dict:
+    """Schedule one reminder for a patient (optionally tied to an appointment)."""
+    reminder = _add_reminder(
+        db,
+        patient_id,
+        appointment_id,
+        reminder_type,
+        scheduled_at,
     )
     db.commit()
 
@@ -104,26 +121,12 @@ def create_reminders_batch(
     summaries: list[dict] = []
     try:
         for reminder_type, scheduled_at in items:
-            reminder = Reminder(
-                patient_id=patient_id,
-                appointment_id=appointment_id,
-                reminder_type=reminder_type,
-                scheduled_at=scheduled_at,
-            )
-            db.add(reminder)
-            db.flush()
-
-            write_audit(
+            reminder = _add_reminder(
                 db,
-                None,
-                "reminder.created",
-                "reminder",
-                reminder.id,
-                {
-                    "patient_id": patient_id,
-                    "appointment_id": appointment_id,
-                    "reminder_type": reminder_type,
-                },
+                patient_id,
+                appointment_id,
+                reminder_type,
+                scheduled_at,
             )
             # Read before the commit expires the instance, so the summaries
             # cost no extra queries.
