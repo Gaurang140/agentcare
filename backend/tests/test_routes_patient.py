@@ -139,3 +139,79 @@ def test_reschedule_and_cancel_denied_for_non_owner(patient_client, db_session):
 
     cancel_resp = patient_client.post(f"/api/appointments/{booked['id']}/cancel")
     assert cancel_resp.status_code == 403
+
+
+# --- Patient profile: view and update ----------------------------------------
+# The brief requires a patient can create AND update their profile. Creation
+# happens at registration; these routes cover the update half. The audit row
+# names which fields changed but never carries the values (phone numbers and
+# contacts are PII; the audit trail stores categories, not data).
+
+
+def test_profile_requires_auth():
+    assert TestClient(app).get("/api/profile").status_code == 403
+
+
+def test_get_profile_returns_current_patient_fields(patient_client):
+    resp = patient_client.get("/api/profile")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["email"] == "patient@example.com"
+    assert body["phone"] == "+49 170 0000000"
+    assert body["preferred_language"] == "en"
+    assert body["emergency_contact"] == "Jane Doe"
+
+
+def test_patch_profile_updates_fields_and_persists(patient_client, db_session):
+    resp = patient_client.patch(
+        "/api/profile",
+        json={"phone": "+49 171 9999999", "preferred_language": "de"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["phone"] == "+49 171 9999999"
+    assert resp.json()["preferred_language"] == "de"
+
+    from app.models import PatientProfile
+
+    user = db_session.query(User).filter_by(email="patient@example.com").first()
+    profile = db_session.query(PatientProfile).filter_by(user_id=user.id).first()
+    db_session.refresh(profile)
+    assert profile.phone == "+49 171 9999999"
+    assert profile.preferred_language == "de"
+
+
+def test_patch_profile_partial_update_leaves_other_fields(patient_client):
+    before = patient_client.get("/api/profile").json()
+    resp = patient_client.patch("/api/profile", json={"phone": "+49 172 1111111"})
+    assert resp.status_code == 200
+    after = resp.json()
+    assert after["phone"] == "+49 172 1111111"
+    assert after["preferred_language"] == before["preferred_language"]
+    assert after["emergency_contact"] == before["emergency_contact"]
+
+
+def test_patch_profile_rejects_unsupported_language(patient_client):
+    resp = patient_client.patch("/api/profile", json={"preferred_language": "fr"})
+    assert resp.status_code == 422
+
+
+def test_patch_profile_audit_names_fields_but_not_values(patient_client, db_session):
+    resp = patient_client.patch("/api/profile", json={"phone": "+49 173 2222222"})
+    assert resp.status_code == 200
+
+    from app.models import AuditEvent
+
+    row = (
+        db_session.query(AuditEvent)
+        .filter_by(action="patient.profile_updated")
+        .order_by(AuditEvent.id.desc())
+        .first()
+    )
+    assert row is not None
+    assert row.metadata_json == {"updated_fields": ["phone"]}
+    assert "+49 173 2222222" not in str(row.metadata_json)
+
+
+def test_staff_account_has_no_patient_profile(staff_client):
+    resp = staff_client.get("/api/profile")
+    assert resp.status_code == 404

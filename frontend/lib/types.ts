@@ -68,6 +68,24 @@ export interface ReminderOut {
   sent: boolean;
 }
 
+// ---- schemas/profile.py ----
+
+export interface ProfileOut {
+  name: string;
+  email: string;
+  date_of_birth: string | null;
+  phone: string | null;
+  preferred_language: string;
+  emergency_contact: string | null;
+}
+
+export interface ProfileUpdateRequest {
+  date_of_birth?: string | null;
+  phone?: string | null;
+  preferred_language?: "en" | "de";
+  emergency_contact?: string | null;
+}
+
 // ---- schemas/document.py ----
 
 export interface DocumentMeta {

@@ -19,6 +19,8 @@ import type {
   DoctorOut,
   EscalationOut,
   LoginRequest,
+  ProfileOut,
+  ProfileUpdateRequest,
   RegisterRequest,
   ReminderOut,
   ReminderRunResponse,
@@ -179,6 +181,14 @@ export function listSlots(
 
 export function listReminders(): Promise<ReminderOut[]> {
   return apiFetch("/api/reminders");
+}
+
+export function getProfile(): Promise<ProfileOut> {
+  return apiFetch("/api/profile");
+}
+
+export function updateProfile(payload: ProfileUpdateRequest): Promise<ProfileOut> {
+  return apiFetch("/api/profile", { method: "PATCH", body: JSON.stringify(payload) });
 }
 
 // ---- documents (routes_documents.py) ----

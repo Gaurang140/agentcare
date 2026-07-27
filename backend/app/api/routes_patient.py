@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.auth.dependencies import ensure_owner_or_staff, get_current_user
 from app.db.session import get_db
 from app.exceptions import NotFoundError
-from app.models import Appointment, Reminder, User
+from app.models import Appointment, PatientProfile, Reminder, User
 from app.schemas.appointment import (
     AppointmentOut,
     DepartmentOut,
@@ -22,6 +22,7 @@ from app.schemas.appointment import (
     RescheduleRequest,
     SlotOut,
 )
+from app.schemas.profile import ProfileOut, ProfileUpdateRequest
 from app.tools.appointment_tools import (
     cancel_appointment,
     get_available_slots,
@@ -34,6 +35,59 @@ from app.tools.department_tools import list_departments
 router = APIRouter(tags=["patient"])
 
 _DEFAULT_SLOT_WINDOW_DAYS = 14
+
+
+def _own_profile(current_user: User, db: Session) -> PatientProfile:
+    profile = db.query(PatientProfile).filter_by(user_id=current_user.id).first()
+    if profile is None:
+        raise NotFoundError(f"No patient profile for user {current_user.id}")
+    return profile
+
+
+def _profile_out(current_user: User, profile: PatientProfile) -> ProfileOut:
+    return ProfileOut(
+        name=current_user.full_name,
+        email=current_user.email,
+        date_of_birth=profile.date_of_birth,
+        phone=profile.phone,
+        preferred_language=profile.preferred_language,
+        emergency_contact=profile.emergency_contact,
+    )
+
+
+@router.get("/profile", response_model=ProfileOut)
+def get_profile(
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ProfileOut:
+    return _profile_out(current_user, _own_profile(current_user, db))
+
+
+@router.patch("/profile", response_model=ProfileOut)
+def update_profile(
+    payload: ProfileUpdateRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ProfileOut:
+    """Update the caller's own profile. Only provided fields change, and the
+    audit row records which fields changed, never their values (phone and
+    emergency contact are PII; the audit trail stores categories, not data)."""
+    profile = _own_profile(current_user, db)
+    changes = payload.model_dump(exclude_unset=True)
+    for field_name, value in changes.items():
+        setattr(profile, field_name, value)
+    if changes:
+        write_audit(
+            db,
+            current_user.id,
+            "patient.profile_updated",
+            "patient_profile",
+            profile.id,
+            {"updated_fields": sorted(changes.keys())},
+        )
+    db.commit()
+    db.refresh(profile)
+    return _profile_out(current_user, profile)
 
 
 @router.get("/appointments", response_model=list[AppointmentOut])

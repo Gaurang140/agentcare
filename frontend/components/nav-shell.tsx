@@ -23,6 +23,7 @@ const PATIENT_LINKS = [
   { href: "/portal/appointments", label: "Appointments" },
   { href: "/portal/documents", label: "Documents" },
   { href: "/portal/reminders", label: "Reminders" },
+  { href: "/portal/profile", label: "Profile" },
 ];
 
 const STAFF_LINKS = [
