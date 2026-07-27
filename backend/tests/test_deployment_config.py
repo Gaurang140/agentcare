@@ -44,6 +44,33 @@ def test_compose_uses_documented_env_files_and_requires_operator_jwt():
     assert "LLM_BASE_URL" not in environment
 
 
+def test_backend_docker_context_is_an_explicit_allowlist():
+    patterns = (
+        REPO_ROOT / ".dockerignore"
+    ).read_text(encoding="utf-8").splitlines()
+
+    assert patterns[0] == "*"
+    backend_tree_index = patterns.index("!backend/**")
+    assert patterns.index("!requirements.txt") < backend_tree_index
+    assert patterns.index("!backend/") < backend_tree_index
+
+    forbidden_after_allow = {
+        "**/.env*",
+        "**/.git",
+        "**/.terraform",
+        "**/*.tfstate*",
+        "**/__pycache__",
+        "**/*.py[cod]",
+        "**/*.db",
+        "**/uploads",
+        "**/.pytest_cache",
+        "**/.ruff_cache",
+    }
+    security_rules = patterns[backend_tree_index + 1 :]
+    assert forbidden_after_allow.issubset(set(security_rules))
+    assert not any(pattern.startswith("!") for pattern in security_rules)
+
+
 def test_kubernetes_base_selects_profile_without_field_overrides():
     configmap = _load_yaml(REPO_ROOT / "infra/k8s/base/configmap.yaml")
     data = configmap["data"]
