@@ -210,9 +210,9 @@ def _normalize_output(text: str) -> str:
     space and friends) onto an ordinary space, which the collapse then joins
     with any other run of whitespace.
 
-    Output path only. `screen_request` keeps its own matching semantics, which
-    its own tests define; this is a rewrite of what the agent produced, not of
-    what the patient wrote.
+    The output path rewrites the folded text and ships it; `screen_request`
+    on the input path scans the folded reading in addition to the raw one but
+    never rewrites what the patient wrote.
 
     The fold itself lives in safety/text_normalize.py because the injection
     guard needs the same one on the way in.
@@ -224,6 +224,18 @@ def _find_matches(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> lis
     return [keyword for keyword, pattern in patterns if pattern.search(text)]
 
 
+def _find_matches_any_reading(
+    readings: list[str], patterns: list[tuple[str, re.Pattern[str]]]
+) -> list[str]:
+    """Matches across every reading of the text, deduplicated in order."""
+    matched: list[str] = []
+    for reading in readings:
+        for keyword in _find_matches(reading, patterns):
+            if keyword not in matched:
+                matched.append(keyword)
+    return matched
+
+
 def screen_request(text: str) -> ScreenResult:
     """Screen an incoming patient request before it reaches the agent.
 
@@ -232,8 +244,21 @@ def screen_request(text: str) -> ScreenResult:
     "allow"). This means a message mixing an admin ask with a medical one
     ("book me an appointment and diagnose my cough") still refuses: the
     medical ask wins.
+
+    The keyword lists read the raw text and its confusable-folded reading
+    (`fold_confusables`: NFKC, invisible characters removed, Latin-lookalike
+    letters mapped back), the same both-readings rule the injection guard
+    uses. A zero-width character inside "prescribe" or a Cyrillic "ѕ" in
+    "ѕuicide" renders identically on screen, so a raw-only match would wave
+    through exactly the messages this gate exists to stop. The raw reading
+    stays scanned because the fold is lossy by construction.
     """
-    emergency_matches = _find_matches(text, _EMERGENCY_PATTERNS)
+    readings = [text]
+    folded = fold_confusables(text)
+    if folded != text:
+        readings.append(folded)
+
+    emergency_matches = _find_matches_any_reading(readings, _EMERGENCY_PATTERNS)
     if emergency_matches:
         return ScreenResult(
             action="escalate_emergency",
@@ -241,7 +266,7 @@ def screen_request(text: str) -> ScreenResult:
             matched=emergency_matches,
         )
 
-    medical_matches = _find_matches(text, _MEDICAL_ADVICE_PATTERNS)
+    medical_matches = _find_matches_any_reading(readings, _MEDICAL_ADVICE_PATTERNS)
     if medical_matches:
         return ScreenResult(
             action="refuse_medical",
