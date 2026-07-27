@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.agents.llm import set_llm_client_for_tests
 from app.auth.security import hash_password
+from app.config import settings
 from app.db.base import Base
 from app.db.seed import seed
 from app.db.session import get_db
@@ -302,6 +303,124 @@ def fake_llm() -> Generator:
 
     yield _make
     set_llm_client_for_tests(None)
+
+
+# --- Fake Model Armor client, shared by the adapter and the guard tests ------
+# Same reasoning as FakeLLMClient above: the adapter test, the injection-guard
+# test and the safety-agent test all need one, so it lives here once. The
+# responses are built from the real `modelarmor_v1` message types, so the
+# adapter's parsing is exercised against the shapes the SDK actually returns.
+
+
+def _armor_sanitization_result(matched: dict[str, bool]):
+    """A SanitizationResult where each named filter reports MATCH_FOUND or
+    NO_MATCH_FOUND. AgentCare's template turns on `pi_and_jailbreak` and
+    `malicious_uris`; SDP stays off because Presidio owns PII locally."""
+    from google.cloud import modelarmor_v1
+
+    states = {
+        True: modelarmor_v1.FilterMatchState.MATCH_FOUND,
+        False: modelarmor_v1.FilterMatchState.NO_MATCH_FOUND,
+    }
+    filter_results = {}
+    for name, hit in matched.items():
+        if name == "malicious_uris":
+            filter_results[name] = modelarmor_v1.FilterResult(
+                malicious_uri_filter_result=modelarmor_v1.MaliciousUriFilterResult(
+                    match_state=states[hit]
+                )
+            )
+        else:
+            filter_results[name] = modelarmor_v1.FilterResult(
+                pi_and_jailbreak_filter_result=modelarmor_v1.PiAndJailbreakFilterResult(
+                    match_state=states[hit],
+                    confidence_level=modelarmor_v1.DetectionConfidenceLevel.HIGH,
+                )
+            )
+
+    return modelarmor_v1.SanitizationResult(
+        filter_match_state=states[any(matched.values())],
+        filter_results=filter_results,
+    )
+
+
+def _armor_outcome(outcome, *, is_prompt: bool):
+    """A scripted outcome: a {filter: matched} dict becomes the matching
+    response message, an Exception is left alone to be raised, and anything
+    else is returned as given (so a test can hand back a payload the adapter
+    cannot read)."""
+    from google.cloud import modelarmor_v1
+
+    if not isinstance(outcome, dict):
+        return outcome
+    result = _armor_sanitization_result(outcome)
+    if is_prompt:
+        return modelarmor_v1.SanitizeUserPromptResponse(sanitization_result=result)
+    return modelarmor_v1.SanitizeModelResponseResponse(sanitization_result=result)
+
+
+class FakeArmorClient:
+    """A ModelArmorClient-shaped fake: records every call, replays one
+    scripted outcome per method, raises a scripted Exception."""
+
+    def __init__(self, prompt_outcome=None, response_outcome=None) -> None:
+        self._prompt_outcome = prompt_outcome
+        self._response_outcome = response_outcome
+        self.prompt_calls: list[dict] = []
+        self.response_calls: list[dict] = []
+
+    @property
+    def texts_screened(self) -> list[str]:
+        """The prompt text of every screen call, in order."""
+        return [call["request"].user_prompt_data.text for call in self.prompt_calls]
+
+    def _replay(self, outcome, operation: str):
+        if outcome is None:
+            raise AssertionError(f"fake model armor client called without a scripted {operation}")
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def sanitize_user_prompt(self, request=None, timeout=None):
+        self.prompt_calls.append({"request": request, "timeout": timeout})
+        return self._replay(self._prompt_outcome, "sanitize_user_prompt")
+
+    def sanitize_model_response(self, request=None, timeout=None):
+        self.response_calls.append({"request": request, "timeout": timeout})
+        return self._replay(self._response_outcome, "sanitize_model_response")
+
+
+@pytest.fixture()
+def fake_model_armor() -> Generator:
+    """Factory fixture: `fake_model_armor(prompt={"pi_and_jailbreak": True})`
+    builds a FakeArmorClient, injects it via set_model_armor_client_for_tests
+    and returns it so the test can assert on the calls it recorded. Cleared
+    after the test regardless of outcome.
+
+    `prompt` and `response` each take a {filter_name: matched} dict, an
+    Exception to raise, or any other object to return as-is. Left at None,
+    that method asserts if it is called at all.
+    """
+    from app.safety.model_armor import set_model_armor_client_for_tests
+
+    def _make(prompt=None, response=None) -> FakeArmorClient:
+        client = FakeArmorClient(
+            _armor_outcome(prompt, is_prompt=True),
+            _armor_outcome(response, is_prompt=False),
+        )
+        set_model_armor_client_for_tests(client)
+        return client
+
+    yield _make
+    set_model_armor_client_for_tests(None)
+
+
+@pytest.fixture()
+def model_armor_on(monkeypatch):
+    """Enable the Model Armor layer for one test."""
+    monkeypatch.setattr(
+        settings, "model_armor_template", "projects/demo/locations/europe-west3/templates/agentcare"
+    )
 
 
 @pytest.fixture()

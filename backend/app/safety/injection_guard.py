@@ -11,13 +11,22 @@ shape-based checks - a long base64-looking run, and role-injection markers
 (fake chat-template tokens) appearing inside what should be plain user text.
 Pure function, no network, cheap enough to run on every request.
 
-Layer 2 (optional, classifier): when `settings.llm_api_key` and
-`settings.injection_guard_model` are both set, a small preview model
-(`agents/llm.py::classify_injection`) reviews the text too, catching phrasing
-layer 1's fixed pattern list does not anticipate. A layer-2 failure never
-blocks on its own - it is logged and the request falls through to layer 1's
-already-clean verdict, per the rule that a classifier outage must never take
-the system down.
+Layer 2 (optional, classifier): a model reviews the text too, catching
+phrasing layer 1's fixed pattern list does not anticipate. A layer-2 failure
+never blocks on its own - it is logged and the request falls through to layer
+1's already-clean verdict, per the rule that a classifier outage must never
+take the system down.
+
+One slot, two providers, the same shape as `services/storage.py`'s local and
+GCS backends. Google Model Armor holds the slot when
+`settings.model_armor_template` is set (`safety/model_armor.py`, the GCP
+path); otherwise a small preview model does, when `settings.llm_api_key` and
+`settings.injection_guard_model` are both set
+(`agents/llm.py::classify_injection`). With both configured Model Armor wins,
+because a request pays for one layer-2 round trip and not two. `via` on a
+block names the provider that decided, so the audit trail says which one it
+was. Neither is required: with no template and no key the deterministic layer
+runs alone, which is the no-key demo path.
 
 The two layers see different strings on purpose. Layer 1 is a local pure
 function, so it reads the raw text and keeps every character an attacker
@@ -54,20 +63,23 @@ from typing import Literal
 from app.agents.llm import classify_injection
 from app.config import settings
 from app.logging_setup import get_logger
+from app.safety import model_armor
 from app.safety.pii import redact_for_llm
 from app.safety.text_normalize import fold_confusables
 
 logger = get_logger(__name__)
 
 Action = Literal["allow", "block"]
-Via = Literal["deterministic", "classifier", "none"]
+Via = Literal["deterministic", "classifier", "model_armor", "none"]
 
 
 @dataclass
 class InjectionResult:
-    """`via` names which layer produced a "block"; it is always "none" when
-    `action` is "allow", regardless of whether the classifier ran and
-    explicitly cleared the text or never ran at all."""
+    """`via` names which layer produced a "block", and for layer 2 which
+    provider produced it ("classifier" for the hosted prompt-guard model,
+    "model_armor" for Model Armor). It is always "none" when `action` is
+    "allow", regardless of whether layer 2 ran and explicitly cleared the
+    text or never ran at all."""
 
     action: Action
     matched: list[str]
@@ -195,19 +207,37 @@ def _classifier_label(raw: str) -> str:
 
 
 def _classifier_enabled() -> bool:
+    """True when either provider can fill the layer-2 slot."""
+    if model_armor.is_enabled():
+        return True
     return bool(settings.llm_api_key) and bool(settings.injection_guard_model)
 
 
+def _classifier_via() -> Via:
+    """Which provider holds the slot right now. Model Armor takes precedence
+    when both are configured, so this is also the routing decision."""
+    return "model_armor" if model_armor.is_enabled() else "classifier"
+
+
 def _classifier_flags_injection(text: str, language: str | None = None) -> bool:
-    """Redact, then ask the classifier. See the module docstring for why the
-    classifier reads the redacted copy and layer 1 reads the raw text.
+    """Redact, then ask whichever provider holds the slot. See the module
+    docstring for why layer 2 reads the redacted copy and layer 1 reads the
+    raw text. The redaction happens once, before the routing, so the
+    guarantee does not depend on which provider answers.
 
     `language` is the caller's, forwarded straight to `redact_for_llm`. With
     None the redactor decides from the text it is handed, which is the right
     default for a single string and the wrong one for a joined group (see
     `screen_injection_group`).
+
+    Model Armor returns None for "no opinion" (disabled, unreachable, a reply
+    it could not read), which reads as no objection here and leaves layer 1's
+    verdict standing.
     """
     redacted, _ = redact_for_llm(text, language=language)
+    if model_armor.is_enabled():
+        verdict = model_armor.screen_prompt(redacted)
+        return bool(verdict and verdict.flagged)
     label = _classifier_label(classify_injection(redacted))
     return bool(_INJECTION_LABEL_RE.search(label))
 
@@ -260,8 +290,8 @@ def screen_injection_group(
     read the readings as one text, so no single one of them is identifiable
     there.
 
-    Layer 2 only runs when both `settings.llm_api_key` and
-    `settings.injection_guard_model` are set, and never for an empty group;
+    Layer 2 only runs when a provider is configured for it (see
+    `_classifier_enabled`), and never for an empty group;
     if it raises, the error is logged and the result falls back to layer 1's
     own (clean, by construction - layer 1 already returned above otherwise)
     verdict, so a classifier outage never blocks a request.
@@ -284,7 +314,8 @@ def screen_injection_group(
     if readings and _classifier_enabled():
         try:
             if _classifier_flags_injection(_classifier_input(readings), language=language):
-                blocked = InjectionResult(action="block", matched=["classifier"], via="classifier")
+                via = _classifier_via()
+                blocked = InjectionResult(action="block", matched=[via], via=via)
                 return blocked, None
         except Exception as exc:  # noqa: BLE001 - classifier errors must never block
             logger.warning("injection_classifier_failed_falling_back", error=str(exc))
