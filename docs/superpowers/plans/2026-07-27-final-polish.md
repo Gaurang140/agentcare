@@ -422,6 +422,7 @@ rtk git commit -m "consolidate agent and workflow boundaries"
 - Modify: `backend/app/agents/llm.py`
 - Modify: `backend/app/agents/model_config.py`
 - Modify: `backend/tests/conftest.py`
+- Modify: `backend/tests/test_graph_e2e.py`
 - Modify: `backend/tests/test_model_config.py`
 - Modify: `backend/tests/test_llm.py`
 
@@ -565,6 +566,11 @@ correction message.
 Keep green the existing tests for native structured output, 400-to-JSON-mode
 fallback, validation repair, two-invalid-response failure, transport retry
 count, fallback-model JSON mode, and network-free test overrides.
+
+If an end-to-end test serializes the fake call's entire kwargs dictionary to
+inspect prompt content, narrow it to `call["messages"]`. A Pydantic
+`response_format` class is provider control data, not prompt content and is not
+JSON-serializable; all existing guidance/PII assertions must remain.
 
 From `backend/`:
 
