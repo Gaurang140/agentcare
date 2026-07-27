@@ -53,6 +53,19 @@ def test_enabled_when_a_template_is_configured(model_armor_on):
     assert is_enabled() is True
 
 
+def test_the_overlay_placeholder_counts_as_unconfigured(monkeypatch):
+    """A deploy that forgets to substitute the overlay's placeholder gets a
+    quiet no-op, not a doomed API call and a warning on every request."""
+    monkeypatch.setattr(settings, "model_armor_template", "REPLACE_ME")
+    assert is_enabled() is False
+
+    monkeypatch.setattr(settings, "model_armor_template", "  REPLACE_ME  ")
+    assert is_enabled() is False
+
+    monkeypatch.setattr(settings, "model_armor_template", "   ")
+    assert is_enabled() is False
+
+
 def test_disabled_returns_none_from_both_screens_without_calling_the_client(fake_model_armor):
     """None is "no opinion", which is what lets a caller tell a disabled
     adapter apart from a clean verdict."""

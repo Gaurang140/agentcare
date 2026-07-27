@@ -354,11 +354,12 @@ The location is not decoration. Model Armor has no global endpoint: the client b
 `modelarmor.LOCATION.rep.googleapis.com` out of this value, so a value that disagrees with the
 template's own region fails every call.
 
-Leaving `REPLACE_ME` in place is not a hard failure. The adapter logs one `model_armor_failed`
-warning per call and returns no opinion, so the deterministic layers decide alone. That is the
-same behaviour you get from emptying the value or from
-`-var="enable_model_armor=false"` at apply time, and failing open is deliberate: a screening
-service must never be the thing that stops a patient from booking an appointment.
+Leaving `REPLACE_ME` in place is not a hard failure. The adapter treats its own placeholder as
+unconfigured, so the layer stays off and the deterministic layers decide alone, with no call and
+no warning per request. That is the same behaviour you get from emptying the value or from
+`-var="enable_model_armor=false"` at apply time. A real template name that later stops answering
+fails open the same way, one `model_armor_failed` warning and no opinion, and that is deliberate:
+a screening service must never be the thing that stops a patient from booking an appointment.
 
 Step 8 matters for this one. The calls go out under the pod's own GCP identity, so until the
 Workload Identity binding is in place they fail as the namespace default service account and the

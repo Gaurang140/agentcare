@@ -101,10 +101,19 @@ def set_model_armor_client_for_tests(client: Any | None) -> None:
     _client_unavailable = False
 
 
+# The value the gcp overlay ships for MODEL_ARMOR_TEMPLATE until someone
+# substitutes the real template name. Treating it as "not configured" turns a
+# forgotten substitution into a quiet no-op rather than a doomed API call, a
+# warning and wasted latency on every single request.
+_PLACEHOLDER = "REPLACE_ME"
+
+
 def is_enabled() -> bool:
-    """True only with a template configured. Empty is the default everywhere
-    off GCP, and it keeps the no-key demo path free of any network call."""
-    return bool(settings.model_armor_template)
+    """True only with a real template configured. Empty is the default
+    everywhere off GCP, and it keeps the no-key demo path free of any network
+    call. The overlay's own placeholder counts as unconfigured."""
+    template = settings.model_armor_template.strip()
+    return bool(template) and template != _PLACEHOLDER
 
 
 def _import_sdk() -> Any:
