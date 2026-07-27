@@ -49,23 +49,33 @@ class ModelProfile:
 @dataclass(frozen=True)
 class LLMProfiles:
     """What `llm.py` consumes: the resolved primary model, the optional
-    fallback tried after transport exhaustion, and the guard model name."""
+    fallback tried after transport exhaustion, and the injection guard's
+    model name plus the profile whose endpoint serves it (None disables
+    the guard's model layer rather than sending a guard model to the
+    wrong provider)."""
 
     primary: ModelProfile
     fallback: ModelProfile | None
     injection_guard_model: str
+    guard: ModelProfile | None = None
 
 
-def _profile_from_mapping(raw: dict) -> ModelProfile:
-    params = {k: v for k, v in raw.items() if k not in _KNOWN_KEYS}
-    return ModelProfile(
-        provider=str(raw.get("provider", "openai")),
-        model=str(raw.get("model", "")),
-        base_url=raw.get("base_url"),
-        timeout=float(raw.get("timeout", 30.0)),
-        max_retries=int(raw.get("max_retries", 3)),
-        params=params,
-    )
+def _profile_from_mapping(raw: dict) -> ModelProfile | None:
+    """None for a profile whose values do not parse - the caller degrades
+    with a warning instead of turning every request into a 500."""
+    try:
+        params = {k: v for k, v in raw.items() if k not in _KNOWN_KEYS}
+        return ModelProfile(
+            provider=str(raw.get("provider", "openai")),
+            model=str(raw.get("model", "")),
+            base_url=raw.get("base_url"),
+            timeout=float(raw.get("timeout", 30.0)),
+            max_retries=int(raw.get("max_retries", 3)),
+            params=params,
+        )
+    except (TypeError, ValueError) as exc:
+        logger.warning("llm_profile_values_invalid_using_env_defaults", error=str(exc))
+        return None
 
 
 def _read_yaml(path: Path) -> dict:
@@ -114,7 +124,10 @@ def load_llm_profiles(
     data = _read_yaml(path if path is not None else _DEFAULT_PATH)
 
     raw_primary = _select_profile(data, settings.llm_profile)
-    primary = _profile_from_mapping(raw_primary) if raw_primary else ModelProfile()
+    primary = _profile_from_mapping(raw_primary) if raw_primary else None
+    if primary is None:
+        raw_primary = {}
+        primary = ModelProfile()
 
     # Env overrides, applied field-by-field only where env actually set a
     # value. With no YAML at all this also reconstructs today's env-only
@@ -150,8 +163,28 @@ def load_llm_profiles(
             fallback = _profile_from_mapping(raw_fallback)
 
     guard = data.get("injection_guard", {})
-    guard_model = str(guard.get("model", "")) if isinstance(guard, dict) else ""
+    if not isinstance(guard, dict):
+        guard = {}
+    guard_model = str(guard.get("model", ""))
     if not guard_model or _is_env_set(settings, "injection_guard_model"):
         guard_model = settings.injection_guard_model
 
-    return LLMProfiles(primary=primary, fallback=fallback, injection_guard_model=guard_model)
+    # The guard is a bare-completion call, so it needs an endpoint that will
+    # actually host its model: a profile named under injection_guard.profile,
+    # else the primary when the primary is OpenAI-compatible, else nothing.
+    guard_profile: ModelProfile | None = None
+    guard_profile_name = str(guard.get("profile", ""))
+    raw_guard = data.get("profiles", {}).get(guard_profile_name) if guard_profile_name else None
+    if isinstance(raw_guard, dict):
+        guard_profile = _profile_from_mapping(raw_guard)
+    elif primary.provider == "openai":
+        guard_profile = primary
+    else:
+        logger.warning("injection_guard_has_no_endpoint_profile", primary=primary.provider)
+
+    return LLMProfiles(
+        primary=primary,
+        fallback=fallback,
+        injection_guard_model=guard_model,
+        guard=guard_profile,
+    )

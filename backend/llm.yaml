@@ -31,17 +31,18 @@ profiles:
     timeout: 60
     max_retries: 2
 
-  # Google Cloud Vertex AI. Needs `pip install langchain-google-vertexai`
-  # plus ADC credentials (gcloud auth application-default login) and the
-  # GOOGLE_CLOUD_PROJECT env var; keys under the profile beyond
-  # provider/model/base_url/timeout/max_retries pass straight through to
-  # init_chat_model, so `location` lands on ChatVertexAI.
-  vertex:
-    provider: google_vertexai
-    model: gemini-2.5-flash
-    location: europe-west3
-    timeout: 30
-    max_retries: 3
+  # Google Gemini (not verified against a live project - enable knowingly).
+  # Current langchain guidance reaches Gemini, including on Vertex AI,
+  # through langchain-google-genai. To use: `pip install
+  # langchain-google-genai`, set GOOGLE_CLOUD_PROJECT plus ADC credentials
+  # for the Vertex path, uncomment, then run a live smoke test before
+  # claiming it works. Keys beyond provider/model/base_url/timeout/
+  # max_retries pass straight through to init_chat_model.
+  # gemini:
+  #   provider: google_genai
+  #   model: gemini-2.5-flash
+  #   vertexai: true
+  #   location: europe-west3
 
 # Optional second profile tried once when the primary exhausts its
 # transport retries (same role as LLM_FALLBACK_BASE_URL, which wins when
@@ -50,5 +51,8 @@ fallback_profile: ""
 
 injection_guard:
   # The prompt-injection classifier (safety/injection_guard.py layer 2).
-  # Runs against the primary profile's endpoint and credentials.
+  # `profile` names the endpoint that hosts this model; unset, it uses the
+  # primary profile when that is OpenAI-compatible and is disabled
+  # otherwise (a Groq guard model must never be sent to another provider).
   model: meta-llama/llama-prompt-guard-2-86m
+  profile: groq

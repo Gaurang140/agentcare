@@ -113,26 +113,21 @@ def _wrap_test_client(fake, model_name: str) -> BaseChatModel:
 
 
 def _build_chat_model(profile: ModelProfile, *, model_name: str | None = None) -> BaseChatModel:
-    """Build the chat model for a profile through init_chat_model, so any
-    provider with a langchain integration package works from llm.yaml alone.
+    """Build the chat model for a profile through init_chat_model.
 
-    SDK-internal retries are always disabled: the retry policy belongs to
-    `with_retry` in `_with_retry`, and stacking the two would multiply
-    attempts (the openai SDK alone defaults to 2 retries and a 600s
-    timeout)."""
+    SDK-internal retries stay off (`max_retries=0`): the retry policy lives
+    in `_with_retry`, and stacking the two would multiply attempts. The
+    "missing-key" placeholder keeps a keyless boot possible - openai 2.x
+    refuses to construct a client with no credentials, and the endpoint
+    answers 401 at call time either way."""
     name = model_name or profile.model
     kwargs: dict = dict(profile.params)
     if profile.provider == "openai":
         kwargs["base_url"] = profile.base_url
-        # An empty key must still build a model (the app boots keyless and
-        # degrades; the endpoint answers 401 at call time), but openai 2.x
-        # refuses to construct a client with no credentials at all.
         kwargs["api_key"] = settings.llm_api_key or "missing-key"
         kwargs["timeout"] = profile.timeout
         kwargs["max_retries"] = 0
     try:
-        # init_chat_model raises ImportError for a known provider whose
-        # langchain package is missing, ValueError for an unknown provider.
         return init_chat_model(name, model_provider=profile.provider, **kwargs)
     except (ImportError, ValueError) as exc:
         package = f"langchain-{profile.provider.replace('_', '-')}"
@@ -248,7 +243,7 @@ def _chat_json_once(
             ]
             reply = _invoke(model, messages, {"type": "json_object"}, max_retries)
 
-    content = str(reply.content)
+    content = reply.text
     try:
         return schema_model.model_validate_json(content)
     except ValidationError as exc:
@@ -266,7 +261,7 @@ def _chat_json_once(
         )
         reply = _invoke(model, retry_messages, response_format, max_retries)
         try:
-            return schema_model.model_validate_json(str(reply.content))
+            return schema_model.model_validate_json(reply.text)
         except ValidationError as exc2:
             raise LLMOutputError(
                 f"{schema_model.__name__} validation failed after retry: {exc2}"
@@ -309,17 +304,22 @@ def classify_injection(text: str) -> str:
     interpreting that label is `safety/injection_guard.py`'s job, not this
     function's).
 
-    Uses the primary profile's endpoint and credentials (including the test
-    override) but the guard model name from llm.yaml / env, a single plain
-    message, no structured-output request and no retry loop. Raises on any
-    transport or API error; the caller is responsible for catching that and
-    falling back, since a classifier outage must never block a request on
-    its own.
+    Uses the guard's own endpoint profile (llm.yaml `injection_guard.profile`,
+    defaulting to the primary when that is OpenAI-compatible; the test
+    override wins over both), a single plain message, no structured-output
+    request and no retry loop. Raises on any transport, API or configuration
+    error; the caller is responsible for catching that and falling back,
+    since a classifier outage must never block a request on its own.
     """
     profiles = load_llm_profiles(settings)
     if _override is not None:
         model = _wrap_test_client(_override, profiles.injection_guard_model)
+    elif profiles.guard is None:
+        raise LLMConfigError(
+            "no OpenAI-compatible endpoint profile for the injection guard; "
+            "set injection_guard.profile in backend/llm.yaml"
+        )
     else:
-        model = _build_chat_model(profiles.primary, model_name=profiles.injection_guard_model)
+        model = _build_chat_model(profiles.guard, model_name=profiles.injection_guard_model)
     reply = model.invoke([HumanMessage(text)])
-    return str(reply.content)
+    return reply.text

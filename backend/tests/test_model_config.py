@@ -186,3 +186,82 @@ def test_injection_guard_env_overrides_yaml(monkeypatch):
     profiles = load_llm_profiles(settings)
 
     assert profiles.injection_guard_model == "my-guard"
+
+
+def test_malformed_profile_value_degrades_to_env_settings(monkeypatch, tmp_path: Path):
+    """A profile with a non-numeric timeout must cost a warning, not a 500
+    on every request."""
+    config = tmp_path / "llm.yaml"
+    config.write_text(
+        """
+default_profile: broken
+profiles:
+  broken:
+    provider: openai
+    model: some-model
+    timeout: not-a-number
+""",
+        encoding="utf-8",
+    )
+    settings = _settings(monkeypatch, LLM_MODEL="env-model")
+
+    profiles = load_llm_profiles(settings, path=config)
+
+    assert profiles.primary.model == "env-model"
+
+
+def test_guard_uses_named_profile_when_configured(monkeypatch, tmp_path: Path):
+    config = tmp_path / "llm.yaml"
+    config.write_text(
+        """
+default_profile: main
+profiles:
+  main:
+    provider: google_genai
+    model: gemini-2.5-flash
+  guard-endpoint:
+    provider: openai
+    model: unused
+    base_url: https://guard.test/v1
+injection_guard:
+  model: my-guard-model
+  profile: guard-endpoint
+""",
+        encoding="utf-8",
+    )
+    settings = _settings(monkeypatch)
+
+    profiles = load_llm_profiles(settings, path=config)
+
+    assert profiles.guard is not None
+    assert profiles.guard.base_url == "https://guard.test/v1"
+    assert profiles.injection_guard_model == "my-guard-model"
+
+
+def test_guard_defaults_to_primary_when_openai_compatible(monkeypatch):
+    settings = _settings(monkeypatch)
+
+    profiles = load_llm_profiles(settings)
+
+    assert profiles.guard == profiles.primary
+
+
+def test_guard_disabled_when_primary_is_not_openai_compatible(monkeypatch, tmp_path: Path):
+    """A prompt-guard model name from one provider must never be sent to a
+    different provider's endpoint just because it is the primary."""
+    config = tmp_path / "llm.yaml"
+    config.write_text(
+        """
+default_profile: main
+profiles:
+  main:
+    provider: google_genai
+    model: gemini-2.5-flash
+""",
+        encoding="utf-8",
+    )
+    settings = _settings(monkeypatch)
+
+    profiles = load_llm_profiles(settings, path=config)
+
+    assert profiles.guard is None
