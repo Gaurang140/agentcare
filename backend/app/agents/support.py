@@ -30,18 +30,33 @@ def redact_request_for_agent(
     state: AgentState,
     agent_name: str,
 ) -> str:
-    """Redact the only request copy that crosses into a model prompt.
+    """Redact the request copy that crosses into a model prompt."""
+    return redact_text_for_agent(
+        db,
+        state,
+        state.get("request_text", ""),
+        agent_name,
+    )
 
-    Request-language cues win; the stored patient preference is only a
+
+def redact_text_for_agent(
+    db: Session,
+    state: AgentState,
+    text: str,
+    agent_name: str,
+) -> str:
+    """Redact patient-related text before graph state or a model prompt.
+
+    Text-language cues win; the stored patient preference is only a
     no-cue tie-breaker, because a default preference must not override the
-    language the patient actually used. When redaction finds PII, its audit
-    metadata records category counts only, never raw patient data.
+    language the text actually uses. When redaction finds PII, its audit
+    metadata records the responsible node and category counts only, never
+    raw patient or staff-entered data.
     """
-    request_text = state.get("request_text", "")
     redacted, counts = redact_for_llm(
-        request_text,
+        text,
         language=resolve_language(
-            request_text,
+            text,
             patient_language(db, state.get("patient_id")),
         ),
     )

@@ -33,8 +33,9 @@ class AgentState(TypedDict, total=False):
     # without this list the next handoff would reuse the row staff already
     # closed instead of opening one they can still see (agents/graph.py).
     resolved_escalation_ids: Annotated[list[int], operator.add]
-    # The reviewing staff member's note, on an approved uncertainty case
-    # only: routing hint for the agents, never patient-facing text.
+    # PII-redacted copy of the reviewing staff member's note, on an approved
+    # uncertainty case only: routing hint for agents, never patient-facing
+    # text. The raw note stays on Escalation.resolution_note.
     staff_guidance: str | None
     plan: list[str]  # coordinator's remaining steps
     completed_steps: Annotated[list[str], operator.add]

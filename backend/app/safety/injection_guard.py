@@ -246,13 +246,12 @@ def _classifier_input(readings: Sequence[str]) -> str:
 
     Layer 2 has a fixed input window (512 tokens for the default prompt-guard
     model) and the readings are not the same size: a document's body is capped
-    at 1500 characters for a PDF and not capped at all for a `.txt`, while its
-    filename readings are two short strings. In caller order the short ones sit
-    behind the long one and a long enough body is all it takes for the model to
-    never read them. The join order carries no meaning of its own - layer 1
-    iterates the readings separately and keeps the caller's order, which is
-    where the blocked index comes from - so the short readings go first.
-    `sorted` is stable, so readings of the same length keep the caller's order.
+    at 1500 characters, while its filename readings are two short strings. In
+    caller order the short ones sit behind the body, so the short readings go
+    first to preserve their share of that window. The join order carries no
+    meaning of its own - layer 1 iterates the readings separately and keeps the
+    caller's order, which is where the blocked index comes from. `sorted` is
+    stable, so readings of the same length keep the caller's order.
     """
     return "\n".join(sorted(readings, key=len))
 

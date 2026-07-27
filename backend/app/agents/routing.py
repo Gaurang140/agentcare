@@ -50,9 +50,9 @@ def _user_prompt(request_text: str, departments: list[dict], guidance: str | Non
         f"Patient request: {request_text}\n"
         f"Available departments (choose exactly one of these, or null): {names}"
     )
-    # Set only on a run staff approved out of the escalate node: this node is
-    # usually the one that gave up on the request in the first place, so a
-    # re-run without the human's clarification would land in the same place.
+    # Set only on a run staff approved out of the escalate node. This is the
+    # note's redacted copy; without the human's clarification this node would
+    # usually land in the same uncertainty again.
     if guidance:
         prompt += f"\nStaff guidance: {guidance}"
     return prompt

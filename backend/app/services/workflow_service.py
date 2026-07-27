@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from app.agents.graph import build_graph, open_checkpointer
 from app.agents.responses import emergency_response, medical_refusal_response
 from app.agents.state import AgentState
+from app.agents.support import redact_text_for_agent
 from app.config import settings
 from app.exceptions import NotFoundError, ValidationError
 from app.logging_setup import get_logger
@@ -434,6 +435,11 @@ def resume_with_decision(
     waiting_approval and both resume the one thread otherwise, off one
     checkpoint, which on a booking run means booking twice. The loser's
     UPDATE matches zero rows and takes the no-op path.
+
+    The raw staff note is already persisted on Escalation.resolution_note by
+    the staff route. Only an approved uncertainty case needs it as agent
+    guidance, so that copy is PII-redacted before Command construction. Raw
+    note text therefore never enters LangGraph's checkpoint input.
     """
     workflow_run = db.get(WorkflowRun, workflow_run_id)
     if workflow_run is None:
@@ -450,7 +456,27 @@ def resume_with_decision(
     if claimed.rowcount == 0:
         return workflow_run
 
-    resume = Command(resume={"approved": approved, "note": note, "reviewer_id": reviewer_id})
+    raw_guidance = (note or "").strip()
+    guidance = None
+    if approved and not (workflow_run.state or {}).get("error") and raw_guidance:
+        redaction_state: AgentState = dict(workflow_run.state or {})
+        redaction_state.setdefault("workflow_id", workflow_run.id)
+        redaction_state.setdefault("patient_id", workflow_run.patient_id)
+        guidance = redact_text_for_agent(
+            db,
+            redaction_state,
+            raw_guidance,
+            "escalate",
+        )
+        db.commit()
+
+    resume = Command(
+        resume={
+            "approved": approved,
+            "guidance": guidance,
+            "reviewer_id": reviewer_id,
+        }
+    )
     final_state = _invoke_graph(db, workflow_run, resume)
     if final_state is None:
         return workflow_run

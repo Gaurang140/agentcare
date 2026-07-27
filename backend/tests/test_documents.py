@@ -39,8 +39,10 @@ def test_duplicate_document_detected(db, seeded):
         .all()
     )
     assert len(dup_events) == 1
-    assert dup_events[0].metadata_json["filename"] == "ecg_copy.pdf"
-    assert "checksum" not in dup_events[0].metadata_json
+    assert dup_events[0].metadata_json == {
+        "existing_document_id": r1["id"],
+        "reason": "checksum_match",
+    }
 
 
 def test_duplicate_detection_is_scoped_per_patient(db, seeded):
@@ -87,6 +89,10 @@ def test_extract_text_reads_txt_with_utf8_ignore_errors():
     assert extract_text("notes.txt", "héllo".encode("utf-8")) == "héllo"
     # Invalid utf-8 byte sequence: errors="ignore" drops it instead of raising.
     assert extract_text("notes.txt", b"ok \xff bytes") == "ok  bytes"
+
+
+def test_extract_text_caps_txt_before_downstream_safety_and_model_calls():
+    assert extract_text("oversized.txt", b"x" * 2000) == "x" * 1500
 
 
 def test_extract_text_returns_empty_for_unknown_extension():

@@ -1,12 +1,12 @@
 """PII redaction at the LLM boundary.
 
-Boundary rule: the database always keeps the original, unredacted text a
-patient submitted (`WorkflowRun.request_text`, `PatientDocument.extracted_text`).
-Redaction in this module applies ONLY to a copy of that text on its way into
-an LLM prompt - never to what is stored, never to what is shown back to the
-patient. `agents/safety.py` composes the patient-facing `final_response` from
-freshly queried database rows, not from patient-submitted text, so it never
-calls into this module (see that node's own docstring).
+Boundary rule: the database keeps original patient submissions
+(`WorkflowRun.request_text`, `PatientDocument.extracted_text`) and raw staff
+review notes (`Escalation.resolution_note`). Redaction applies only to copies
+headed for graph guidance or an LLM prompt, never to those system-of-record
+fields or patient-facing output. `agents/safety.py` composes the patient-facing
+`final_response` from freshly queried database rows, not from submitted text,
+so it never calls into this module (see that node's own docstring).
 
 `redact_for_llm` is the one function every call site should import. It runs
 two passes over the text, in this order:

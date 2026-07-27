@@ -461,14 +461,64 @@ def test_uncertainty_escalation_pauses_the_run_for_staff(db, seeded, fake_llm):
     assert len(client.chat.completions.calls) == 3
 
 
+def test_resume_command_contains_only_redacted_staff_guidance(
+    db, seeded, fake_llm, monkeypatch
+):
+    """The resume value crosses into LangGraph's checkpoint machinery before
+    the interrupted node runs, so the privacy boundary must sit before the
+    Command is constructed, not only before the next provider call."""
+    fake_llm(_uncertainty_pause_script())
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "something about an appointment, maybe", []
+    )
+    assert run.status == "waiting_approval"
+
+    note = "John Smith: jane.doe@example.com, +49 176 12345678"
+    escalation = db.query(Escalation).filter_by(workflow_run_id=run.id).one()
+    resolve_escalation(db, escalation.id, _REVIEWER_ID, True, note)
+
+    graph_inputs = []
+
+    def _capture_graph_input(_db, workflow_run, graph_input):
+        graph_inputs.append(graph_input)
+        return {
+            **workflow_run.state,
+            "escalation_id": None,
+            "completed_steps": ["escalate"],
+            "final_response": "review handled",
+        }
+
+    monkeypatch.setattr(workflow_service, "_invoke_graph", _capture_graph_input)
+
+    workflow_service.resume_with_decision(
+        db,
+        run.id,
+        approved=True,
+        note=note,
+        reviewer_id=_REVIEWER_ID,
+    )
+
+    assert len(graph_inputs) == 1
+    resume_payload = graph_inputs[0].resume
+    assert "note" not in resume_payload
+    assert resume_payload["guidance"] == (
+        "[REDACTED_NAME]: [REDACTED_EMAIL], [REDACTED_PHONE]"
+    )
+    assert note not in str(graph_inputs[0])
+    assert db.get(Escalation, escalation.id).resolution_note == note
+
+
 def test_staff_approval_resumes_the_run_and_books_the_appointment(db, seeded, fake_llm):
     """The demo beat: an ambiguous request parks, a staff member approves it
     with a note naming the department, and the run picks up where it stopped
-    and books the appointment it was asked for. The note steers the agents
-    and lands on the escalation row; it never becomes something the patient
-    reads."""
+    and books the appointment it was asked for. The raw note stays on the
+    staff-only escalation row; only its redacted copy may enter graph state
+    or a provider message."""
     slot_id = _first_free_slot_id(db, _cardiology_id(db))
-    note = "patient means cardiology"
+    note = (
+        "John Smith means cardiology; confirm with "
+        "jane.doe@example.com or +49 176 12345678"
+    )
     client = fake_llm(
         [
             *_uncertainty_pause_script(),
@@ -501,10 +551,42 @@ def test_staff_approval_resumes_the_run_and_books_the_appointment(db, seeded, fa
     assert [(e.status, e.resolution_note) for e in db.query(Escalation).all()] == [
         ("approved", note)
     ]
-    # The note reached the agents as guidance ...
-    assert any(note in json.dumps(call["messages"]) for call in client.chat.completions.calls)
-    # ... and reaches the patient through nothing at all: not the answer, and
-    # not the state projection the portal renders (routes_workflows).
+    provider_messages = json.dumps(
+        [call["messages"] for call in client.chat.completions.calls]
+    )
+    assert "John Smith" not in provider_messages
+    assert "jane.doe@example.com" not in provider_messages
+    assert "+49 176 12345678" not in provider_messages
+    assert "[REDACTED_NAME]" in provider_messages
+    assert "[REDACTED_EMAIL]" in provider_messages
+    assert "[REDACTED_PHONE]" in provider_messages
+
+    guidance = resumed.state["staff_guidance"]
+    assert "John Smith" not in guidance
+    assert "jane.doe@example.com" not in guidance
+    assert "12345678" not in guidance
+
+    pii_events = (
+        db.query(AuditEvent)
+        .filter_by(
+            action="safety.pii_redacted",
+            entity_type="workflow_run",
+            entity_id=run.id,
+        )
+        .all()
+    )
+    assert [event.metadata_json for event in pii_events] == [
+        {
+            "node": "escalate",
+            "counts": {"email": 1, "phone": 1, "name": 1},
+        }
+    ]
+    assert all("John Smith" not in str(event.metadata_json) for event in pii_events)
+    assert all("jane.doe@example.com" not in str(event.metadata_json) for event in pii_events)
+    assert all("12345678" not in str(event.metadata_json) for event in pii_events)
+
+    # The guidance reaches the patient through nothing at all: not the answer,
+    # and not the state projection the portal renders (routes_workflows).
     assert note not in (resumed.state["final_response"] or "")
     assert note not in json.dumps(_patient_state(resumed.state))
     assert len(client.chat.completions.calls) == 12

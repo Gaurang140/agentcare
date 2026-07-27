@@ -1,7 +1,7 @@
 """Coordinator: a pure decision node, no tools. Decides the next
 administrative step from the current workflow state and appends it to
-state["plan"] - the ordered trace of decisions the graph controller (task
-11) walks to route between nodes.
+state["plan"] - the ordered trace the graph controller walks to route
+between nodes.
 """
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ def _user_prompt(state: AgentState, request_text: str) -> str:
         f"Error, if any: {state.get('error')}"
     )
     # Only set on a run a staff member approved out of the escalate node
-    # (agents/graph.py): the note that unblocked it, so the decision that
-    # follows is made with what the human clarified rather than against the
+    # (agents/graph.py): the redacted copy of the note that unblocked it, so
+    # the decision that follows uses what the human clarified rather than the
     # same ambiguity that stopped the run.
     guidance = state.get("staff_guidance")
     if guidance:

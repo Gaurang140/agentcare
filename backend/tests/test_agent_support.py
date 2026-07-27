@@ -1,3 +1,5 @@
+from sqlalchemy import event
+
 from app.agents.support import record_agent_exit, redact_request_for_agent
 from app.models import AuditEvent
 
@@ -21,11 +23,22 @@ def test_redact_request_for_agent_redacts_and_audits_counts(db, seeded):
 
 
 def test_record_agent_exit_commits_named_audit_event(db, seeded):
-    record_agent_exit(db, "coordinator", 42, {"next_step": "finalize"})
+    commits = 0
 
-    row = db.query(AuditEvent).filter_by(
-        action="agent.coordinator.completed",
-        entity_type="workflow_run",
-        entity_id=42,
-    ).one()
+    def _record_commit(_session):
+        nonlocal commits
+        commits += 1
+
+    event.listen(db, "after_commit", _record_commit)
+    try:
+        record_agent_exit(db, "coordinator", 42, {"next_step": "finalize"})
+        row = db.query(AuditEvent).filter_by(
+            action="agent.coordinator.completed",
+            entity_type="workflow_run",
+            entity_id=42,
+        ).one()
+    finally:
+        event.remove(db, "after_commit", _record_commit)
+
+    assert commits == 1
     assert row.metadata_json == {"next_step": "finalize"}

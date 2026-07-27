@@ -26,8 +26,9 @@ The escalate node is where it stops, on LangGraph's `interrupt()`: the run
 is checkpointed mid-graph, its WorkflowRun goes to status `waiting_approval`
 and nothing moves until a staff member decides
 (`workflow_service.resume_with_decision`). Approving an uncertainty case
-sends the run back to the coordinator with the reviewer's note as guidance,
-so the work the patient asked for still happens; a rejection, or any run
+sends the run back to the coordinator with a PII-redacted copy of the
+reviewer's note as guidance, so the work the patient asked for still happens;
+the raw note stays on the staff-only Escalation row. A rejection, or any run
 whose agent had already failed, ends on a deterministic template instead.
 
 The same applies to the ordering rules the coordinator prompt states
@@ -142,12 +143,13 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     the second pass, which finds the row the first pass left.
 
     What the decision does depends on what the run was stopped for. An
-    approved uncertainty case goes back to the coordinator with the staff
-    note as guidance and no block left on the state, so the work the patient
-    asked for actually happens. Anything else - a rejection, or a run whose
-    agent already failed and has nothing to carry on with - ends here on a
-    deterministic template. The escalation row survives either way, resolved,
-    as the audit trail of who decided what.
+    approved uncertainty case goes back to the coordinator with a redacted
+    copy of the staff note as guidance and no block left on the state, so the
+    work the patient asked for actually happens. The raw note remains on the
+    Escalation row. Anything else - a rejection, or a run whose agent already
+    failed and has nothing to carry on with - ends here on a deterministic
+    template. The escalation row survives either way, resolved, as the audit
+    trail of who decided what.
     """
     db = _db(config)
     workflow_id = state.get("workflow_id")
@@ -174,7 +176,7 @@ def _escalate_node(state: AgentState, config: RunnableConfig) -> dict:
     decision = interrupt({"escalation_id": escalation_id, "workflow_id": workflow_id})
 
     approved = bool(decision.get("approved"))
-    guidance = (decision.get("note") or "").strip() or None
+    guidance = (decision.get("guidance") or "").strip() or None
     write_audit(
         db,
         decision.get("reviewer_id"),

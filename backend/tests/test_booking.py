@@ -410,4 +410,3 @@ def test_list_departments_returns_seeded_departments(db, seeded):
     names = {d["name"] for d in list_departments(db)}
     assert "Cardiology" in names
     assert len(names) >= 5
-

@@ -12,7 +12,7 @@ from app.models import PatientDocument, RequiredDocument
 from app.services.storage import get_storage
 from app.tools.audit_tools import write_audit
 
-_PDF_EXTRACT_CHARS = 1500
+_EXTRACT_CHARS = 1500
 
 # Filename substring -> document_type, checked before any caller-supplied
 # LLM classification. The first matching hint group wins.
@@ -32,7 +32,7 @@ def _classify_by_filename(filename: str) -> str | None:
 
 
 def extract_text(filename: str, content: bytes) -> str:
-    """First ~1500 chars of PDF text, decoded .txt content, or "" otherwise.
+    """First 1500 chars of PDF or decoded .txt text, or "" otherwise.
 
     A .pdf that fails to parse (corrupt bytes, not actually a PDF) yields ""
     rather than raising - extraction is best-effort, never a hard failure
@@ -45,9 +45,9 @@ def extract_text(filename: str, content: bytes) -> str:
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
         except Exception:  # noqa: BLE001 - extraction is best-effort
             return ""
-        return text[:_PDF_EXTRACT_CHARS]
+        return text[:_EXTRACT_CHARS]
     if lowered.endswith(".txt"):
-        return content.decode("utf-8", errors="ignore")
+        return content.decode("utf-8", errors="ignore")[:_EXTRACT_CHARS]
     return ""
 
 
@@ -73,7 +73,10 @@ def store_document(
             "document.duplicate_detected",
             "patient_document",
             existing.id,
-            {"patient_id": patient_id, "filename": filename},
+            {
+                "existing_document_id": existing.id,
+                "reason": "checksum_match",
+            },
         )
         db.commit()
         return {
