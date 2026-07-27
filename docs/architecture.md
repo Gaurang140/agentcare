@@ -231,7 +231,7 @@ it, since `STORAGE_BACKEND` defaults to `local`).
   3000, backend 8000, Prometheus 9090, Grafana 3001 (`admin` / `admin`).
 - GCP (manifests and modules committed and validated, cluster not yet provisioned). Backend and
   frontend each run as a `Deployment` behind a `ClusterIP` `Service` on a GKE Autopilot cluster
-  (`infra/k8s/base/backend.yaml`, `frontend.yaml`; `infra/terraform/modules/gke-autopilot`). A
+  (`infra/k8s/base/backend.yaml`, `frontend.yaml`; `infra/terraform/modules/gke-autopilot`).
   Both stay at one replica. The backend runs its APScheduler jobs (reminders, stalled-workflow
   sweep) in the same process that serves requests, with no distributed lock, so a second replica
   would fire every job twice; scaling it out means moving those jobs to a worker first

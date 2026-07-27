@@ -6,8 +6,7 @@
 #
 # This workflow never reads secrets.SUBMISSION_TOKEN. That token belongs to
 # .github/workflows/agentcare-checks.yml (the hackathon's own judging
-# pipeline, see .superpowers/sdd/task-6-report.md) and must stay isolated
-# from every other workflow in this repo.
+# pipeline) and must stay isolated from every other workflow in this repo.
 name: deploy
 
 on:

@@ -489,8 +489,10 @@ state at that time rather than assumed now.
 
 **Status:** Presidio implemented now (`backend/app/safety/pii.py`, pinned in the root
 `requirements.txt`). NeMo Guardrails evaluated and deferred: no code, no dependency and no
-setting for it in this repo. Google Model Armor implemented on 2026-07-27 for the deployed path
-(`backend/app/safety/model_armor.py`), when the GCP project it needs came into existence.
+setting for it in this repo. Google Model Armor: adapter code implemented on 2026-07-27
+(`backend/app/safety/model_armor.py`) and the Terraform template committed, both awaiting the
+first `tofu apply` against a real GCP project - like the rest of the GCP path, nothing has
+been applied yet (see `docs/deployment-gcp.md`).
 AWS Bedrock Guardrails and LLM Guard rejected. Every version and date below was verified on
 2026-07-25, and the Model Armor bullet again on 2026-07-27.
 
@@ -548,8 +550,9 @@ dependency.
   responses as a service call: available in `europe-west3` (the region this deployment already
   uses for EU data residency), with EU residency controls, English and German detection and a
   free tier of 2 million screened tokens per month. This ADR first recorded it as designed and
-  not applied, for one reason only: it is a GCP runtime dependency and no GCP project existed.
-  That reason ended on 2026-07-27 with the first real deploy, so it shipped.
+  not applied, because it is a GCP runtime dependency and no GCP project existed. The adapter
+  code and Terraform landed on 2026-07-27; they go live with the first real `tofu apply`,
+  which has still not happened.
   What shipped is a provider, not a layer. The injection guard already had two layers, and the
   second one is a slot: one optional model call, enabled by configuration, fail-open on any
   error. Model Armor fills that slot when `MODEL_ARMOR_TEMPLATE` is set and the Groq
@@ -570,11 +573,13 @@ dependency.
   | Final healthcare-boundary sanitizing of the answer | deterministic `sanitize_agent_output` | keeps the last word, so a cloud outage can never let a diagnosis through |
 
   The SDP row is the one worth stating twice, because turning those settings on is a one-line
-  change someone will be tempted to make: Presidio already redacts before any text leaves the
-  process, so the copy Model Armor sees carries `[REDACTED_EMAIL]` and friends rather than
-  patient values, and a cloud detector would be a second answer to a question already answered
-  in-process. The Terraform module carries that reasoning as a comment on the line where
-  `sdp_settings` would go. Filter settings that are on: prompt injection and jailbreak at
+  change someone will be tempted to make: on the prompt path Presidio redacts before the text
+  leaves the process, so the copy Model Armor sees carries `[REDACTED_EMAIL]` and friends
+  rather than patient values. (The response screen sends the drafted answer as composed from
+  database rows - it is not patient-typed text, but it is not Presidio-redacted either; a
+  second redaction pass there is recorded as an open hardening item.) A cloud detector would
+  be a second answer to a question already answered in-process. The Terraform module carries
+  that reasoning as a comment on the line where `sdp_settings` would go. Filter settings that are on: prompt injection and jailbreak at
   confidence level HIGH, which is Google's own recommendation for minimizing false positives and
   matters here because a false positive blocks a real patient from booking, plus malicious URI
   detection. Cost of the choice: one network round trip in a request the patient is waiting on,

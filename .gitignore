@@ -14,3 +14,4 @@ node_modules/
 *.tfstate.backup
 .DS_Store
 .superpowers/
+docs/superpowers/
