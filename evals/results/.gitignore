@@ -1,0 +1,6 @@
+# Eval runs write timestamped files here and they are not repository content.
+# The one exception is the committed no-key baseline, which carries the
+# measured safety number the README points at.
+*
+!.gitignore
+!*nokey-baseline*
