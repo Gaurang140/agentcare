@@ -16,6 +16,7 @@ import os
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from app.config import settings
 from app.db import session as db_session_module
 from app.logging_setup import get_logger
 from app.services.workflow_service import escalate_stalled_workflows
@@ -56,7 +57,7 @@ def start_scheduler() -> BackgroundScheduler | None:
     Returns the scheduler (or None under TESTING) so the lifespan can hold
     onto it for a clean shutdown."""
     global _scheduler
-    if os.environ.get("TESTING"):
+    if os.environ.get("TESTING") or not settings.scheduler_enabled:
         return None
     if _scheduler is not None:
         return _scheduler

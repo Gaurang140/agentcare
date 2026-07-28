@@ -76,7 +76,7 @@ export IMAGE_TAG="$(git rev-parse HEAD)"
 export DOCUMENTS_BUCKET="YOUR_BUCKET"
 export MODEL_ARMOR_TEMPLATE="projects/YOUR_PROJECT_ID/locations/europe-west3/templates/agentcare-guard"
 export PUBLIC_URL="https://YOUR_DOMAIN"
-export LLM_PROFILE="groq"
+export LLM_PROFILE="vertex"
 export LANGFUSE_PUBLIC_KEY=""
 export LANGFUSE_BASE_URL="https://cloud.langfuse.com"
 export LANGFUSE_SAMPLE_RATE="0"
@@ -88,9 +88,9 @@ kubectl kustomize "$RENDERED_K8S/overlays/gcp"
 kubectl --namespace=agentcare apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp"
 ```
 
-The output path must not already exist. Terraform does not grant Vertex AI by
-default, so this manual example uses the configured Groq profile. Rendering
-never proves that cloud resources, credentials or a live model provider exist.
+The output path must not already exist. Terraform grants the runtime Vertex
+role by default. Rendering never proves that cloud resources, credentials or a
+live model provider exist.
 
 ## Apply in order
 
@@ -136,11 +136,10 @@ Ingress, a `FrontendConfig` that redirects HTTP to HTTPS and the long-timeout
 backend `/metrics` endpoint through Google Managed Service for Prometheus. The
 backend container sets `SKIP_STARTUP_MIGRATIONS=true`.
 
-The backend uses `Recreate`, so a planned upgrade deletes the old Pod before
-creating its replacement. This causes brief downtime and avoids rolling
-overlap, but it is not a distributed singleton guarantee for failures or
-manual Pod operations. Keep one replica until scheduled work moves to an
-external worker or gains a distributed lock.
+The GCP overlay runs two rolling backend and frontend replicas with
+`maxUnavailable: 0`, startup probes, graceful termination and disruption
+budgets. Recurring jobs run as separate `Forbid` CronJobs, so API replicas do
+not duplicate scheduled work.
 
 ## Verify
 

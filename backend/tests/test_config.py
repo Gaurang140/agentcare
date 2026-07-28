@@ -63,6 +63,12 @@ def test_langfuse_sampling_is_disabled_by_default():
     assert settings.langfuse_sample_rate == 0
 
 
+def test_in_process_scheduler_is_enabled_only_as_a_local_default():
+    settings = Settings(_env_file=None)
+
+    assert settings.scheduler_enabled is True
+
+
 @pytest.mark.parametrize("sample_rate", [-0.01, 1.01])
 def test_langfuse_sampling_rejects_values_outside_zero_to_one(sample_rate):
     with pytest.raises(ValidationError, match="langfuse_sample_rate"):

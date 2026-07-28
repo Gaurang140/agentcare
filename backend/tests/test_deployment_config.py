@@ -46,7 +46,7 @@ def _make_dry_run(target: str) -> str:
             "SUBNETWORK_NAME=default",
             "ENABLE_CLOUD_SQL=true",
             "ENABLE_MODEL_ARMOR=true",
-            "ENABLE_VERTEX_AI=false",
+            "ENABLE_VERTEX_AI=true",
         ],
         cwd=REPO_ROOT,
         check=True,
@@ -563,13 +563,13 @@ def test_ci_defaults_to_read_only_and_verifies_kubeconform_archive():
     assert "v0.7.0" not in install
 
 
-def test_ci_adds_postgres_constraint_coverage_without_replacing_sqlite():
+def test_ci_runs_tests_and_migrations_against_postgres_17():
     workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
     backend = workflow["jobs"]["test"]
     postgres = backend["services"]["postgres"]
 
     assert postgres == {
-        "image": "postgres:16",
+        "image": "postgres:17",
         "env": {
             "POSTGRES_DB": "agentcare_test",
             "POSTGRES_USER": "agentcare_test",
@@ -594,8 +594,10 @@ def test_ci_adds_postgres_constraint_coverage_without_replacing_sqlite():
         if isinstance(step.get("run"), str)
     )
     assert "pytest -q backend evals/test_evidence_safety.py" in backend_commands
-    assert workflow["jobs"]["migrations"]["env"]["DATABASE_URL"].startswith(
-        "sqlite:///"
+    migrations = workflow["jobs"]["migrations"]
+    assert migrations["services"]["postgres"]["image"] == "postgres:17"
+    assert migrations["env"]["DATABASE_URL"].startswith(
+        "postgresql+psycopg://"
     )
 
 
@@ -1059,6 +1061,16 @@ def test_platform_bundle_owns_the_agentcare_namespace_runtime_identity_and_relea
             "verbs": ["get", "create", "patch", "delete", "watch"],
         },
         {
+            "apiGroups": ["batch"],
+            "resources": ["cronjobs"],
+            "verbs": ["get", "create", "patch"],
+        },
+        {
+            "apiGroups": ["policy"],
+            "resources": ["poddisruptionbudgets"],
+            "verbs": ["get", "create", "patch"],
+        },
+        {
             "apiGroups": ["networking.k8s.io"],
             "resources": ["ingresses"],
             "verbs": ["get", "list", "create", "patch"],
@@ -1241,7 +1253,7 @@ def test_make_uses_one_complete_terraform_input_set_for_up_and_down():
         '-var="subnetwork_name=default"',
         '-var="enable_cloud_sql=true"',
         '-var="enable_model_armor=true"',
-        '-var="enable_vertex_ai=false"',
+        '-var="enable_vertex_ai=true"',
     }
 
     for target in ("gcp-up", "gcp-down", "gcp-cleanup"):
@@ -1451,7 +1463,15 @@ fi
 """,
     )
     fake_command("gcloud", "#!/bin/bash\nexit 0\n")
-    fake_command("kubectl", "#!/bin/bash\nexit 0\n")
+    fake_command(
+        "kubectl",
+        """#!/bin/bash
+if [[ " $* " == *" jsonpath="* ]]; then
+  printf 'ZmFrZQ=='
+fi
+exit 0
+""",
+    )
     fake_command(
         "git",
         """#!/bin/bash

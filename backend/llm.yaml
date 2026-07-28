@@ -36,7 +36,14 @@ profiles:
   vertex:
     provider: google_genai
     model: gemini-2.5-flash
+    timeout: 30
+    max_retries: 3     # three total attempts: initial call plus two retries
+    requests_per_second: 2
+    burst_size: 2
     vertexai: true
+    location: global
+    temperature: 0
+    max_output_tokens: 1024
 
 # Optional second profile tried once when the primary exhausts its
 # transport retries (same role as LLM_FALLBACK_BASE_URL, which wins when

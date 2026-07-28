@@ -125,3 +125,39 @@ def test_start_scheduler_is_a_noop_under_testing_env():
     # never actually start a BackgroundScheduler during the test suite.
     assert start_scheduler() is None
     stop_scheduler()  # must not raise even though nothing started
+
+
+def test_start_scheduler_is_a_noop_when_external_jobs_own_the_schedule(
+    monkeypatch,
+):
+    import app.scheduler as scheduler_module
+
+    monkeypatch.delenv("TESTING", raising=False)
+    monkeypatch.setattr(scheduler_module.settings, "scheduler_enabled", False)
+    monkeypatch.setattr(
+        scheduler_module,
+        "BackgroundScheduler",
+        lambda: (_ for _ in ()).throw(AssertionError("scheduler started")),
+    )
+
+    assert scheduler_module.start_scheduler() is None
+
+
+def test_job_command_dispatches_exactly_one_job(monkeypatch):
+    import app.jobs as jobs_module
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        jobs_module,
+        "_run_reminder_job",
+        lambda: called.append("reminders"),
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "_run_stalled_job",
+        lambda: called.append("recovery"),
+    )
+
+    jobs_module.main(["reminders"])
+
+    assert called == ["reminders"]

@@ -42,5 +42,5 @@ variable "enable_model_armor" {
 variable "enable_vertex_ai" {
   description = "Grant the backend service account roles/aiplatform.user for the optional Vertex model profile. The Vertex AI API must also be enabled."
   type        = bool
-  default     = false
+  default     = true
 }

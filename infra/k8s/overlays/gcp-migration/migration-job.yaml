@@ -1,4 +1,4 @@
-# This is the sole Kubernetes migration and seed owner. The long-running
+# This is the sole Kubernetes migration and staff-provisioning owner. The long-running
 # backend Deployment skips startup migrations.
 #
 # Job specs are immutable. Delete a prior backend-migrate Job before applying
@@ -32,7 +32,13 @@ spec:
           securityContext:
             readOnlyRootFilesystem: false
             allowPrivilegeEscalation: false
-          args: ["python", "-c", "print('migrate+seed done')"]
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              : "${AGENTCARE_STAFF_EMAIL:?agentcare-secrets is missing AGENTCARE_STAFF_EMAIL}"
+              : "${AGENTCARE_STAFF_PASSWORD:?agentcare-secrets is missing AGENTCARE_STAFF_PASSWORD}"
+              alembic upgrade head
+              python -m app.db.provision_staff
           envFrom:
             - secretRef:
                 name: agentcare-secrets

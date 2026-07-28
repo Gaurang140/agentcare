@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     # staff cookie (for cron-style callers with no browser session). Empty
     # (the default) means that route falls back to require_role("staff").
     internal_task_token: str = ""
+    # Local/docker-compose runs one process and can own APScheduler. GKE
+    # disables it and uses one Kubernetes CronJob per task.
+    scheduler_enabled: bool = True
 
     # Storage: local | gcs
     storage_backend: str = "local"
