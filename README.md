@@ -98,9 +98,11 @@ backend/
     agents/          graph, prompts, roles and the single model boundary
     api/             patient, staff, auth, workflow and document routes
     auth/            password, cookie and backend RBAC controls
+    db/              engine, sessions and database configuration
     models/          SQLAlchemy domain entities
     observability/   privacy-safe optional Langfuse callbacks
     safety/          scope, injection, PII, Model Armor and output controls
+    schemas/         API request and response contracts
     services/        workflow, document and storage coordination
     tools/           transactional domain actions and audit writes
   alembic/           database migrations
@@ -112,7 +114,8 @@ evals/               golden safety dataset and scoring scripts
 infra/
   bootstrap/         remote state, APIs and narrow GitHub deployment trust
   terraform/         GCP infrastructure
-  k8s/               reusable manifests and GCP overlays
+  k8s/               application manifests, GCP overlays and platform RBAC
+    platform/        operator-owned namespace, runtime KSA and release RoleBinding
 monitoring/          local Prometheus and provisioned Grafana dashboard
 scripts/             synthetic seed and safe manifest renderer
 ```
@@ -130,6 +133,19 @@ The map above is the repository ownership guide.
 - a Groq key only for live model-assisted administrative requests
 
 No model key is needed for tests or deterministic safety paths.
+
+### Clone and configure a local checkout
+
+```bash
+git clone https://github.com/OWNER/REPOSITORY.git agentcare
+cd agentcare
+cp .env.example .env
+```
+
+`.env` is for this local checkout only. It is ignored and is never copied to
+GKE or GitHub. Production runtime credentials instead live in the
+operator-created Kubernetes Secret `agentcare/agentcare-secrets`; the sole
+challenge credential is GitHub Secret `SUBMISSION_TOKEN`.
 
 ### Docker Compose
 
@@ -252,30 +268,33 @@ kubectl kustomize infra/k8s/overlays/gcp >/dev/null
 ## Delivery and operations
 
 Terraform is intentionally operator-controlled. GitHub does not receive
-project-admin access. After one-time setup:
+project-admin access. The canonical lifecycle is:
 
 ```bash
+make gcp-bootstrap PROJECT_ID=your-project \
+  GITHUB_REPOSITORY_ID=NUMERIC_REPOSITORY_ID \
+  GITHUB_OWNER_ID=NUMERIC_OWNER_ID
 make gcp-up PROJECT_ID=your-project
+# Operator: create the database user and agentcare/agentcare-secrets, then choose the URL.
 make gcp-release \
   PROJECT_ID=your-project \
-  PUBLIC_URL=https://your-new-host
+  PUBLIC_URL=https://your-new-host \
+  ENABLE_DELIVERY=true
 ```
 
-Or run both in order:
-
-```bash
-make gcp-deploy \
-  PROJECT_ID=your-project \
-  PUBLIC_URL=https://your-new-host
-```
-
-`gcp-deploy` assumes bootstrap, the Cloud SQL database/user, DNS and the
-`agentcare-secrets` Kubernetes Secret already exist. This is deliberate:
-credential values never enter Terraform state or Git.
+`make gcp-bootstrap` is once per project. `make gcp-up` reviews and applies
+Terraform, then installs the operator-owned platform bundle. The operator
+creates the Cloud SQL user and `agentcare/agentcare-secrets`, discovers the
+public URL from Terraform and configures DNS before the explicit first release.
+Those credentials never enter Git, image layers, Terraform state or GitHub
+variables.
 
 Once `DEPLOY_ENABLED=true`, each successful push to `main` automatically
-builds immutable commit images, migrates the database, rolls out GKE and checks
-the configured public health endpoint.
+builds immutable commit images, migrates the database, rolls out the existing
+GKE application resources and checks the configured public health endpoint.
+Normal code pushes never run Terraform and never recreate GKE, Cloud SQL, IAM,
+networking, DNS or the load balancer. `make gcp-down` remains a manual,
+reviewed destroy operation.
 
 Use:
 

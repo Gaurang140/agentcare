@@ -15,24 +15,31 @@ resources the main Terraform stack and GitHub application release need.
 No service-account key is created. No GitHub identity can apply or destroy
 Terraform.
 
-## Trust condition
+## Trust condition and boundary
 
-A GitHub token must match:
+The production release job requests `id-token: write`, then presents a GitHub
+OIDC JWT to Workload Identity Federation. WIF issues a short-lived credential
+for `agentcare-github-deployer` only when the JWT has all of these exact
+properties:
 
 - immutable repository ID
 - immutable owner ID
 - `refs/heads/main`
 - environment `production`
-- workflow `.github/workflows/ci.yml` on `main`
+- workflow ref `.github/workflows/ci.yml@refs/heads/main`
 
-The deployer receives only:
+The deployer receives only Google IAM needed before Kubernetes authorization:
 
 - `roles/artifactregistry.writer`
 - `roles/container.clusterViewer`
-- `roles/container.developer`
 - `roles/serviceusage.serviceUsageConsumer`
 
-It cannot change project IAM, delete the cluster or delete Cloud SQL.
+Those roles upload immutable images and discover the cluster. They do not grant
+Kubernetes writes. `make gcp-up` installs the separate operator-owned platform
+bundle, whose `agentcare` namespace RoleBinding authorizes the exact release
+operations. The deployer cannot change project IAM, apply Terraform, delete the
+cluster or delete Cloud SQL. It cannot read or create Secrets, change RBAC,
+namespaces or KSAs, or use `exec`, `attach`, `portforward` or impersonation.
 
 ## Apply
 

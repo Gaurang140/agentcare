@@ -32,22 +32,21 @@ flowchart LR
     LOGIN["Choose Google account<br/>and project"] --> BOOT["make gcp-bootstrap<br/>once"]
     BOOT --> UP["make gcp-up<br/>review Terraform plan"]
     UP --> SECRET["Create database, user,<br/>runtime Secret and DNS"]
-    SECRET --> RELEASE["make gcp-release"]
+    SECRET --> RELEASE["make gcp-release<br/>ENABLE_DELIVERY=true"]
     RELEASE --> AUTO["Later main pushes<br/>release automatically"]
     AUTO --> DOWN["make gcp-down<br/>when finished"]
 ```
 
-After one-time bootstrap and secret setup, the combined command is:
+Follow this order exactly: run `make gcp-bootstrap` once; run `make gcp-up` to
+review/apply Terraform and install the platform bundle; create the database
+user and `agentcare/agentcare-secrets` as the operator; discover/configure the
+public URL; then run `make gcp-release ENABLE_DELIVERY=true`. Later successful
+`main` pushes are application-only releases. `make gcp-down` is a manual,
+reviewed destroy. Do not use a code push to provision or replace infrastructure.
 
-```bash
-make gcp-deploy \
-  PROJECT_ID=your-project \
-  PUBLIC_URL=https://your-new-host
-```
-
-It runs infrastructure apply and application release in order. It does not
-invent or persist missing credentials. If `agentcare-secrets` is absent, the
-release stops with a direct instruction.
+The platform bundle is operator-owned: it creates the `agentcare` namespace,
+the runtime KSA and the deployer RoleBinding. CI only releases application
+resources through that pre-existing namespaced binding.
 
 ## 1. Check local tools
 
@@ -258,7 +257,9 @@ terraform -chdir=infra/terraform output
 ## 7. Create the database and runtime Secret
 
 Terraform creates the private Cloud SQL instance but does not put a database
-password into state.
+password into state. These are operator actions, not CI actions: GitHub never
+reads or creates the Secret and cannot access Secrets, RBAC, namespaces, KSAs,
+`exec`, `attach`, `portforward` or impersonation.
 
 Create the application database:
 
@@ -297,7 +298,7 @@ export GKE_CONTEXT="gke_${PROJECT_ID}_${GKE_LOCATION}_${GKE_CLUSTER}"
 gcloud container clusters get-credentials "$GKE_CLUSTER" \
   --region="$GKE_LOCATION" \
   --project="$PROJECT_ID"
-kubectl --context "$GKE_CONTEXT" get namespaces
+kubectl --context "$GKE_CONTEXT" get namespace agentcare
 ```
 
 Read model and optional tracing secrets without echo:
@@ -332,10 +333,10 @@ DATABASE_URL="postgresql+psycopg://agentcare:${DB_PASSWORD}@${DB_HOST}:5432/agen
 ```
 
 ```bash
-kubectl --context "$GKE_CONTEXT" create secret generic agentcare-secrets \
+kubectl --context "$GKE_CONTEXT" --namespace=agentcare create secret generic agentcare-secrets \
   --from-env-file="$SECRET_ENV" \
   --dry-run=client -o yaml \
-  | kubectl --context "$GKE_CONTEXT" apply -f -
+  | kubectl --context "$GKE_CONTEXT" --namespace=agentcare apply -f -
 rm -f "$SECRET_ENV"
 unset DB_PASSWORD DATABASE_URL JWT_SECRET INTERNAL_TASK_TOKEN
 unset LLM_API_KEY LANGFUSE_SECRET_KEY
@@ -344,8 +345,8 @@ unset LLM_API_KEY LANGFUSE_SECRET_KEY
 Verify only the Secret name and keys, not values:
 
 ```bash
-kubectl --context "$GKE_CONTEXT" get secret agentcare-secrets -o name
-kubectl --context "$GKE_CONTEXT" get secret agentcare-secrets \
+kubectl --context "$GKE_CONTEXT" --namespace=agentcare get secret agentcare-secrets -o name
+kubectl --context "$GKE_CONTEXT" --namespace=agentcare get secret agentcare-secrets \
   -o go-template='{{range $k, $_ := .data}}{{printf "%s\n" $k}}{{end}}'
 ```
 
@@ -368,14 +369,15 @@ export INGRESS_IP="$(
 For a hackathon demo without buying a domain:
 
 ```bash
-export PUBLIC_HOST="agentcare.${INGRESS_IP//./-}.sslip.io"
+export PUBLIC_HOST="${INGRESS_IP}.sslip.io"
 export PUBLIC_URL="https://${PUBLIC_HOST}"
 printf 'new-public-url=%s\n' "$PUBLIC_URL"
 ```
 
 For a company domain, create an A record pointing to `INGRESS_IP`, then set
 `PUBLIC_URL` to that HTTPS origin. Never reuse a hostname that points at a
-destroyed load balancer.
+destroyed load balancer. The production workflow publishes this final URL in
+the GitHub `production` environment and its job summary after a release.
 
 ## 9. Configure Langfuse, or leave it off
 
@@ -399,28 +401,40 @@ For normal low-volume observation, use `0.1`. The secret key is already in the
 Kubernetes Secret. Langfuse receives an allowlist of operational fields, not
 prompts, responses, patient identifiers or tool values.
 
-## 10. Release and wait
+## 10. Migration preflight, release and wait
+
+Before the first release that includes the duplicate-appointment migration,
+check for an existing overlapping appointment. If one exists, the operator must
+cancel one appointment through the normal application/domain path so its audit
+history remains intact, then rerun the release. Never delete the row or bypass
+the migration to force deployment.
+
+Release only after that preflight succeeds:
 
 ```bash
 make gcp-release \
   PROJECT_ID="$PROJECT_ID" \
   REGION="$REGION" \
   PUBLIC_URL="$PUBLIC_URL" \
+  ENABLE_DELIVERY=true \
   LLM_PROFILE=groq \
   LANGFUSE_PUBLIC_KEY="$LANGFUSE_PUBLIC_KEY" \
   LANGFUSE_BASE_URL="$LANGFUSE_BASE_URL" \
   LANGFUSE_SAMPLE_RATE="$LANGFUSE_SAMPLE_RATE"
 ```
 
-The command:
+The local, operator-side command:
 
 1. synchronizes non-secret GitHub production variables
-2. checks the exact cluster for `agentcare-secrets`
+2. checks only that `agentcare/agentcare-secrets` exists
 3. confirms local `main` equals `origin/main`
-4. dispatches `ci.yml`
-5. waits for the workflow result
+4. arms `DEPLOY_ENABLED` only immediately before dispatching `ci.yml`
+5. waits for the workflow result and disables delivery if a post-arm release
+   fails
 
 After this activation, every successful push to `main` releases automatically.
+It does not run Terraform or recreate GKE, Cloud SQL, IAM, networking, DNS or
+the load balancer.
 
 ## 11. Verify the environment
 
@@ -442,9 +456,9 @@ make gcp-status \
 Direct checks:
 
 ```bash
-kubectl --context "$GKE_CONTEXT" get pods,services,ingress
-kubectl --context "$GKE_CONTEXT" rollout status deployment/backend
-kubectl --context "$GKE_CONTEXT" rollout status deployment/frontend
+kubectl --context "$GKE_CONTEXT" --namespace=agentcare get pods,services,ingress
+kubectl --context "$GKE_CONTEXT" --namespace=agentcare rollout status deployment/backend
+kubectl --context "$GKE_CONTEXT" --namespace=agentcare rollout status deployment/frontend
 ```
 
 Replace `YOUR_DOMAIN` with the newly created hostname:
@@ -589,9 +603,20 @@ What remains after `gcp-down`:
 Keeping bootstrap makes the next `gcp-up` possible. Destroy it only after the
 main state is no longer needed and its bucket is empty.
 
+The current deployment uses the shared/default VPC, so this runbook deliberately
+does not set Terraform `deletion_policy = "ABANDON"` or automatically adopt an
+existing service-networking connection. Abandoning the connection can leave the
+managed range behind; adopting/updating a shared connection can affect unrelated
+services. Wait for Google's delayed cleanup and retry `make gcp-cleanup`. A
+future dedicated AgentCare VPC can move both connection and range into durable
+bootstrap state.
+
 ## Fresh-clone recovery
 
-A new clone can operate the main stack because its state is in GCS:
+A new clone can operate the main stack because its state is in GCS. It does not
+need, contain or recreate local `.env` values; those remain local-only. The
+existing operator-owned `agentcare/agentcare-secrets` Secret stays in the
+cluster, and `SUBMISSION_TOKEN` stays only in GitHub Secrets:
 
 ```bash
 git clone https://github.com/OWNER/REPOSITORY.git
@@ -615,8 +640,9 @@ trust resources.
 | billing disabled | link a billing account before bootstrap |
 | default VPC absent | pass existing `NETWORK_NAME` and `SUBNETWORK_NAME` |
 | WIF denied | confirm repository/owner IDs, `main`, environment and `ci.yml` |
-| `agentcare-secrets` missing | complete section 7 in the exact GKE context |
+| `agentcare-secrets` missing | operator completes section 7 in the exact `agentcare` namespace |
 | certificate pending | verify `PUBLIC_HOST` resolves to `INGRESS_IP` and wait |
 | migration failed | inspect `kubectl logs job/backend-migrate` |
+| duplicate appointment migration preflight | cancel one existing overlapping appointment to preserve its audit trail, then rerun; never delete it or bypass the migration |
 | Model Armor unavailable | check template, PSC endpoint, private DNS and runtime IAM |
 | destroy leaves networking | wait and run `make gcp-cleanup` |

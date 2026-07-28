@@ -225,8 +225,8 @@ Check the keys directly without printing them:
 
 ## Enable Langfuse in GKE
 
-1. Put `LANGFUSE_SECRET_KEY` in the existing `agentcare-secrets` Kubernetes
-   Secret.
+1. Put `LANGFUSE_SECRET_KEY` in the existing operator-owned
+   `agentcare/agentcare-secrets` Kubernetes Secret.
 2. Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_BASE_URL` and
    `LANGFUSE_SAMPLE_RATE` to the GitHub `production` environment.
 3. Push a commit to `main`.

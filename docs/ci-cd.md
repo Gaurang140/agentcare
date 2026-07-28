@@ -3,7 +3,8 @@
 AgentCare separates infrastructure changes from application releases:
 
 - Terraform infrastructure is planned, reviewed and applied by an operator.
-- `.github/workflows/ci.yml` validates every change.
+- `.github/workflows/ci.yml` validates pushes to `main` and pull requests
+  targeting `main`.
 - The same workflow releases a successful `main` commit when
   `DEPLOY_ENABLED=true`.
 - `.github/workflows/agentcare-checks.yml` runs the challenge-owned checks.
@@ -50,12 +51,11 @@ The release job:
 4. otherwise builds and pushes backend and frontend images
 5. resolves both image digests
 6. gets credentials for the configured GKE cluster
-7. verifies `agentcare-secrets` exists
-8. runs the database migration Job and waits for completion
-9. applies the application overlay and waits for both rollouts
-10. verifies the cluster requests the expected commit tag
-11. checks `PUBLIC_URL/api/health`
-12. writes the SHA, digests and outcomes to the job summary
+7. runs the database migration Job and waits for completion
+8. applies the application overlay and waits for both rollouts
+9. verifies the cluster requests the expected commit tag
+10. checks `PUBLIC_URL/api/health`
+11. writes the SHA, digests and outcomes to the job summary
 
 There is no `latest` tag. A released Git SHA always names the same image.
 
@@ -77,21 +77,30 @@ CI remains active in both cases.
 
 ## Keyless Google authentication
 
-The bootstrap stack creates one Google service account for application
-delivery. It can write Artifact Registry images, view the cluster, update
-Kubernetes workloads and consume enabled APIs. It cannot change project IAM,
-apply Terraform, destroy GKE or delete Cloud SQL.
+The release job alone has `id-token: write`. Its authorization chain is exact:
 
-The Workload Identity Federation provider accepts a token only when all of
-these claims match:
+```text
+GitHub id-token:write
+  -> GitHub OIDC JWT
+  -> WIF condition: immutable repository ID, immutable owner ID,
+     refs/heads/main, production environment and the exact
+     .github/workflows/ci.yml@refs/heads/main workflow_ref
+  -> short-lived agentcare-github-deployer GSA credential
+  -> Google IAM: Artifact Registry upload, GKE cluster discovery and service use
+  -> GKE authentication as that GSA
+  -> agentcare namespace RoleBinding and its narrow release Role
+```
 
-- immutable GitHub repository ID
-- immutable GitHub owner ID
-- `refs/heads/main`
-- GitHub environment `production`
-- workflow ref ending in `.github/workflows/ci.yml@refs/heads/main`
+Google IAM and Kubernetes RBAC are separate decisions. Google IAM has only
+Artifact Registry writer, `roles/container.clusterViewer` and service-usage
+consumer; it discovers the cluster but does not grant Kubernetes writes. The
+platform-owned `agentcare` RoleBinding grants the release operations only in
+that namespace. No JSON service-account key exists in GitHub.
 
-No JSON service-account key exists in GitHub.
+The CI identity cannot read or create the runtime Secret, or access Secrets,
+RBAC objects, namespaces, Kubernetes service accounts, `exec`, `attach`,
+`portforward` or impersonation. It cannot apply Terraform, change Google IAM,
+destroy GKE or delete Cloud SQL.
 
 ## GitHub configuration
 
@@ -134,7 +143,9 @@ non-secret values:
 | `LANGFUSE_BASE_URL` | optional Langfuse region URL |
 | `LANGFUSE_SAMPLE_RATE` | `0` to `1`, default `0` |
 
-It also sets repository variable `DEPLOY_ENABLED=true`.
+It first sets repository variable `DEPLOY_ENABLED=false`; configuration sync
+never arms a release. `make gcp-release ENABLE_DELIVERY=true` performs the
+remaining preflights and arms delivery immediately before dispatch.
 
 These are configuration values, not credentials. Model, database, JWT and
 Langfuse secret values remain in the Kubernetes Secret.
@@ -160,7 +171,8 @@ DNS. Follow [GCP deployment](deployment-gcp.md), then:
 ```bash
 make gcp-release \
   PROJECT_ID=your-project \
-  PUBLIC_URL=https://your-new-host
+  PUBLIC_URL=https://your-new-host \
+  ENABLE_DELIVERY=true
 ```
 
 This checks the Kubernetes Secret, verifies local `main` equals `origin/main`,
@@ -174,8 +186,9 @@ git push origin main
 gh run watch
 ```
 
-Every successful `main` push releases automatically. A manual redeploy of the
-same commit reuses its immutable images:
+Every successful `main` push releases automatically. It is code-only: it does
+not run Terraform or recreate GKE, Cloud SQL, IAM, networking, DNS or the load
+balancer. A manual redeploy of the same commit reuses its immutable images:
 
 ```bash
 gh workflow run ci.yml --ref main
@@ -188,10 +201,10 @@ gh run watch
 
 | Secret | Location |
 |---|---|
-| Groq or compatible model key | local `.env`; GKE `agentcare-secrets` |
-| `JWT_SECRET` | local `.env`; GKE `agentcare-secrets` |
-| `DATABASE_URL` | GKE `agentcare-secrets` |
-| Langfuse secret key | local `.env`; GKE `agentcare-secrets` |
+| Groq or compatible model key | local `.env`; operator-created `agentcare/agentcare-secrets` |
+| `JWT_SECRET` | local `.env`; operator-created `agentcare/agentcare-secrets` |
+| `DATABASE_URL` | operator-created `agentcare/agentcare-secrets` |
+| Langfuse secret key | local `.env`; operator-created `agentcare/agentcare-secrets` |
 | submission token | GitHub Actions secret `SUBMISSION_TOKEN` |
 | Google credentials | local gcloud/ADC or short-lived GitHub OIDC |
 
@@ -217,7 +230,7 @@ the challenge dashboard before use. Do not paste it into a command argument.
 ```bash
 read -s SUBMISSION_TOKEN
 printf '\n'
-gh secret set SUBMISSION_TOKEN --body "$SUBMISSION_TOKEN"
+printf '%s' "$SUBMISSION_TOKEN" | gh secret set SUBMISSION_TOKEN
 unset SUBMISSION_TOKEN
 ```
 
@@ -251,7 +264,7 @@ make gcp-github-vars \
   LANGFUSE_SAMPLE_RATE=0.1
 ```
 
-Put only `LANGFUSE_SECRET_KEY` in `agentcare-secrets`. Tracing stays disabled
+Put only `LANGFUSE_SECRET_KEY` in `agentcare/agentcare-secrets`. Tracing stays disabled
 when either key is missing or the sample rate is zero. Exported attributes use
 the allowlist described in [observability](observability.md).
 
@@ -262,8 +275,9 @@ the allowlist described in [observability](observability.md).
 | deploy job skipped | `gh variable get DEPLOY_ENABLED` |
 | OIDC denied | bootstrap condition, production environment and `main` ref |
 | image push denied | deployer Artifact Registry role |
-| Secret check failed | create `agentcare-secrets` in the exact cluster |
+| operator-side release preflight reports a missing Secret | operator creates `agentcare/agentcare-secrets` in the exact cluster, then reruns `make gcp-release` |
 | migration failed | migration Job logs and `DATABASE_URL` |
+| duplicate-appointment preflight failed | cancel one existing overlapping appointment, preserve its audit trail, then rerun; never delete or bypass the migration |
 | rollout timed out | pod events, image pull and readiness probe |
 | public health failed | DNS, managed certificate, Ingress and backend health |
 | challenge checks failed | rotated `SUBMISSION_TOKEN` secret and workflow logs |

@@ -235,18 +235,26 @@ The logging processor recursively redacts values whose keys contain
 designed to store identifiers and category counts rather than request secrets
 or redacted PII values.
 
-The GCP design separates configuration from credentials. Pods read one
-Kubernetes Secret. Terraform declares the backend KSA-to-GSA binding and the
-GCP overlay declares the KSA annotation. Cloud SQL rejects unencrypted
-connections, and the documented direct DSN requests TLS. That DSN does not
-verify server identity. Repository configuration alone does not prove the
-runtime identity, private DNS or TLS path in a live cluster.
+The GCP design separates local and runtime credentials. `.env` belongs only to
+a local checkout. Production pods read the one operator-owned Kubernetes Secret
+`agentcare/agentcare-secrets`; it is not in Git, image layers, Terraform
+variables/state, GitHub variables or command output. Terraform creates the
+backend KSA-to-GSA binding. During `make gcp-up`, the operator-owned platform
+bundle creates the `agentcare` namespace and annotates the runtime
+`agentcare-backend` KSA. Cloud SQL rejects unencrypted connections, and the
+documented direct DSN requests TLS. That DSN does not verify server identity.
+Repository configuration alone does not prove the runtime identity, private DNS
+or TLS path in a live cluster.
 
-GitHub Actions uses short-lived Workload Identity Federation. Its trust rule
-matches the immutable repository ID, immutable owner ID, `main`, environment
-`production` and the exact `ci.yml` workflow ref. The deployer cannot apply
-Terraform or change project IAM. No Google service-account key is created or
-stored in GitHub.
+GitHub Actions has `id-token: write` only on the production release job. Its
+short-lived deployer GSA credential is issued only after WIF verifies immutable
+repository and owner IDs, `refs/heads/main`, environment `production` and the
+exact `ci.yml` workflow ref. Google IAM permits Artifact Registry upload,
+cluster discovery and service use; the `agentcare` RoleBinding separately
+permits narrowly defined Kubernetes release operations. The CI identity cannot
+read or create Secrets, change RBAC, namespaces or KSAs, or use `exec`,
+`attach`, `portforward` or impersonation. It cannot apply Terraform or change
+project IAM. No Google service-account key is created or stored in GitHub.
 
 Optional Langfuse tracing exports only operational attributes from an
 allowlist: trace name, environment, release, tags, model, usage, cost,

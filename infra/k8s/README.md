@@ -1,7 +1,7 @@
 # Kubernetes manifests
 
-This directory contains the application base, GCP application overlay and
-separate GCP migration overlay for AgentCare. Use the
+This directory contains the operator-owned platform bundle, application base,
+GCP application overlay and separate GCP migration overlay for AgentCare. Use the
 [GCP deployment runbook](../../docs/deployment-gcp.md) for provisioning,
 secrets, database setup, DNS, rollback and cost controls. Use
 [CI/CD](../../docs/ci-cd.md) for automatic releases.
@@ -9,8 +9,12 @@ secrets, database setup, DNS, rollback and cost controls. Use
 ## Layout
 
 ```text
-base/
+platform/
+  namespace.yaml
   service-account.yaml
+  deployer-rbac.yaml
+  kustomization.yaml
+base/
   backend.yaml
   frontend.yaml
   configmap.yaml
@@ -24,7 +28,6 @@ overlays/gcp/
   configmap-runtime.yaml
   configmap-storage.yaml
   configmap-model-armor.yaml
-  serviceaccount-workload-identity.yaml
   kustomization.yaml
 overlays/gcp-migration/
   migration-job.yaml
@@ -32,14 +35,29 @@ overlays/gcp-migration/
 ```
 
 `secret.example.yaml` is documentation only and is not rendered by either
-overlay.
+overlay. The platform bundle owns the `agentcare` namespace and runtime
+`agentcare-backend` KSA; application overlays never create either object.
+
+## Ownership and authorization
+
+`make gcp-up` applies `platform/` after Terraform creates GKE and before a
+release. It creates the `agentcare` namespace, annotates the runtime KSA and
+binds the short-lived GitHub deployer GSA to the narrow release Role.
+
+Google IAM and Kubernetes RBAC are separate. The deployer GSA can upload
+Artifact Registry images and discover the cluster. The namespaced RoleBinding
+permits only application-release resources. CI cannot read/create
+`agentcare/agentcare-secrets`, alter Secrets/RBAC/namespaces/KSAs, or use
+`exec`, `attach`, `portforward` or impersonation.
 
 ## Prerequisites
 
 Before applying:
 
 - `kubectl` must target the intended GKE cluster
-- `agentcare-secrets` must exist in the namespace
+- the operator must have created `agentcare/agentcare-secrets`; the local
+  `make gcp-release` preflight verifies its existence, while CI has no Secret
+  access
 - the Cloud SQL database and user must exist
 - renderer environment values must name GCS, Model Armor, public origin, model profile and the commit SHA
 - Terraform must have created the backend Workload Identity binding
@@ -67,7 +85,7 @@ export RENDERED_K8S="/tmp/agentcare-k8s-$IMAGE_TAG"
   --output "$RENDERED_K8S"
 kubectl kustomize "$RENDERED_K8S/overlays/gcp-migration"
 kubectl kustomize "$RENDERED_K8S/overlays/gcp"
-kubectl apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp"
+kubectl --namespace=agentcare apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp"
 ```
 
 The output path must not already exist. Rendering never proves that cloud
@@ -79,12 +97,12 @@ Migration Job specs are immutable, so delete a prior Job before applying its
 overlay:
 
 ```bash
-kubectl delete job backend-migrate --ignore-not-found
-kubectl apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp-migration"
-kubectl apply -k "$RENDERED_K8S/overlays/gcp-migration"
-kubectl wait --for=condition=complete job/backend-migrate --timeout=600s
-kubectl logs job/backend-migrate
-kubectl apply -k "$RENDERED_K8S/overlays/gcp"
+kubectl --namespace=agentcare delete job backend-migrate --ignore-not-found
+kubectl --namespace=agentcare apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp-migration"
+kubectl --namespace=agentcare apply -k "$RENDERED_K8S/overlays/gcp-migration"
+kubectl --namespace=agentcare wait --for=condition=complete job/backend-migrate --timeout=600s
+kubectl --namespace=agentcare logs job/backend-migrate
+kubectl --namespace=agentcare apply -k "$RENDERED_K8S/overlays/gcp"
 ```
 
 Do not apply the application overlay until the Job succeeds. The application
@@ -103,9 +121,9 @@ external worker or gains a distributed lock.
 ## Verify
 
 ```bash
-kubectl rollout status deployment/backend --timeout=600s
-kubectl rollout status deployment/frontend --timeout=600s
-kubectl get pods,services,ingress
+kubectl --namespace=agentcare rollout status deployment/backend --timeout=600s
+kubectl --namespace=agentcare rollout status deployment/frontend --timeout=600s
+kubectl --namespace=agentcare get pods,services,ingress
 curl -sSI --max-time 10 http://YOUR_DOMAIN/ | head -n 1
 ```
 
@@ -113,16 +131,16 @@ The public HTTP check must report a 308 redirect after the managed certificate
 and GKE load balancer finish reconciling.
 
 Continue with health, workflow and Model Armor checks in the
-[deployment runbook](../../docs/deployment-gcp.md#10-verify-real-end-to-end-behavior).
+[deployment runbook](../../docs/deployment-gcp.md#11-verify-the-environment).
 
 ## Teardown
 
 ```bash
-kubectl delete -k "$RENDERED_K8S/overlays/gcp"
-kubectl delete job backend-migrate --ignore-not-found
+kubectl --namespace=agentcare delete -k "$RENDERED_K8S/overlays/gcp"
+kubectl --namespace=agentcare delete job backend-migrate --ignore-not-found
 ```
 
-The out-of-band `agentcare-secrets` Secret is not owned by either
-kustomization. Delete it separately only when the environment is being
-removed. The backend Kubernetes service account is owned by the application
-overlay.
+The out-of-band `agentcare/agentcare-secrets` Secret is operator-owned, not
+owned by either application kustomization or CI. Delete it separately only
+when the environment is being removed. The backend Kubernetes service account
+is owned by the platform bundle.
