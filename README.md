@@ -75,7 +75,7 @@ See [security](docs/security.md) for trust boundaries and known limitations.
 | Documents | validated upload, deduplication, extraction, injection screening and classification |
 | Audit | mutations and agent exits write `AuditEvent` in the business transaction |
 | Evaluation | committed EN/DE safety dataset and two-phase scoring harness |
-| Deployment | Terraform, GKE Autopilot, Kustomize and keyless GitHub Actions |
+| Deployment | Terraform, private GKE Autopilot, Kustomize and keyless GitHub Actions |
 
 ## Technology
 
@@ -88,7 +88,7 @@ See [security](docs/security.md) for trust boundaries and known limitations.
 | Frontend | Next.js, React, Tailwind and shadcn/ui |
 | Safety | deterministic gates, Presidio and optional Model Armor |
 | Observability | SQL audit, logs, Prometheus, Grafana and optional Langfuse |
-| GCP | GKE Autopilot, Cloud SQL, GCS, Artifact Registry and Managed Prometheus |
+| GCP | Private GKE Autopilot, Cloud NAT, Cloud SQL, GCS, Artifact Registry and Managed Prometheus |
 
 ## Repository map
 

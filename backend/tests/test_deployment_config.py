@@ -277,6 +277,41 @@ def test_gke_uses_a_dedicated_node_identity_with_explicit_pull_permissions():
     assert "depends_on = [module.iam]" in root
 
 
+def test_gke_private_nodes_have_scoped_cloud_nat_egress():
+    gke = (REPO_ROOT / "infra/terraform/modules/gke-autopilot/main.tf").read_text(
+        encoding="utf-8"
+    )
+
+    assert re.search(
+        r"private_cluster_config\s*{"
+        r".*?enable_private_nodes\s*=\s*true"
+        r".*?enable_private_endpoint\s*=\s*false"
+        r".*?}",
+        gke,
+        re.DOTALL,
+    )
+    assert 'resource "google_compute_router" "egress"' in gke
+    assert 'resource "google_compute_router_nat" "egress"' in gke
+    assert 'source_subnetwork_ip_ranges_to_nat = "LIST_OF_SUBNETWORKS"' in gke
+    assert re.search(
+        r"subnetwork\s*{"
+        r".*?name\s*=\s*data\.google_compute_subnetwork\.cluster\.id"
+        r'.*?source_ip_ranges_to_nat\s*=\s*\["ALL_IP_RANGES"\]'
+        r".*?}",
+        gke,
+        re.DOTALL,
+    )
+    assert re.search(
+        r"log_config\s*{"
+        r".*?enable\s*=\s*true"
+        r'.*?filter\s*=\s*"ERRORS_ONLY"'
+        r".*?}",
+        gke,
+        re.DOTALL,
+    )
+    assert "depends_on = [google_compute_router_nat.egress]" in gke
+
+
 def test_workload_identity_binding_uses_the_created_gke_pool():
     iam = (REPO_ROOT / "infra/terraform/modules/iam/main.tf").read_text(
         encoding="utf-8"

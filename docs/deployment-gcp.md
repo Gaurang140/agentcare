@@ -19,6 +19,12 @@ automatic application releases from GitHub.
 Terraform apply and destroy are not run by GitHub. The operator sees a saved
 plan before typing `apply`. Application releases remain automatic.
 
+The Autopilot cluster uses private nodes. A Cloud Router and Public NAT cover
+only the selected cluster subnetwork, so workloads can reach the configured
+model and tracing endpoints without external IP addresses on GKE nodes. NAT
+logs contain errors only to limit both telemetry volume and cost; the public
+control-plane endpoint remains enabled for the keyless GitHub release job.
+
 ## Lifecycle
 
 ```mermaid
@@ -518,6 +524,7 @@ Main idle cost drivers:
 | Resource | Idle behavior |
 |---|---|
 | GKE Autopilot | $0.10/cluster-hour management fee, often offset by the one-cluster monthly free-tier credit; running pod requests are billed separately |
+| Cloud NAT | gateway use, processed traffic, one automatically allocated public IP and network egress; Cloud Router itself has no charge |
 | Cloud SQL | instance runs and bills continuously |
 | HTTPS load balancer | first five forwarding rules are currently $0.025/hour, plus IP and traffic charges |
 | GCS and Artifact Registry | stored bytes and operations |
@@ -528,6 +535,7 @@ Main idle cost drivers:
 Official pricing:
 
 - [GKE](https://cloud.google.com/kubernetes-engine/pricing)
+- [Cloud NAT](https://cloud.google.com/nat/pricing)
 - [Cloud SQL](https://cloud.google.com/sql/pricing)
 - [Cloud Load Balancing](https://cloud.google.com/load-balancing/pricing)
 - [Model Armor](https://cloud.google.com/security/products/model-armor)

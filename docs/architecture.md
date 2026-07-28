@@ -277,7 +277,8 @@ operations plus `.ainvoke` or `.astream`.
 GCP is the sole cloud target. The committed design maps:
 
 - container images to Artifact Registry
-- frontend and backend workloads to GKE Autopilot
+- frontend and backend workloads to private-node GKE Autopilot
+- outbound model and telemetry traffic through subnet-scoped Cloud NAT
 - domain SQL and Postgres checkpoints to Cloud SQL
 - uploaded documents to GCS
 - provider screening to Model Armor
