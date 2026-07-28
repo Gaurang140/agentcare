@@ -285,9 +285,10 @@ GCP is the sole cloud target. The committed design maps:
   through GKE Workload Identity
 
 Terraform owns those resources. A small bootstrap stack creates remote state,
-enables the required services and establishes branch-restricted GitHub
-Workload Identity. The main stack creates the application infrastructure.
-Neither stack runs during an ordinary code release.
+enables the required services and establishes GitHub Workload Identity
+restricted by repository, owner, branch, environment and workflow. The main
+stack creates the application infrastructure. Neither stack runs during an
+ordinary code release.
 
 After one-time activation, GitHub Actions owns application delivery:
 
@@ -306,7 +307,7 @@ validated deployment sentinels. It rejects mutable image tags and unresolved
 values. The migration Job must complete before application manifests are
 applied.
 
-The existing public health endpoint was verified on 2026-07-28. That proves
-the API and database were reachable at that time. It does not prove a current
-Vertex response, Model Armor verdict or Langfuse export. Each new environment
-must run the smoke checks in [GCP deployment](deployment-gcp.md).
+This repository does not claim a current public environment. Each deployment
+must verify the new API, database, runtime identity, Model Armor path and
+optional Langfuse export through the checks in
+[GCP deployment](deployment-gcp.md).

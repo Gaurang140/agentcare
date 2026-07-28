@@ -220,9 +220,6 @@ jobs:
     concurrency:
       group: agentcare-production
       cancel-in-progress: false
-      # Every main release waits its turn instead of replacing the one pending
-      # slot; GitHub queues up to 100 runs in order.
-      queue: max
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION }}

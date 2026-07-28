@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -22,6 +23,29 @@ def _resource(documents: list[dict], kind: str, name: str) -> dict:
         if document.get("kind") == kind and document.get("metadata", {}).get("name") == name:
             return document
     raise AssertionError(f"{kind}/{name} is not declared")
+
+
+def _make_dry_run(target: str) -> str:
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            target,
+            "PROJECT_ID=agentcare-example",
+            "REGION=europe-west3",
+            "GCS_LOCATION=europe-west3",
+            "NETWORK_NAME=default",
+            "SUBNETWORK_NAME=default",
+            "ENABLE_CLOUD_SQL=true",
+            "ENABLE_MODEL_ARMOR=true",
+            "ENABLE_VERTEX_AI=false",
+        ],
+        cwd=REPO_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
 
 
 def test_compose_uses_documented_env_files_and_requires_operator_jwt():
@@ -505,7 +529,6 @@ def test_ci_deploys_main_only_after_every_release_gate():
     assert deploy["concurrency"] == {
         "group": "agentcare-production",
         "cancel-in-progress": False,
-        "queue": "max",
     }
 
 
@@ -659,6 +682,14 @@ def test_terraform_bootstrap_restricts_github_identity_to_repo_id_and_main():
         in source
     )
     assert '"attribute.ref"                 = "assertion.ref"' in source
+    assert re.search(
+        r'"attribute\.environment"\s*=\s*"assertion\.environment"',
+        source,
+    )
+    assert re.search(
+        r'"attribute\.workflow_ref"\s*=\s*"assertion\.workflow_ref"',
+        source,
+    )
     assert "assertion.repository_id == '${var.github_repository_id}'" in source
     assert (
         "assertion.repository_owner_id == "
@@ -666,10 +697,17 @@ def test_terraform_bootstrap_restricts_github_identity_to_repo_id_and_main():
         in source
     )
     assert "assertion.ref == 'refs/heads/${var.deploy_branch}'" in source
+    assert "assertion.environment == '${var.deploy_environment}'" in source
+    assert (
+        "assertion.workflow_ref.endsWith("
+        "'/.github/workflows/${var.deploy_workflow_file}"
+        "@refs/heads/${var.deploy_branch}')"
+        in source
+    )
     assert "attribute.repository_id/${var.github_repository_id}" in source
 
 
-def test_terraform_bootstrap_separates_deployment_and_infrastructure_roles():
+def test_terraform_bootstrap_keeps_github_deployer_least_privilege():
     source = (
         REPO_ROOT / "infra/bootstrap/main.tf"
     ).read_text(encoding="utf-8")
@@ -680,30 +718,83 @@ def test_terraform_bootstrap_separates_deployment_and_infrastructure_roles():
         return match.group(1)
 
     deployment_roles = _role_block("deployment_roles")
-    infrastructure_roles = _role_block("infrastructure_roles")
 
-    # The identity used on every application release stays at push-an-image
-    # and roll-a-Deployment level.
-    for role in (
+    expected_roles = {
         "roles/artifactregistry.writer",
         "roles/container.clusterViewer",
         "roles/container.developer",
         "roles/serviceusage.serviceUsageConsumer",
-    ):
-        assert f'"{role}"' in deployment_roles
+    }
+    assert set(re.findall(r'"(roles/[^"]+)"', deployment_roles)) == expected_roles
+    assert "infrastructure_roles" not in source
+    assert "github_infra" not in source
+    assert "infra_service_account_email" not in (
+        REPO_ROOT / "infra/bootstrap/outputs.tf"
+    ).read_text(encoding="utf-8")
 
-    # The sharp roles exist only in the Terraform identity's set, which the
-    # protected production-infra environment gates.
-    for admin_role in (
-        "roles/resourcemanager.projectIamAdmin",
-        "roles/iam.serviceAccountAdmin",
-    ):
-        assert f'"{admin_role}"' in infrastructure_roles
-        assert admin_role not in deployment_roles
-
-    # Nobody gets blanket project ownership.
     for excessive_role in (
         '"roles/owner"',
         '"roles/editor"',
+        '"roles/resourcemanager.projectIamAdmin"',
+        '"roles/iam.serviceAccountAdmin"',
     ):
         assert excessive_role not in source
+
+
+def test_github_workflows_cannot_apply_or_destroy_terraform():
+    assert not (REPO_ROOT / ".github/workflows/infrastructure.yml").exists()
+
+    for path in (REPO_ROOT / ".github/workflows").glob("*.yml"):
+        workflow = _load_yaml(path)
+        commands = "\n".join(
+            step["run"]
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+            if isinstance(step.get("run"), str)
+        )
+        assert not re.search(
+            r"(?m)^\s*terraform\b[^\n]*\b(?:apply|destroy)\b",
+            commands,
+        ), f"{path.name} can mutate Terraform-managed infrastructure"
+
+
+def test_make_uses_one_complete_terraform_input_set_for_up_and_down():
+    expected = {
+        '-var="project_id=agentcare-example"',
+        '-var="region=europe-west3"',
+        '-var="gcs_location=europe-west3"',
+        '-var="network_name=default"',
+        '-var="subnetwork_name=default"',
+        '-var="enable_cloud_sql=true"',
+        '-var="enable_model_armor=true"',
+        '-var="enable_vertex_ai=false"',
+    }
+
+    for target in ("gcp-up", "gcp-down", "gcp-cleanup"):
+        output = _make_dry_run(target)
+        assert expected.issubset(set(re.findall(r'-var="[^"]+"', output)))
+
+
+def test_make_targets_the_exact_terraform_cluster_and_bucket():
+    down = _make_dry_run("gcp-down")
+    status = _make_dry_run("gcp-status")
+
+    for output in (down, status):
+        assert "output -raw gke_cluster_name" in output
+        assert "output -raw gke_cluster_location" in output
+        assert "gcloud container clusters get-credentials" in output
+        assert "kubectl --context" in output
+
+    assert "output -raw documents_bucket_name" in down
+    assert "gs://agentcare-example-agentcare-documents" not in down
+    assert not re.search(r"(?m)^kubectl delete\b", down)
+
+
+def test_public_docs_do_not_claim_the_destroyed_deployment_is_live():
+    public_docs = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (REPO_ROOT / "README.md", *sorted((REPO_ROOT / "docs").glob("*.md")))
+    )
+
+    assert "agentcare.136-69-65-187.sslip.io" not in public_docs
+    assert "application is live" not in public_docs.lower()

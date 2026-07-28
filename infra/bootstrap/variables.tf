@@ -45,3 +45,25 @@ variable "deploy_branch" {
     error_message = "deploy_branch contains unsupported characters."
   }
 }
+
+variable "deploy_environment" {
+  description = "GitHub environment required on the application deployment job."
+  type        = string
+  default     = "production"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+$", var.deploy_environment))
+    error_message = "deploy_environment contains unsupported characters."
+  }
+}
+
+variable "deploy_workflow_file" {
+  description = "Workflow filename allowed to exchange deployment credentials."
+  type        = string
+  default     = "ci.yml"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+\\.ya?ml$", var.deploy_workflow_file))
+    error_message = "deploy_workflow_file must be a YAML filename."
+  }
+}

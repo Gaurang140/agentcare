@@ -38,9 +38,9 @@ No prompt is treated as an authorization or safety control.
 | Application to Langfuse | Trace spans | disabled by default, trace sampling and an export allowlist |
 | Runtime to GCP | Backend pod identity and VPC traffic | Workload Identity, scoped IAM, regional PSC endpoint and private DNS |
 
-The public health endpoint was verified on 2026-07-28. Health alone does not
-verify the last two external boundaries. The deployment and observability
-guides list the checks required before trusting them in a new environment.
+No current public environment is asserted by this repository. A health check
+alone would not verify the last two external boundaries. The deployment and
+observability guides list the checks required for every new environment.
 
 ## Deterministic healthcare boundary
 
@@ -243,8 +243,10 @@ verify server identity. Repository configuration alone does not prove the
 runtime identity, private DNS or TLS path in a live cluster.
 
 GitHub Actions uses short-lived Workload Identity Federation. Its trust rule
-matches the immutable repository ID, immutable owner ID and `main` branch.
-No Google service-account key is created or stored in GitHub.
+matches the immutable repository ID, immutable owner ID, `main`, environment
+`production` and the exact `ci.yml` workflow ref. The deployer cannot apply
+Terraform or change project IAM. No Google service-account key is created or
+stored in GitHub.
 
 Optional Langfuse tracing exports only operational attributes from an
 allowlist: trace name, environment, release, tags, model, usage, cost,
@@ -252,3 +254,27 @@ observation type, level and error type. It deletes content, prompts, messages,
 tool values, identifiers, metadata and exception messages. Sampling defaults
 to zero and an exporter failure does not stop workflow processing.
 
+## Known limitations
+
+- This project uses synthetic data and has not been assessed or certified for
+  production healthcare regulation.
+- The PII redactor covers named patterns and small English/German NER models.
+  It cannot guarantee detection of every identifier or free-text disclosure.
+- Original patient text remains in the domain database. Database access,
+  backup encryption, retention and deletion policy require an operator.
+- No current live environment proves a Vertex response, Model Armor verdict,
+  Workload Identity binding or Langfuse export.
+- Model Armor fails open to deterministic controls. This preserves
+  availability but removes provider screening during an outage.
+- Upload validation does not include malware scanning, PDF active-content
+  inspection or content-type sniffing.
+- The append-only audit contract is enforced by application behavior, not a
+  write-once storage system or database trigger.
+- HS256 session signing depends on protecting and rotating one shared secret.
+- Graph dispatch uses process-local background work. A process loss can leave
+  a run pending until checkpoint resume or the stall sweep hands it to staff.
+- The backend is intentionally single-replica while APScheduler jobs remain
+  in-process without a distributed lock.
+
+These constraints must be resolved before real patient data or public
+production traffic is considered.
