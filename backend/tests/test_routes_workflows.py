@@ -32,9 +32,6 @@ from app.safety.injection_guard import screen_injection
 from app.services import workflow_service
 from app.tools.appointment_tools import get_available_slots
 
-_SLOT_WINDOW_DAYS = 14
-
-
 @pytest.fixture(autouse=True)
 def _isolated_checkpointer(tmp_path, monkeypatch):
     """A fresh checkpoint file per test - see test_graph_e2e.py's fixture of
@@ -63,11 +60,12 @@ def _cardiology_slot(db_session, patient_id: int) -> int:
     seed(db_session)
     dept = db_session.query(Department).filter_by(name="Cardiology").first()
     today = date.today()
+    next_monday = today + timedelta(days=7 - today.weekday())
     slots = get_available_slots(
         db_session,
         dept.id,
-        today,
-        today + timedelta(days=_SLOT_WINDOW_DAYS),
+        next_monday,
+        next_monday + timedelta(days=6),
         limit=200,
         patient_id=patient_id,
     )
@@ -140,6 +138,36 @@ def test_emergency_request_short_circuits_with_no_background_execution(patient_c
     body = resp.json()
     assert body["status"] == "escalated"
     assert llm.chat.completions.calls == []
+
+
+def test_request_idempotency_key_replays_original_run_before_uploading_again(
+    patient_client, db_session, fake_llm
+):
+    fake_llm([])
+    headers = {"Idempotency-Key": "portal-submit-12345678"}
+
+    first = patient_client.post(
+        "/api/requests",
+        headers=headers,
+        data={"text": "severe chest pain right now"},
+        files={"files": ("synthetic.txt", b"synthetic referral", "text/plain")},
+    )
+    second = patient_client.post(
+        "/api/requests",
+        headers=headers,
+        data={"text": "different text must not create another run"},
+        files={"files": ("second.txt", b"must not be stored", "text/plain")},
+    )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json() == first.json()
+    assert db_session.query(WorkflowRun).filter_by(
+        idempotency_key="portal-submit-12345678"
+    ).count() == 1
+    assert db_session.query(PatientDocument).filter_by(
+        filename="second.txt"
+    ).count() == 0
 
 
 def test_upload_rejects_disallowed_extension(patient_client, db_session):

@@ -11,7 +11,7 @@ the real system prompts would make an LLM choose.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import update
@@ -34,10 +34,9 @@ from app.models import (
 from app.services import workflow_service
 from app.tools.appointment_tools import book_appointment, get_available_slots
 
-_SLOT_WINDOW_DAYS = 14
-
 # Seeded user 3 is the staff account (see tests/test_responses.py).
 _REVIEWER_ID = 3
+_SLOT_WINDOW_DAYS = 14
 
 
 @pytest.fixture(autouse=True)
@@ -66,9 +65,30 @@ def _cardiology_id(db: Session) -> int:
     return dept.id
 
 
-def _first_free_slot_id(db: Session, department_id: int) -> int:
+def _first_free_slot_id(
+    db: Session,
+    department_id: int,
+    *,
+    next_week: bool = True,
+) -> int:
     today = date.today()
-    slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
+    window_start = (
+        today + timedelta(days=7 - today.weekday())
+        if next_week
+        else today
+    )
+    window_end = (
+        window_start + timedelta(days=6)
+        if next_week
+        else today + timedelta(days=_SLOT_WINDOW_DAYS)
+    )
+    slots = get_available_slots(
+        db,
+        department_id,
+        window_start,
+        window_end,
+        not_before=datetime.now(),
+    )
     assert slots
     return slots[0]["slot_id"]
 
@@ -642,7 +662,11 @@ def test_staff_approval_resumes_the_run_and_books_the_appointment(db, seeded, fa
     and books the appointment it was asked for. The raw note stays on the
     staff-only escalation row; only its redacted copy may enter graph state
     or a provider message."""
-    slot_id = _first_free_slot_id(db, _cardiology_id(db))
+    slot_id = _first_free_slot_id(
+        db,
+        _cardiology_id(db),
+        next_week=False,
+    )
     note = (
         "John Smith means cardiology; confirm with "
         "jane.doe@example.com or +49 176 12345678"

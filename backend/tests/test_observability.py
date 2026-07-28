@@ -21,8 +21,6 @@ from app.observability import tracing
 from app.services import workflow_service
 from app.tools.appointment_tools import get_available_slots
 
-_SLOT_WINDOW_DAYS = 14
-
 _MISSING_DEPENDENCY_EVENT = "langfuse_disabled_missing_dependency"
 _INITIALIZATION_FAILURE_EVENT = "langfuse_disabled_initialization_failed"
 
@@ -77,7 +75,13 @@ def _first_free_slot_id(db: Session) -> int:
     dept = db.query(Department).filter_by(name="Cardiology").first()
     assert dept is not None
     today = date.today()
-    slots = get_available_slots(db, dept.id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
+    next_monday = today + timedelta(days=7 - today.weekday())
+    slots = get_available_slots(
+        db,
+        dept.id,
+        next_monday,
+        next_monday + timedelta(days=6),
+    )
     assert slots
     return slots[0]["slot_id"]
 

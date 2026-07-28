@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, UploadFile
 from sqlalchemy.orm import Session
 
 from app.agents.responses import staff_decision_response, staff_review_response
@@ -88,7 +88,22 @@ def create_request(
     db: Annotated[Session, Depends(get_db)],
     text: Annotated[str, Form()],
     files: Annotated[list[UploadFile], File()] = [],  # noqa: B006 - FastAPI's own idiom
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", min_length=8, max_length=128),
+    ] = None,
 ) -> CreateRequestResponse:
+    existing = workflow_service.find_idempotent_run(
+        db,
+        current_user.id,
+        idempotency_key,
+    )
+    if existing is not None:
+        return CreateRequestResponse(
+            workflow_id=existing.id,
+            status=existing.status,
+        )
+
     if len(files) > _MAX_FILE_COUNT:
         raise ValidationError(f"Too many files (max {_MAX_FILE_COUNT})")
 
@@ -106,7 +121,12 @@ def create_request(
         for filename, content in uploads
     ]
 
-    workflow_run = workflow_service.create_run(db, current_user, text)
+    workflow_run = workflow_service.create_run(
+        db,
+        current_user,
+        text,
+        idempotency_key=idempotency_key,
+    )
     if workflow_run.status == "running":
         background_tasks.add_task(run_workflow_background, workflow_run.id, document_ids)
 

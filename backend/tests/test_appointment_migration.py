@@ -173,5 +173,5 @@ def test_range_migration_refuses_non_positive_slot_before_ddl_and_can_retry(
             text("SELECT version_num FROM alembic_version")
         ).scalar_one()
 
-    assert revision == "b6a7d8e9f012"
+    assert revision == "c1d2e3f4a5b6"
     assert {"scheduled_start", "scheduled_end"} <= column_names

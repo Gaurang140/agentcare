@@ -36,10 +36,15 @@ _SLOT_MINUTES = 30
 # some future constraint - is a bug and stays an IntegrityError rather than
 # becoming a retryable booking conflict.
 _RUN_INDEX_MARKERS = ("uq_appointments_workflow_run", "appointments.workflow_run_id")
+_BOOKING_WINDOW_MARKERS = (
+    "uq_appointments_patient_booking_window",
+    "appointments.patient_id, appointments.booking_window_key",
+)
 _PATIENT_OVERLAP_MARKER = "ex_appointments_patient_schedule"
 _DOCTOR_OVERLAP_MARKER = "ex_appointment_slots_doctor_schedule"
 _NAMED_CONFLICT_MARKERS = (
     *_RUN_INDEX_MARKERS,
+    *_BOOKING_WINDOW_MARKERS,
     _PATIENT_OVERLAP_MARKER,
     _DOCTOR_OVERLAP_MARKER,
 )
@@ -127,6 +132,7 @@ def appointment_summary(appt: Appointment, slot: AppointmentSlot | None = None) 
         "doctor": slot.doctor.name,
         "department": slot.doctor.department.name,
         "start_time": slot.start_time.isoformat(),
+        "end_time": slot.end_time.isoformat(),
         "status": appt.status,
     }
 
@@ -144,9 +150,10 @@ def get_available_slots(
     department_id: int,
     date_from: date,
     date_to: date,
-    limit: int = 10,
+    limit: int = 50,
     patient_id: int | None = None,
     exclude_appointment_id: int | None = None,
+    not_before: datetime | None = None,
 ) -> list[dict]:
     """Free slots for any active doctor in department_id, within [date_from, date_to].
 
@@ -155,6 +162,8 @@ def get_available_slots(
     availability list.
     """
     range_start = datetime.combine(date_from, time.min)
+    if not_before is not None:
+        range_start = max(range_start, not_before)
     range_end = datetime.combine(date_to, time.max)
 
     query = (
@@ -198,12 +207,34 @@ def get_available_slots(
     ]
 
 
+def find_active_patient_appointment_in_window(
+    db: Session,
+    patient_id: int,
+    department_id: int,
+    window_start: datetime,
+    window_end: datetime,
+) -> Appointment | None:
+    """Return an active booking in the same department and requested window."""
+    return (
+        _active_patient_appointment_query(db, patient_id)
+        .join(Doctor, Appointment.doctor_id == Doctor.id)
+        .filter(
+            Doctor.department_id == department_id,
+            Appointment.scheduled_start >= window_start,
+            Appointment.scheduled_start <= window_end,
+        )
+        .order_by(Appointment.scheduled_start)
+        .first()
+    )
+
+
 def book_appointment(
     db: Session,
     patient_id: int,
     slot_id: int,
     reason: str,
     workflow_run_id: int | None = None,
+    booking_window_key: str | None = None,
 ) -> dict:
     """Atomically claim a free slot and create the confirmed appointment against it.
 
@@ -243,6 +274,7 @@ def book_appointment(
             scheduled_end=slot.end_time,
             reason=reason,
             workflow_run_id=workflow_run_id,
+            booking_window_key=booking_window_key,
         )
         db.add(appt)
         db.flush()
@@ -514,6 +546,7 @@ def list_active_patient_appointments(
             "doctor": appt.doctor.name,
             "department": appt.doctor.department.name,
             "start_time": appt.scheduled_start.isoformat(),
+            "end_time": appt.scheduled_end.isoformat(),
             "status": appt.status,
             "reason": appt.reason,
         }

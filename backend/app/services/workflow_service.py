@@ -21,6 +21,7 @@ from typing import Any
 
 from langgraph.types import Command
 from sqlalchemy import update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agents.graph import build_graph, open_checkpointer
@@ -139,12 +140,20 @@ def _apply_final_state(workflow_run: WorkflowRun, state: dict) -> None:
     workflow_run.status = _final_status(state)
 
 
-def _new_workflow_run(db: Session, user: User, request_text: str, status: str) -> WorkflowRun:
+def _new_workflow_run(
+    db: Session,
+    user: User,
+    request_text: str,
+    status: str,
+    *,
+    idempotency_key: str | None = None,
+) -> WorkflowRun:
     workflow_run = WorkflowRun(
         user_id=user.id,
         patient_id=user.id,
         thread_id="",
         request_text=request_text,
+        idempotency_key=idempotency_key,
         status=status,
     )
     db.add(workflow_run)
@@ -154,7 +163,14 @@ def _new_workflow_run(db: Session, user: User, request_text: str, status: str) -
 
 
 def _screened_run(
-    db: Session, user: User, request_text: str, screen: ScreenResult, *, status: str, action: str
+    db: Session,
+    user: User,
+    request_text: str,
+    screen: ScreenResult,
+    *,
+    status: str,
+    action: str,
+    idempotency_key: str | None = None,
 ) -> WorkflowRun:
     """Pre-graph screening path (emergency or medical refusal): no graph, no
     LLM call, per screen_request's own judgment alone. The patient-facing
@@ -165,7 +181,13 @@ def _screened_run(
     else:
         final_response = medical_refusal_response(db, user.id)
 
-    workflow_run = _new_workflow_run(db, user, request_text, status)
+    workflow_run = _new_workflow_run(
+        db,
+        user,
+        request_text,
+        status,
+        idempotency_key=idempotency_key,
+    )
     workflow_run.current_step = "safety_screen"
     workflow_run.state = {"final_response": final_response, "safety_flags": screen.matched}
 
@@ -185,12 +207,23 @@ def _screened_run(
 
 
 def _injection_blocked_run(
-    db: Session, user: User, request_text: str, injection: InjectionResult
+    db: Session,
+    user: User,
+    request_text: str,
+    injection: InjectionResult,
+    *,
+    idempotency_key: str | None = None,
 ) -> WorkflowRun:
     """Prompt-injection screening runs after screen_request has allowed the
     request through, so - like `_screened_run` - this path makes no graph or
     coordinator LLM call."""
-    workflow_run = _new_workflow_run(db, user, request_text, status="escalated")
+    workflow_run = _new_workflow_run(
+        db,
+        user,
+        request_text,
+        status="escalated",
+        idempotency_key=idempotency_key,
+    )
     workflow_run.current_step = "injection_screen"
     workflow_run.state = {
         "final_response": INJECTION_BLOCKED_RESPONSE,
@@ -295,32 +328,73 @@ def _fail_before_graph(
     return workflow_run
 
 
-def create_run(db: Session, user: User, request_text: str) -> WorkflowRun:
-    """Screen the request and create its WorkflowRun row - synchronously,
-    with zero LLM calls or graph invocation either way. An emergency,
-    medical-refusal or injection-blocked request is already terminal on
-    return (its own escalation, if any, already created via `_screened_run`
-    or `_injection_blocked_run`); a request both screens allow comes back
-    with status "running" and nothing executed yet. Callers that want the
-    graph to actually run call `execute_workflow` next (only when status is
-    still "running") - split out so an HTTP route can hand that part to a
-    background task instead of blocking the request on it."""
+def find_idempotent_run(
+    db: Session,
+    patient_id: int,
+    idempotency_key: str | None,
+) -> WorkflowRun | None:
+    normalized = (idempotency_key or "").strip()
+    if not normalized:
+        return None
+    return (
+        db.query(WorkflowRun)
+        .filter_by(patient_id=patient_id, idempotency_key=normalized)
+        .one_or_none()
+    )
+
+
+def _create_run_unchecked(
+    db: Session,
+    user: User,
+    request_text: str,
+    idempotency_key: str | None,
+) -> WorkflowRun:
+    """Screen and create one run after the idempotent-replay check.
+
+    Emergency, medical-refusal, and injection-blocked requests are terminal
+    on return. An allowed request returns in ``running`` state before graph
+    execution starts.
+    """
     screen = screen_request(request_text)
 
     if screen.action == "escalate_emergency":
         return _screened_run(
-            db, user, request_text, screen, status="escalated", action="escalated_emergency"
+            db,
+            user,
+            request_text,
+            screen,
+            status="escalated",
+            action="escalated_emergency",
+            idempotency_key=idempotency_key,
         )
     if screen.action == "refuse_medical":
         return _screened_run(
-            db, user, request_text, screen, status="completed", action="refused_medical"
+            db,
+            user,
+            request_text,
+            screen,
+            status="completed",
+            action="refused_medical",
+            idempotency_key=idempotency_key,
         )
 
     injection = screen_injection(request_text)
     if injection.action == "block":
-        return _injection_blocked_run(db, user, request_text, injection)
+        return _injection_blocked_run(
+            db,
+            user,
+            request_text,
+            injection,
+            idempotency_key=idempotency_key,
+        )
 
-    workflow_run = _new_workflow_run(db, user, request_text, status="running")
+    workflow_run = _new_workflow_run(
+        db,
+        user,
+        request_text,
+        status="running",
+        idempotency_key=idempotency_key,
+    )
     write_audit(
         db,
         user.id,
@@ -331,6 +405,34 @@ def create_run(db: Session, user: User, request_text: str) -> WorkflowRun:
     )
     db.commit()
     return workflow_run
+
+
+def create_run(
+    db: Session,
+    user: User,
+    request_text: str,
+    *,
+    idempotency_key: str | None = None,
+) -> WorkflowRun:
+    """Create a workflow or replay the patient-scoped idempotent result."""
+    normalized_key = (idempotency_key or "").strip() or None
+    existing = find_idempotent_run(db, user.id, normalized_key)
+    if existing is not None:
+        return existing
+
+    try:
+        return _create_run_unchecked(
+            db,
+            user,
+            request_text,
+            normalized_key,
+        )
+    except IntegrityError:
+        db.rollback()
+        existing = find_idempotent_run(db, user.id, normalized_key)
+        if existing is not None:
+            return existing
+        raise
 
 
 def execute_workflow(

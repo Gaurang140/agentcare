@@ -6,6 +6,8 @@ document text.
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
+
 import pytest
 from presidio_analyzer import RecognizerResult
 
@@ -218,7 +220,15 @@ def test_appointment_node_redacts_request_text_before_the_llm_call(db, seeded, f
         db.query(AppointmentSlot)
         .join(Doctor)
         .join(Department)
-        .filter(Department.name == "Cardiology", AppointmentSlot.status == "free")
+        .filter(
+            Department.name == "Cardiology",
+            AppointmentSlot.status == "free",
+            AppointmentSlot.start_time
+            >= datetime.combine(
+                date.today() + timedelta(days=7 - date.today().weekday()),
+                datetime.min.time(),
+            ),
+        )
         .first()
     )
     client = fake_llm([{"slot_id": free_slot.id, "reason": "earliest"}])
