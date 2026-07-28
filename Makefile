@@ -140,7 +140,8 @@ gcp-github-vars:
 	@gh auth status
 	@terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
 		-backend-config="bucket=$(TF_STATE_BUCKET)"
-	@cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
+	@set -euo pipefail; \
+	cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
 	bucket="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw documents_bucket_name)"; \
 	template="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw model_armor_template_name)"; \
 	provider="$$(terraform -chdir=$(BOOTSTRAP_DIR) output -raw workload_identity_provider)"; \
@@ -162,7 +163,11 @@ gcp-github-vars:
 	gh variable set MODEL_ARMOR_TEMPLATE --env production --body "$$template"; \
 	gh variable set PUBLIC_URL --env production --body "$(PUBLIC_URL)"; \
 	gh variable set LLM_PROFILE --env production --body "$(LLM_PROFILE)"; \
-	gh variable set LANGFUSE_PUBLIC_KEY --env production --body "$(LANGFUSE_PUBLIC_KEY)"; \
+	if [ -n "$(LANGFUSE_PUBLIC_KEY)" ]; then \
+		gh variable set LANGFUSE_PUBLIC_KEY --env production --body "$(LANGFUSE_PUBLIC_KEY)"; \
+	else \
+		gh variable delete LANGFUSE_PUBLIC_KEY --env production >/dev/null 2>&1 || true; \
+	fi; \
 	gh variable set LANGFUSE_BASE_URL --env production --body "$(LANGFUSE_BASE_URL)"; \
 	gh variable set LANGFUSE_SAMPLE_RATE --env production --body "$(LANGFUSE_SAMPLE_RATE)"; \
 	gh variable set DEPLOY_ENABLED --body "true"; \

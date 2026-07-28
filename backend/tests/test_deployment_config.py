@@ -810,6 +810,18 @@ def test_make_uses_one_complete_terraform_input_set_for_up_and_down():
         assert expected.issubset(set(re.findall(r'-var="[^"]+"', output)))
 
 
+def test_github_variable_sync_fails_fast_and_allows_langfuse_to_stay_off():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile.split("gcp-github-vars:", 1)[1].split("gcp-release:", 1)[0]
+
+    assert "set -euo pipefail" in target
+    assert 'if [ -n "$(LANGFUSE_PUBLIC_KEY)" ]; then' in target
+    assert (
+        "gh variable delete LANGFUSE_PUBLIC_KEY --env production"
+        " >/dev/null 2>&1 || true"
+    ) in target
+
+
 def test_make_targets_the_exact_terraform_cluster_and_bucket():
     down = _make_dry_run("gcp-down")
     status = _make_dry_run("gcp-status")
