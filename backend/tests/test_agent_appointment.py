@@ -310,12 +310,63 @@ def test_status_intent_returns_current_sql_backed_appointments_without_llm_call(
     result = appointment.run(_state(intent="status"), db)
 
     assert result["appointment"] == {
-        "id": booking["id"],
-        "doctor": booking["doctor"],
-        "department": booking["department"],
-        "start_time": booking["start_time"],
-        "status": "confirmed",
+        "status": "summary",
+        "appointments": [
+            {
+                "id": booking["id"],
+                "doctor": booking["doctor"],
+                "department": booking["department"],
+                "start_time": booking["start_time"],
+                "status": "confirmed",
+            }
+        ],
     }
+    assert result["completed_steps"] == ["appointment"]
+    assert len(client.chat.completions.calls) == 0
+
+
+def test_status_with_multiple_active_appointments_returns_all_without_clarification(
+    db, seeded, fake_llm
+):
+    first_slot = _free_slots(db)[0]
+    second_slot = _next_non_overlapping_slot(db, first_slot)
+    first = book_appointment(db, patient_id=1, slot_id=first_slot.id, reason="private first")
+    second = book_appointment(db, patient_id=1, slot_id=second_slot.id, reason="private second")
+    client = fake_llm([])
+
+    result = appointment.run(_state(intent="status"), db)
+
+    assert result["appointment"]["status"] == "summary"
+    appointments_by_id = {
+        row["id"]: row for row in result["appointment"]["appointments"]
+    }
+    assert appointments_by_id == {
+        first["id"]: {
+            "id": first["id"],
+            "doctor": first["doctor"],
+            "department": first["department"],
+            "start_time": first["start_time"],
+            "status": "confirmed",
+        },
+        second["id"]: {
+            "id": second["id"],
+            "doctor": second["doctor"],
+            "department": second["department"],
+            "start_time": second["start_time"],
+            "status": "confirmed",
+        },
+    }
+    assert result.get("escalation_id") is None
+    assert all("reason" not in row for row in result["appointment"]["appointments"])
+    assert len(client.chat.completions.calls) == 0
+
+
+def test_status_without_active_appointments_returns_empty_summary(db, seeded, fake_llm):
+    client = fake_llm([])
+
+    result = appointment.run(_state(intent="status"), db)
+
+    assert result["appointment"] == {"status": "summary", "appointments": []}
     assert result["completed_steps"] == ["appointment"]
     assert len(client.chat.completions.calls) == 0
 

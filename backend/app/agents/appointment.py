@@ -327,28 +327,22 @@ def run(state: AgentState, db: Session) -> dict:
 
     try:
         if intent == "status":
-            active, escalation = _active_appointment_for_action(
-                db,
-                workflow_id,
-                state["patient_id"],
-                "reporting appointment status",
-            )
-            if escalation is not None:
-                return escalation
-            appointment_context = (
-                {key: value for key, value in active.items() if key != "reason"}
-                if active is not None
-                else None
-            )
+            active = list_active_patient_appointments(db, state["patient_id"])
+            appointments = [
+                {key: value for key, value in row.items() if key != "reason"}
+                for row in active
+            ]
+            appointment_context = {
+                "status": "summary",
+                "appointments": appointments,
+            }
             record_agent_exit(
                 db,
                 "appointment",
                 workflow_id,
                 {
                     "action": "status",
-                    "appointment_id": (
-                        appointment_context["id"] if appointment_context is not None else None
-                    ),
+                    "appointment_ids": [row["id"] for row in appointments],
                 },
             )
             return {
