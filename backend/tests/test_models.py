@@ -33,7 +33,9 @@ from app.models import (
 
 @pytest.fixture()
 def db() -> Session:
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    engine = create_engine(
+        "sqlite:///:memory:", connect_args={"check_same_thread": False}
+    )
     Base.metadata.create_all(engine)
     session = Session(engine)
     try:
@@ -126,8 +128,204 @@ def test_appointment_slot_unique_constraint_blocks_double_booking_the_same_start
     db.rollback()
 
 
+def test_active_patient_ranges_cannot_overlap_but_may_be_adjacent(db: Session) -> None:
+    patient = User(
+        email="range-patient@example.com",
+        password_hash="h",
+        role="patient",
+        full_name="Range Patient",
+    )
+    department = Department(name="Range Medicine")
+    db.add_all([patient, department])
+    db.flush()
+    doctors = [
+        Doctor(department_id=department.id, name="Dr. Range One"),
+        Doctor(department_id=department.id, name="Dr. Range Two"),
+        Doctor(department_id=department.id, name="Dr. Range Three"),
+    ]
+    db.add_all(doctors)
+    db.flush()
+
+    start = datetime(2026, 8, 4, 9, 0)
+    slots = [
+        AppointmentSlot(
+            doctor_id=doctors[0].id,
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+        ),
+        AppointmentSlot(
+            doctor_id=doctors[1].id,
+            start_time=start + timedelta(minutes=30),
+            end_time=start + timedelta(hours=1, minutes=30),
+        ),
+        AppointmentSlot(
+            doctor_id=doctors[2].id,
+            start_time=start + timedelta(hours=1),
+            end_time=start + timedelta(hours=2),
+        ),
+    ]
+    db.add_all(slots)
+    db.flush()
+
+    first_appointment = Appointment(
+        patient_id=patient.id,
+        doctor_id=doctors[0].id,
+        slot_id=slots[0].id,
+        scheduled_start=start,
+        scheduled_end=start + timedelta(hours=1),
+        status="confirmed",
+    )
+    db.add(first_appointment)
+    db.commit()
+
+    # The update trigger must exclude the row being updated.
+    first_appointment.reason = "updated without changing its range"
+    db.commit()
+
+    db.add(
+        Appointment(
+            patient_id=patient.id,
+            doctor_id=doctors[1].id,
+            slot_id=slots[1].id,
+            scheduled_start=start + timedelta(minutes=30),
+            scheduled_end=start + timedelta(hours=1, minutes=30),
+            status="pending",
+        )
+    )
+    with pytest.raises(IntegrityError, match="ex_appointments_patient_schedule"):
+        db.commit()
+    db.rollback()
+
+    adjacent = Appointment(
+        patient_id=patient.id,
+        doctor_id=doctors[2].id,
+        slot_id=slots[2].id,
+        scheduled_start=start + timedelta(hours=1),
+        scheduled_end=start + timedelta(hours=2),
+        status="confirmed",
+    )
+    db.add(adjacent)
+    db.commit()
+
+    adjacent.scheduled_start = start + timedelta(minutes=30)
+    with pytest.raises(IntegrityError, match="ex_appointments_patient_schedule"):
+        db.commit()
+    db.rollback()
+
+
+def test_cancelled_and_completed_ranges_do_not_block_new_active_rows(
+    db: Session,
+) -> None:
+    patient = User(
+        email="historical-ranges@example.com",
+        password_hash="h",
+        role="patient",
+        full_name="Historical Ranges",
+    )
+    department = Department(name="Historical Medicine")
+    db.add_all([patient, department])
+    db.flush()
+    doctors = [
+        Doctor(department_id=department.id, name="Dr. History One"),
+        Doctor(department_id=department.id, name="Dr. History Two"),
+        Doctor(department_id=department.id, name="Dr. History Three"),
+    ]
+    db.add_all(doctors)
+    db.flush()
+
+    start = datetime(2026, 8, 5, 9, 0)
+    slots = [
+        AppointmentSlot(
+            doctor_id=doctor.id,
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+        )
+        for doctor in doctors
+    ]
+    db.add_all(slots)
+    db.flush()
+    db.add_all(
+        [
+            Appointment(
+                patient_id=patient.id,
+                doctor_id=doctors[0].id,
+                slot_id=slots[0].id,
+                scheduled_start=start,
+                scheduled_end=start + timedelta(hours=1),
+                status="cancelled",
+            ),
+            Appointment(
+                patient_id=patient.id,
+                doctor_id=doctors[1].id,
+                slot_id=slots[1].id,
+                scheduled_start=start,
+                scheduled_end=start + timedelta(hours=1),
+                status="completed",
+            ),
+        ]
+    )
+    db.commit()
+
+    db.add(
+        Appointment(
+            patient_id=patient.id,
+            doctor_id=doctors[2].id,
+            slot_id=slots[2].id,
+            scheduled_start=start,
+            scheduled_end=start + timedelta(hours=1),
+            status="confirmed",
+        )
+    )
+    db.commit()
+
+
+def test_doctor_slot_ranges_cannot_overlap_but_may_be_adjacent(db: Session) -> None:
+    department = Department(name="Slot Range Medicine")
+    db.add(department)
+    db.flush()
+    doctor = Doctor(department_id=department.id, name="Dr. Slot Range")
+    db.add(doctor)
+    db.flush()
+
+    start = datetime(2026, 8, 6, 9, 0)
+    db.add(
+        AppointmentSlot(
+            doctor_id=doctor.id,
+            start_time=start,
+            end_time=start + timedelta(hours=1),
+        )
+    )
+    db.commit()
+
+    adjacent = AppointmentSlot(
+        doctor_id=doctor.id,
+        start_time=start + timedelta(hours=1),
+        end_time=start + timedelta(hours=2),
+    )
+    db.add(adjacent)
+    db.commit()
+
+    db.add(
+        AppointmentSlot(
+            doctor_id=doctor.id,
+            start_time=start + timedelta(minutes=30),
+            end_time=start + timedelta(hours=1, minutes=30),
+        )
+    )
+    with pytest.raises(IntegrityError, match="ex_appointment_slots_doctor_schedule"):
+        db.commit()
+    db.rollback()
+
+    adjacent.start_time = start + timedelta(minutes=30)
+    with pytest.raises(IntegrityError, match="ex_appointment_slots_doctor_schedule"):
+        db.commit()
+    db.rollback()
+
+
 def test_appointment_links_patient_doctor_and_slot(db: Session) -> None:
-    patient = User(email="p@example.com", password_hash="h", role="patient", full_name="P One")
+    patient = User(
+        email="p@example.com", password_hash="h", role="patient", full_name="P One"
+    )
     dept = Department(name="Orthopedics")
     db.add_all([patient, dept])
     db.flush()
@@ -149,6 +347,8 @@ def test_appointment_links_patient_doctor_and_slot(db: Session) -> None:
         patient_id=patient.id,
         doctor_id=doctor.id,
         slot_id=slot.id,
+        scheduled_start=start,
+        scheduled_end=start + timedelta(minutes=30),
         status="confirmed",
         reason="checkup",
     )
@@ -161,7 +361,12 @@ def test_appointment_links_patient_doctor_and_slot(db: Session) -> None:
 
 
 def test_patient_document_stores_checksum_and_storage_ref(db: Session) -> None:
-    patient = User(email="doc@example.com", password_hash="h", role="patient", full_name="Doc Patient")
+    patient = User(
+        email="doc@example.com",
+        password_hash="h",
+        role="patient",
+        full_name="Doc Patient",
+    )
     db.add(patient)
     db.flush()
 
@@ -182,7 +387,12 @@ def test_patient_document_stores_checksum_and_storage_ref(db: Session) -> None:
 
 
 def test_workflow_run_reminder_escalation_and_audit_event(db: Session) -> None:
-    user = User(email="wf@example.com", password_hash="h", role="patient", full_name="WF Patient")
+    user = User(
+        email="wf@example.com",
+        password_hash="h",
+        role="patient",
+        full_name="WF Patient",
+    )
     db.add(user)
     db.flush()
 
@@ -227,7 +437,12 @@ def test_workflow_run_reminder_escalation_and_audit_event(db: Session) -> None:
 
 
 def test_escalation_reviewed_by_links_to_staff_user(db: Session) -> None:
-    staff = User(email="staff@example.com", password_hash="h", role="staff", full_name="Admin Petra")
+    staff = User(
+        email="staff@example.com",
+        password_hash="h",
+        role="staff",
+        full_name="Admin Petra",
+    )
     db.add(staff)
     db.flush()
 
