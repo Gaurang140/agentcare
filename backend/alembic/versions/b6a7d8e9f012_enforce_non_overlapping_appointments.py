@@ -43,11 +43,29 @@ def _doctor_overlap_count() -> int:
     )
 
 
-def _raise_for_overlap_counts(patient_overlaps: int, doctor_overlaps: int) -> None:
-    if patient_overlaps or doctor_overlaps:
+def _invalid_slot_range_count() -> int:
+    return _scalar_count(
+        sa.text(
+            """
+            SELECT COUNT(*)
+            FROM appointment_slots
+            WHERE end_time <= start_time
+            """
+        )
+    )
+
+
+def _raise_for_range_conflicts(
+    patient_overlaps: int,
+    doctor_overlaps: int,
+    invalid_slot_ranges: int,
+) -> None:
+    if patient_overlaps or doctor_overlaps or invalid_slot_ranges:
         raise RuntimeError(
             "Cannot enforce appointment schedule ranges: "
-            f"patient overlaps={patient_overlaps}, doctor slot overlaps={doctor_overlaps}"
+            f"patient overlaps={patient_overlaps}, "
+            f"doctor slot overlaps={doctor_overlaps}, "
+            f"invalid slot ranges={invalid_slot_ranges}"
         )
 
 
@@ -72,7 +90,11 @@ def _preflight_source_ranges() -> None:
             """
         )
     )
-    _raise_for_overlap_counts(patient_overlaps, _doctor_overlap_count())
+    _raise_for_range_conflicts(
+        patient_overlaps,
+        _doctor_overlap_count(),
+        _invalid_slot_range_count(),
+    )
 
 
 def _raise_on_existing_overlaps() -> None:
@@ -91,7 +113,11 @@ def _raise_on_existing_overlaps() -> None:
             """
         )
     )
-    _raise_for_overlap_counts(patient_overlaps, _doctor_overlap_count())
+    _raise_for_range_conflicts(
+        patient_overlaps,
+        _doctor_overlap_count(),
+        _invalid_slot_range_count(),
+    )
 
 
 def _create_sqlite_triggers() -> None:
