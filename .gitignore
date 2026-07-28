@@ -16,8 +16,6 @@ node_modules/
 *.tfstate.backup
 *.tfplan
 .DS_Store
-.superpowers/
-docs/superpowers/
 .worktrees/
 gha-creds-*.json
 gha-kubeconfig-*
