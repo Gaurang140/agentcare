@@ -314,9 +314,12 @@ jobs:
         shell: bash
         run: |
           for app in backend frontend; do
-            digest=$(gcloud artifacts docker images describe \
-              "$IMAGE_REPOSITORY/$app:$IMAGE_TAG" \
-              --format='value(image_summary.digest)' 2>/dev/null || true)
+            digest=$(gcloud artifacts docker images list \
+              "$IMAGE_REPOSITORY/$app" \
+              --include-tags \
+              --filter="tags=$IMAGE_TAG" \
+              --limit=1 \
+              --format='value(version)')
             echo "$app=$digest" >> "$GITHUB_OUTPUT"
             if [ -n "$digest" ]; then
               echo "$app:$IMAGE_TAG is already published as $digest; its build is skipped"

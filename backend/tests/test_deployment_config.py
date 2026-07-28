@@ -1185,6 +1185,23 @@ def test_ci_scopes_every_release_kubectl_call_and_preflights_allowed_and_forbidd
         assert forbidden in commands
 
 
+def test_ci_reuses_an_existing_immutable_image_tag_without_hiding_lookup_errors():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    deploy = workflow["jobs"]["deploy-production"]
+    lookup = next(
+        step
+        for step in deploy["steps"]
+        if step.get("name") == "look up existing release images"
+    )
+    command = lookup["run"]
+
+    assert "gcloud artifacts docker images list" in command
+    assert "--include-tags" in command
+    assert '--filter="tags=$IMAGE_TAG"' in command
+    assert "--format='value(version)'" in command
+    assert "2>/dev/null || true" not in command
+
+
 def test_github_workflows_cannot_apply_or_destroy_terraform():
     assert not (REPO_ROOT / ".github/workflows/infrastructure.yml").exists()
 
