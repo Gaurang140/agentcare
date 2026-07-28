@@ -252,27 +252,3 @@ observation type, level and error type. It deletes content, prompts, messages,
 tool values, identifiers, metadata and exception messages. Sampling defaults
 to zero and an exporter failure does not stop workflow processing.
 
-## Known limitations
-
-- This project uses synthetic data and has not been assessed or certified for
-  production healthcare regulation.
-- The PII redactor covers named patterns and small English/German NER models.
-  It cannot guarantee detection of every identifier or free-text disclosure.
-- Original patient text remains in the domain database. Database access,
-  backup encryption, retention and deletion policy require an operator.
-- The 2026-07-28 public health check did not prove a current Vertex response,
-  Model Armor verdict, Workload Identity binding or Langfuse export.
-- Model Armor fails open to deterministic controls. This preserves
-  availability but removes provider screening during an outage.
-- Upload validation does not include malware scanning, PDF active-content
-  inspection or content-type sniffing.
-- The append-only audit contract is enforced by application behavior, not a
-  write-once storage system or database trigger.
-- HS256 session signing depends on protecting and rotating one shared secret.
-- Graph dispatch uses process-local background work. A process loss can leave
-  a run pending until checkpoint resume or the stall sweep hands it to staff.
-- The backend is intentionally single-replica while APScheduler jobs remain
-  in-process without a distributed lock.
-
-These constraints must be resolved before real patient data or public
-production traffic is considered.
