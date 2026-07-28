@@ -26,6 +26,12 @@ resource "google_service_networking_connection" "private_vpc_connection" {
   network                 = data.google_compute_network.vpc[0].id
   service                 = "servicenetworking.googleapis.com"
   reserved_peering_ranges = [google_compute_global_address.private_ip_alloc[0].name]
+
+  # This shared/default VPC keeps the connection and its allocated range under
+  # the same explicit destroy lifecycle. Google can retain the connection for
+  # several days, so operators retry `make gcp-cleanup` instead of abandoning
+  # the connection or adopting a shared producer resource. A dedicated future
+  # AgentCare VPC can move both resources into persistent bootstrap state.
 }
 
 resource "google_sql_database_instance" "postgres" {

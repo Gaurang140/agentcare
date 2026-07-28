@@ -12,6 +12,9 @@ SUBNETWORK_NAME ?= default
 ENABLE_CLOUD_SQL ?= true
 ENABLE_MODEL_ARMOR ?= true
 ENABLE_VERTEX_AI ?= false
+# Variable sync defaults to keeping delivery disabled. A release must opt in
+# with ENABLE_DELIVERY=true in the same command that dispatches it.
+ENABLE_DELIVERY ?= false
 TF_STATE_BUCKET ?= $(PROJECT_ID)-agentcare-tfstate
 
 PUBLIC_URL ?=
@@ -27,10 +30,6 @@ BOOTSTRAP_DIR := infra/bootstrap
 TERRAFORM_DIR := infra/terraform
 K8S_OVERLAY := infra/k8s/overlays/gcp
 K8S_PLATFORM := infra/k8s/platform
-
-BOOTSTRAP_PLAN := /tmp/agentcare-bootstrap.tfplan
-MAIN_PLAN := /tmp/agentcare.tfplan
-DESTROY_PLAN := /tmp/agentcare-destroy.tfplan
 
 TF_VAR_ARGS := \
 	-var="project_id=$(PROJECT_ID)" \
@@ -56,16 +55,6 @@ define require_project
 fi
 endef
 
-define confirm_project
-@printf 'this destroys AgentCare in project %s\n' "$(PROJECT_ID)"; \
-printf 'type the full project id to continue: '; \
-read -r confirmation; \
-if [ "$$confirmation" != "$(PROJECT_ID)" ]; then \
-	printf 'confirmation did not match. nothing was deleted\n' >&2; \
-	exit 1; \
-fi
-endef
-
 .PHONY: help gcp-bootstrap gcp-up gcp-release gcp-deploy gcp-status \
 	gcp-down gcp-cleanup gcp-github-vars
 
@@ -74,62 +63,73 @@ help:
 	@echo ""
 	@echo "  gcp-bootstrap    one-time APIs, remote state and keyless GitHub deploy identity"
 	@echo "  gcp-up           review and apply the Terraform infrastructure plan"
-	@echo "  gcp-release      sync GitHub variables, dispatch ci.yml and wait"
+	@echo "  gcp-release      sync GitHub variables, dispatch ci.yml and wait (requires ENABLE_DELIVERY=true)"
 	@echo "  gcp-deploy       run gcp-up then gcp-release"
 	@echo "  gcp-status       show Terraform, the exact GKE cluster and optional public health"
 	@echo "  gcp-down         review and destroy the application infrastructure"
-	@echo "  gcp-cleanup      retry delayed service-networking deletion"
-	@echo "  gcp-github-vars  sync non-secret release configuration to GitHub"
+	@echo "  gcp-cleanup      retry delayed service-networking deletion (Google can retain private service-networking for days)"
+	@echo "  gcp-github-vars  sync non-secret release configuration; ENABLE_DELIVERY defaults false"
 	@echo ""
 	@echo "Required: PROJECT_ID. Optional: REGION, GCS_LOCATION, NETWORK_NAME,"
-	@echo "SUBNETWORK_NAME, ENABLE_CLOUD_SQL, ENABLE_MODEL_ARMOR and ENABLE_VERTEX_AI."
+	@echo "SUBNETWORK_NAME, ENABLE_CLOUD_SQL, ENABLE_MODEL_ARMOR, ENABLE_VERTEX_AI and ENABLE_DELIVERY."
 
 gcp-bootstrap:
 	$(call require_var,PROJECT_ID)
 	$(call require_project)
 	$(call require_var,GITHUB_REPOSITORY_ID)
 	$(call require_var,GITHUB_OWNER_ID)
-	@echo "+ gcloud services enable serviceusage.googleapis.com --project=$(PROJECT_ID)"
-	@gcloud services enable serviceusage.googleapis.com --project="$(PROJECT_ID)"
-	@echo "+ terraform -chdir=$(BOOTSTRAP_DIR) init"
-	@terraform -chdir=$(BOOTSTRAP_DIR) init
-	@echo "+ terraform -chdir=$(BOOTSTRAP_DIR) plan -out=$(BOOTSTRAP_PLAN)"
-	@terraform -chdir=$(BOOTSTRAP_DIR) plan \
-		-out=$(BOOTSTRAP_PLAN) \
+	@set -euo pipefail; \
+	umask 077; \
+	plan_dir="$$(mktemp -d)"; \
+	plan_file="$$plan_dir/bootstrap.tfplan"; \
+	cleanup() { rm -f "$$plan_file"; rmdir "$$plan_dir"; }; \
+	trap cleanup EXIT; \
+	echo "+ gcloud services enable serviceusage.googleapis.com --project=$(PROJECT_ID)"; \
+	gcloud services enable serviceusage.googleapis.com --project="$(PROJECT_ID)"; \
+	echo "+ terraform -chdir=$(BOOTSTRAP_DIR) init"; \
+	terraform -chdir=$(BOOTSTRAP_DIR) init; \
+	echo "+ terraform -chdir=$(BOOTSTRAP_DIR) plan -out=$$plan_file"; \
+	terraform -chdir=$(BOOTSTRAP_DIR) plan \
+		-out="$$plan_file" \
 		-var="project_id=$(PROJECT_ID)" \
 		-var="region=$(REGION)" \
 		-var="github_repository_id=$(GITHUB_REPOSITORY_ID)" \
-		-var="github_repository_owner_id=$(GITHUB_OWNER_ID)"
-	@terraform -chdir=$(BOOTSTRAP_DIR) show -no-color $(BOOTSTRAP_PLAN)
-	@printf 'type apply to use this bootstrap plan: '; \
+		-var="github_repository_owner_id=$(GITHUB_OWNER_ID)"; \
+	terraform -chdir=$(BOOTSTRAP_DIR) show -no-color "$$plan_file"; \
+	printf 'type apply to use this bootstrap plan: '; \
 	read -r confirmation; \
 	if [ "$$confirmation" != "apply" ]; then \
 		echo "bootstrap cancelled"; \
 		exit 1; \
-	fi
-	@terraform -chdir=$(BOOTSTRAP_DIR) apply $(BOOTSTRAP_PLAN)
-	@terraform -chdir=$(BOOTSTRAP_DIR) output
-	@echo ""
-	@echo "Next: export TF_STATE_BUCKET from terraform_state_bucket, then run make gcp-up."
+	fi; \
+	terraform -chdir=$(BOOTSTRAP_DIR) apply "$$plan_file"; \
+	terraform -chdir=$(BOOTSTRAP_DIR) output; \
+	echo ""; \
+	echo "Next: export TF_STATE_BUCKET from terraform_state_bucket, then run make gcp-up."
 
 gcp-up:
 	$(call require_var,PROJECT_ID)
 	$(call require_project)
-	@echo "+ terraform -chdir=$(TERRAFORM_DIR) init -backend-config=bucket=$(TF_STATE_BUCKET)"
-	@terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
-		-backend-config="bucket=$(TF_STATE_BUCKET)"
-	@echo "+ terraform plan using the canonical AgentCare variable set"
-	@terraform -chdir=$(TERRAFORM_DIR) plan -input=false \
-		-out=$(MAIN_PLAN) $(TF_VAR_ARGS)
-	@terraform -chdir=$(TERRAFORM_DIR) show -no-color $(MAIN_PLAN)
-	@printf 'type apply to use this exact infrastructure plan: '; \
+	@set -euo pipefail; \
+	umask 077; \
+	plan_dir="$$(mktemp -d)"; \
+	plan_file="$$plan_dir/infrastructure.tfplan"; \
+	cleanup() { rm -f "$$plan_file"; rmdir "$$plan_dir"; }; \
+	trap cleanup EXIT; \
+	echo "+ terraform -chdir=$(TERRAFORM_DIR) init -backend-config=bucket=$(TF_STATE_BUCKET)"; \
+	terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
+		-backend-config="bucket=$(TF_STATE_BUCKET)"; \
+	echo "+ terraform plan using the canonical AgentCare variable set"; \
+	terraform -chdir=$(TERRAFORM_DIR) plan -input=false \
+		-out="$$plan_file" $(TF_VAR_ARGS); \
+	terraform -chdir=$(TERRAFORM_DIR) show -no-color "$$plan_file"; \
+	printf 'type apply to use this exact infrastructure plan: '; \
 	read -r confirmation; \
 	if [ "$$confirmation" != "apply" ]; then \
 		echo "infrastructure apply cancelled"; \
 		exit 1; \
-	fi
-	@terraform -chdir=$(TERRAFORM_DIR) apply -input=false $(MAIN_PLAN)
-	@set -euo pipefail; \
+	fi; \
+	terraform -chdir=$(TERRAFORM_DIR) apply -input=false "$$plan_file"; \
 	cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
 	location="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_location)"; \
 	gcloud container clusters get-credentials "$$cluster" \
@@ -138,16 +138,21 @@ gcp-up:
 	echo "+ kubectl --context $$context kustomize $(K8S_PLATFORM) | kubectl apply -f -"; \
 	kubectl --context "$$context" kustomize $(K8S_PLATFORM) \
 		| sed "s/PROJECT_ID_PLACEHOLDER/$(PROJECT_ID)/g" \
-		| kubectl --context "$$context" apply -f -
-	@terraform -chdir=$(TERRAFORM_DIR) output
-	@echo ""
-	@echo "Infrastructure is ready. Database credentials, agentcare-secrets and DNS stay outside Terraform."
-	@echo "Complete those one-time steps in docs/deployment-gcp.md, then run make gcp-release."
+		| kubectl --context "$$context" --namespace=agentcare apply -f -; \
+	terraform -chdir=$(TERRAFORM_DIR) output; \
+	echo ""; \
+	echo "Infrastructure is ready. Database credentials, agentcare-secrets and DNS stay outside Terraform."; \
+	echo "Complete those one-time steps in docs/deployment-gcp.md, then run make gcp-release ENABLE_DELIVERY=true."
 
 gcp-github-vars:
 	$(call require_var,PROJECT_ID)
 	$(call require_project)
 	$(call require_var,PUBLIC_URL)
+	@set -euo pipefail; \
+	if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then \
+		echo "error: gcp-github-vars requires ENABLE_MODEL_ARMOR=true; release configuration cannot read a disabled Model Armor output" >&2; \
+		exit 1; \
+	fi
 	@gh auth status
 	@terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
 		-backend-config="bucket=$(TF_STATE_BUCKET)"
@@ -181,20 +186,30 @@ gcp-github-vars:
 	fi; \
 	gh variable set LANGFUSE_BASE_URL --env production --body "$(LANGFUSE_BASE_URL)"; \
 	gh variable set LANGFUSE_SAMPLE_RATE --env production --body "$(LANGFUSE_SAMPLE_RATE)"; \
-	gh variable set DEPLOY_ENABLED --body "true"; \
-	echo "GitHub production variables are synchronized. No secret value was read or written."
+	gh variable set DEPLOY_ENABLED --body "$(ENABLE_DELIVERY)"; \
+	echo "GitHub production variables are synchronized. Delivery is $(ENABLE_DELIVERY); no secret value was read or written."
 
 gcp-release:
 	$(call require_var,PROJECT_ID)
 	$(call require_project)
 	$(call require_var,PUBLIC_URL)
-	@$(MAKE) --no-print-directory gcp-github-vars
-	@cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
+	@set -euo pipefail; \
+	if [ "$(ENABLE_DELIVERY)" != "true" ]; then \
+		echo "error: gcp-release requires ENABLE_DELIVERY=true to arm and dispatch production delivery" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then \
+		echo "error: gcp-release requires ENABLE_MODEL_ARMOR=true before reading the Model Armor Terraform output" >&2; \
+		exit 1; \
+	fi
+	@$(MAKE) --no-print-directory gcp-github-vars ENABLE_DELIVERY="$(ENABLE_DELIVERY)"
+	@set -euo pipefail; \
+	cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
 	location="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_location)"; \
 	gcloud container clusters get-credentials "$$cluster" \
 		--region "$$location" --project "$(PROJECT_ID)"; \
 	context="gke_$(PROJECT_ID)_$${location}_$${cluster}"; \
-	kubectl --context "$$context" get secret agentcare-secrets -o name >/dev/null || { \
+	kubectl --context "$$context" --namespace=agentcare get secret agentcare-secrets -o name >/dev/null || { \
 		echo "error: agentcare-secrets is missing. Follow docs/deployment-gcp.md before release." >&2; \
 		exit 1; \
 	}; \
@@ -223,6 +238,15 @@ gcp-release:
 	gh run view "$$run_id" --json url --jq .url
 
 gcp-deploy:
+	@set -euo pipefail; \
+	if [ "$(ENABLE_DELIVERY)" != "true" ]; then \
+		echo "error: gcp-deploy requires ENABLE_DELIVERY=true because it ends by dispatching production delivery" >&2; \
+		exit 1; \
+	fi; \
+	if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then \
+		echo "error: gcp-deploy requires ENABLE_MODEL_ARMOR=true because its release reads the Model Armor Terraform output" >&2; \
+		exit 1; \
+	fi
 	@$(MAKE) --no-print-directory gcp-up
 	@$(MAKE) --no-print-directory gcp-release
 
@@ -232,13 +256,14 @@ gcp-status:
 	@terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
 		-backend-config="bucket=$(TF_STATE_BUCKET)"
 	@terraform -chdir=$(TERRAFORM_DIR) output
-	@cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
+	@set -euo pipefail; \
+	cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
 	location="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_location)"; \
 	gcloud container clusters get-credentials "$$cluster" \
 		--region "$$location" --project "$(PROJECT_ID)"; \
 	context="gke_$(PROJECT_ID)_$${location}_$${cluster}"; \
-	echo "+ kubectl --context $$context get deployment,job,ingress"; \
-	kubectl --context "$$context" get deployment,job,ingress
+	echo "+ kubectl --context $$context --namespace=agentcare get deployment,job,ingress"; \
+	kubectl --context "$$context" --namespace=agentcare get deployment,job,ingress
 	@if [ -n "$(PUBLIC_URL)" ]; then \
 		echo "+ health check $(PUBLIC_URL)/api/health"; \
 		curl -fsS --max-time 10 "$(PUBLIC_URL)/api/health"; \
@@ -250,13 +275,24 @@ gcp-status:
 gcp-down:
 	$(call require_var,PROJECT_ID)
 	$(call require_project)
-	@terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
-		-backend-config="bucket=$(TF_STATE_BUCKET)"
-	@terraform -chdir=$(TERRAFORM_DIR) plan -destroy -input=false \
-		-out=$(DESTROY_PLAN) $(TF_VAR_ARGS)
-	@terraform -chdir=$(TERRAFORM_DIR) show -no-color $(DESTROY_PLAN)
-	$(call confirm_project)
-	@cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
+	@set -euo pipefail; \
+	umask 077; \
+	plan_dir="$$(mktemp -d)"; \
+	plan_file="$$plan_dir/destroy.tfplan"; \
+	cleanup() { rm -f "$$plan_file"; rmdir "$$plan_dir"; }; \
+	trap cleanup EXIT; \
+	terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
+		-backend-config="bucket=$(TF_STATE_BUCKET)"; \
+	terraform -chdir=$(TERRAFORM_DIR) plan -destroy -input=false \
+		-out="$$plan_file" $(TF_VAR_ARGS); \
+	terraform -chdir=$(TERRAFORM_DIR) show -no-color "$$plan_file"; \
+	printf 'this destroys AgentCare in project %s\ntype the full project id to continue: ' "$(PROJECT_ID)"; \
+	read -r confirmation; \
+	if [ "$$confirmation" != "$(PROJECT_ID)" ]; then \
+		echo "confirmation did not match. nothing was deleted" >&2; \
+		exit 1; \
+	fi; \
+	cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
 	location="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_location)"; \
 	bucket="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw documents_bucket_name)"; \
 	if [ "$$bucket" != "$(PROJECT_ID)-agentcare-documents" ]; then \
@@ -266,25 +302,36 @@ gcp-down:
 	gcloud container clusters get-credentials "$$cluster" \
 		--region "$$location" --project "$(PROJECT_ID)"; \
 	context="gke_$(PROJECT_ID)_$${location}_$${cluster}"; \
-	kubectl --context "$$context" delete -k $(K8S_OVERLAY) --ignore-not-found=true; \
-	kubectl --context "$$context" delete job backend-migrate --ignore-not-found=true; \
+	kubectl --context "$$context" --namespace=agentcare delete -k $(K8S_OVERLAY) --ignore-not-found=true; \
+	kubectl --context "$$context" --namespace=agentcare delete job backend-migrate --ignore-not-found=true; \
 	if gcloud storage ls "gs://$$bucket/**" >/dev/null 2>&1; then \
 		echo "deleting every object from gs://$$bucket"; \
-		gcloud storage rm --recursive "gs://$$bucket/**"; \
+		gcloud storage rm "gs://$$bucket/**"; \
 	else \
 		echo "documents bucket is empty"; \
-	fi
-	@terraform -chdir=$(TERRAFORM_DIR) apply -input=false $(DESTROY_PLAN)
-	@echo "Main infrastructure is destroyed. Bootstrap state and keyless deployment trust remain."
-	@echo "If Google retains private service networking, retry with make gcp-cleanup."
+	fi; \
+	terraform -chdir=$(TERRAFORM_DIR) apply -input=false "$$plan_file"; \
+	echo "Main infrastructure is destroyed. Bootstrap state and keyless deployment trust remain."; \
+	echo "If Google retains private service networking, retry with make gcp-cleanup."
 
 gcp-cleanup:
 	$(call require_var,PROJECT_ID)
 	$(call require_project)
-	@terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
-		-backend-config="bucket=$(TF_STATE_BUCKET)"
-	@terraform -chdir=$(TERRAFORM_DIR) plan -destroy -input=false \
-		-out=$(DESTROY_PLAN) $(TF_VAR_ARGS)
-	@terraform -chdir=$(TERRAFORM_DIR) show -no-color $(DESTROY_PLAN)
-	$(call confirm_project)
-	@terraform -chdir=$(TERRAFORM_DIR) apply -input=false $(DESTROY_PLAN)
+	@set -euo pipefail; \
+	umask 077; \
+	plan_dir="$$(mktemp -d)"; \
+	plan_file="$$plan_dir/destroy.tfplan"; \
+	cleanup() { rm -f "$$plan_file"; rmdir "$$plan_dir"; }; \
+	trap cleanup EXIT; \
+	terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
+		-backend-config="bucket=$(TF_STATE_BUCKET)"; \
+	terraform -chdir=$(TERRAFORM_DIR) plan -destroy -input=false \
+		-out="$$plan_file" $(TF_VAR_ARGS); \
+	terraform -chdir=$(TERRAFORM_DIR) show -no-color "$$plan_file"; \
+	printf 'this destroys AgentCare in project %s\ntype the full project id to continue: ' "$(PROJECT_ID)"; \
+	read -r confirmation; \
+	if [ "$$confirmation" != "$(PROJECT_ID)" ]; then \
+		echo "confirmation did not match. nothing was deleted" >&2; \
+		exit 1; \
+	fi; \
+	terraform -chdir=$(TERRAFORM_DIR) apply -input=false "$$plan_file"

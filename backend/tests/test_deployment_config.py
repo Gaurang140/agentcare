@@ -607,7 +607,30 @@ def test_ci_deploys_main_only_after_every_release_gate():
     assert deploy["concurrency"] == {
         "group": "agentcare-production",
         "cancel-in-progress": False,
+        "queue": "max",
     }
+    assert 1 <= deploy["timeout-minutes"] <= 60
+
+
+def test_ci_runs_only_for_main_and_migration_detects_job_failure_promptly():
+    source = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    deploy = workflow["jobs"]["deploy-production"]
+    migration = next(
+        step["run"]
+        for step in deploy["steps"]
+        if step.get("name") == "run database migration"
+    )
+
+    assert re.search(r"(?ms)^\s*push:\s*\n\s*branches:\s*\[main\]", source)
+    assert re.search(r"(?ms)^\s*pull_request:\s*\n\s*branches:\s*\[main\]", source)
+    assert "workflow_dispatch:" in source
+    assert "kubectl wait" not in migration
+    assert "Complete=True" in migration
+    assert "Failed=True" in migration
+    assert "for attempt in" in migration
+    assert 'kubectl --namespace="$KUBERNETES_NAMESPACE" logs job/backend-migrate' in migration
+    assert 'kubectl --namespace="$KUBERNETES_NAMESPACE" describe job backend-migrate' in migration
 
 
 def test_ci_release_uses_keyless_gcp_auth_and_pinned_deployment_actions():
@@ -663,9 +686,15 @@ def test_ci_release_migrates_before_rollout_and_smoke_tests_public_health():
     assert step_names.index("run database migration") < step_names.index(
         "deploy application"
     )
-    assert "kubectl wait --for=condition=complete job/backend-migrate" in commands
-    assert "kubectl rollout status deployment/backend" in commands
-    assert "kubectl rollout status deployment/frontend" in commands
+    assert "kubectl wait --for=condition=complete job/backend-migrate" not in commands
+    assert (
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/backend'
+        in commands
+    )
+    assert (
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/frontend'
+        in commands
+    )
     assert '"${PUBLIC_URL}/api/health"' in commands
     assert "terraform apply" not in commands
     assert "terraform destroy" not in commands
@@ -674,14 +703,9 @@ def test_ci_release_migrates_before_rollout_and_smoke_tests_public_health():
         step["run"] for step in steps
         if step.get("name") == "run database migration"
     )
-    assert migration.rstrip().endswith(
-        '|| echo "::warning::migration completed, but pod logs are unavailable"'
-    )
-    assert re.search(
-        r"if ! kubectl wait .*?; then.*?exit 1\s+fi",
-        migration,
-        re.DOTALL,
-    )
+    assert 'echo "::error::database migration Job did not become Complete=True or Failed=True within 600 seconds"' in migration
+    assert "Failed=True" in migration
+    assert "Complete=True" in migration
 
     build_steps = [
         step for step in steps if step.get("uses", "").startswith(
@@ -693,6 +717,20 @@ def test_ci_release_migrates_before_rollout_and_smoke_tests_public_health():
         assert step["with"]["push"] is True
         assert "${{ github.sha }}" in step["with"]["tags"]
         assert ":latest" not in step["with"]["tags"]
+
+
+def test_challenge_checks_run_only_on_main_with_job_scoped_oidc():
+    path = REPO_ROOT / ".github/workflows/agentcare-checks.yml"
+    source = path.read_text(encoding="utf-8")
+    workflow = _load_yaml(path)
+    checks = workflow["jobs"]["checks"]
+
+    assert re.search(r"(?ms)^\s*push:\s*\n\s*branches:\s*\[main\]", source)
+    assert workflow["permissions"] == {"contents": "read"}
+    assert checks["permissions"] == {"contents": "read", "id-token": "write"}
+    assert 1 <= checks["timeout-minutes"] <= 30
+    checkout = checks["steps"][0]
+    assert checkout["with"]["persist-credentials"] is False
 
 
 def test_frontend_pins_patched_next_runtime_transitives():
@@ -1006,20 +1044,20 @@ def test_ci_scopes_every_release_kubectl_call_and_preflights_allowed_and_forbidd
     assert "kubectl config set-context --current --namespace=\"$KUBERNETES_NAMESPACE\"" in commands
     assert "kubectl get secret agentcare-secrets" not in commands
     for allowed in (
-        "kubectl auth can-i create deployments",
-        "kubectl auth can-i patch deployments",
-        "kubectl auth can-i create jobs",
-        "kubectl auth can-i delete jobs",
-        "kubectl auth can-i list events",
-        "kubectl auth can-i create managedcertificates.networking.gke.io",
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create deployments',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i patch deployments',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create jobs',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete jobs',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i list events',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create managedcertificates.networking.gke.io',
     ):
         assert allowed in commands
     for forbidden in (
-        "kubectl auth can-i get secrets",
-        "kubectl auth can-i create rolebindings.rbac.authorization.k8s.io",
-        "kubectl auth can-i create serviceaccounts",
-        "kubectl auth can-i create namespaces",
-        "kubectl auth can-i create pods/exec",
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i get secrets',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create rolebindings.rbac.authorization.k8s.io',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create serviceaccounts',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create namespaces',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create pods/exec',
     ):
         assert forbidden in commands
 
@@ -1093,3 +1131,75 @@ def test_public_docs_do_not_claim_the_destroyed_deployment_is_live():
 
     assert "agentcare.136-69-65-187.sslip.io" not in public_docs
     assert "application is live" not in public_docs.lower()
+
+
+def test_operator_plans_are_private_per_run_and_cleaned_without_recursive_delete():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    gitignore = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "BOOTSTRAP_PLAN" not in makefile
+    assert "MAIN_PLAN" not in makefile
+    assert "DESTROY_PLAN" not in makefile
+    assert "*.tfplan" in gitignore.splitlines()
+
+    for target, following in (
+        ("gcp-bootstrap:", "gcp-up:"),
+        ("gcp-up:", "gcp-github-vars:"),
+        ("gcp-down:", "gcp-cleanup:"),
+        ("gcp-cleanup:", None),
+    ):
+        body = makefile.split(target, 1)[1]
+        if following:
+            body = body.split(following, 1)[0]
+        assert "set -euo pipefail" in body
+        assert "umask 077" in body
+        assert "mktemp -d" in body
+        assert "trap cleanup EXIT" in body
+        assert 'rm -f "$$plan_file"; rmdir "$$plan_dir"' in body
+        assert "rm -rf" not in body
+
+
+def test_release_requires_explicit_delivery_and_model_armor_before_output_reads():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    github_vars = makefile.split("gcp-github-vars:", 1)[1].split("gcp-release:", 1)[0]
+    release = makefile.split("gcp-release:", 1)[1].split("gcp-deploy:", 1)[0]
+
+    assert "ENABLE_DELIVERY ?= false" in makefile
+    assert 'gh variable set DEPLOY_ENABLED --body "$(ENABLE_DELIVERY)"' in github_vars
+    assert 'if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then' in github_vars
+    assert github_vars.index('if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then') < github_vars.index(
+        "output -raw model_armor_template_name"
+    )
+    assert 'if [ "$(ENABLE_DELIVERY)" != "true" ]; then' in release
+    assert 'if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then' in release
+    assert release.index('if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then') < release.index(
+        "gcp-github-vars"
+    )
+
+
+def test_shared_vpc_service_networking_keeps_explicit_delayed_cleanup_policy():
+    cloud_sql = (REPO_ROOT / "infra/terraform/modules/cloud-sql/main.tf").read_text(
+        encoding="utf-8"
+    )
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "deletion_policy" not in cloud_sql
+    assert "update_on_creation_fail" not in cloud_sql
+    assert "shared/default VPC" in cloud_sql
+    assert "make gcp-cleanup" in cloud_sql
+    assert "Google can retain private service-networking" in makefile
+
+
+def test_operator_kubernetes_commands_explicitly_name_agentcare_namespace():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    commands = "\n".join(
+        step["run"]
+        for step in workflow["jobs"]["deploy-production"]["steps"]
+        if isinstance(step.get("run"), str)
+    )
+
+    assert "--namespace=agentcare" in makefile
+    assert 'kubectl --namespace="$KUBERNETES_NAMESPACE"' in commands
+    assert 'gcloud storage rm "gs://$$bucket/**"' in makefile
+    assert 'gcloud storage rm --recursive' not in makefile

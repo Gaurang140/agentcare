@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+    branches: [main]
   # Redeploys a known commit on main by hand once the infrastructure has been
   # recreated, without an empty commit to trigger a push.
   workflow_dispatch:
@@ -227,6 +229,9 @@ jobs:
       && github.ref == 'refs/heads/main'
       && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
+    # The migration Job has a 540 second active deadline; leave room for the
+    # image build, rollout, and bounded health retries without an unbounded run.
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
@@ -236,6 +241,7 @@ jobs:
     concurrency:
       group: agentcare-production
       cancel-in-progress: false
+      queue: max
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION }}
@@ -385,41 +391,55 @@ jobs:
       - name: preflight namespace-scoped release access
         shell: bash
         run: |
-          if ! kubectl auth can-i create deployments --quiet; then exit 1; fi
-          if ! kubectl auth can-i patch deployments --quiet; then exit 1; fi
-          if ! kubectl auth can-i create jobs --quiet; then exit 1; fi
-          if ! kubectl auth can-i delete jobs --quiet; then exit 1; fi
-          if ! kubectl auth can-i list events --quiet; then exit 1; fi
-          if ! kubectl auth can-i create managedcertificates.networking.gke.io --quiet; then exit 1; fi
-          if kubectl auth can-i get secrets --quiet; then exit 1; fi
-          if kubectl auth can-i create rolebindings.rbac.authorization.k8s.io --quiet; then exit 1; fi
-          if kubectl auth can-i create serviceaccounts --quiet; then exit 1; fi
-          if kubectl auth can-i create namespaces --quiet; then exit 1; fi
-          if kubectl auth can-i create pods/exec --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create deployments --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i patch deployments --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create jobs --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete jobs --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i list events --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create managedcertificates.networking.gke.io --quiet; then exit 1; fi
+          if kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i get secrets --quiet; then exit 1; fi
+          if kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create rolebindings.rbac.authorization.k8s.io --quiet; then exit 1; fi
+          if kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create serviceaccounts --quiet; then exit 1; fi
+          if kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create namespaces --quiet; then exit 1; fi
+          if kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create pods/exec --quiet; then exit 1; fi
 
       - name: run database migration
         id: migrate
         shell: bash
         run: |
-          kubectl delete job backend-migrate --ignore-not-found=true --wait=true
-          kubectl apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp-migration"
-          if ! kubectl wait --for=condition=complete job/backend-migrate --timeout=600s; then
-            kubectl logs job/backend-migrate --all-containers=true || true
-            # A job that never starts writes no logs at all. The events on the
-            # describe output carry the reason (unschedulable, image pull,
-            # deadline exceeded).
-            kubectl describe job backend-migrate || true
-            exit 1
-          fi
-          kubectl logs job/backend-migrate --all-containers=true \
-            || echo "::warning::migration completed, but pod logs are unavailable"
+          set -euo pipefail
+          kubectl --namespace="$KUBERNETES_NAMESPACE" delete job backend-migrate --ignore-not-found=true --wait=true
+          kubectl --namespace="$KUBERNETES_NAMESPACE" apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp-migration"
+          for attempt in {1..120}; do
+            echo "migration Job condition check $attempt/120"
+            conditions="$(kubectl --namespace="$KUBERNETES_NAMESPACE" get job backend-migrate \
+              -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}' || true)"
+            if grep -Fxq "Complete=True" <<<"$conditions"; then
+              kubectl --namespace="$KUBERNETES_NAMESPACE" logs job/backend-migrate --all-containers=true \
+                || echo "::warning::migration completed, but pod logs are unavailable"
+              exit 0
+            fi
+            if grep -Fxq "Failed=True" <<<"$conditions"; then
+              echo "::error::database migration Job reported Failed=True"
+              kubectl --namespace="$KUBERNETES_NAMESPACE" logs job/backend-migrate --all-containers=true || true
+              # A job that never starts writes no logs. Describe includes its
+              # events (for example unschedulable, image-pull, and deadline failures).
+              kubectl --namespace="$KUBERNETES_NAMESPACE" describe job backend-migrate || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::database migration Job did not become Complete=True or Failed=True within 600 seconds"
+          kubectl --namespace="$KUBERNETES_NAMESPACE" logs job/backend-migrate --all-containers=true || true
+          kubectl --namespace="$KUBERNETES_NAMESPACE" describe job backend-migrate || true
+          exit 1
 
       - name: deploy application
         id: deploy
         run: |
-          kubectl apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp"
-          kubectl rollout status deployment/backend --timeout=600s
-          kubectl rollout status deployment/frontend --timeout=600s
+          kubectl --namespace="$KUBERNETES_NAMESPACE" apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp"
+          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/backend --timeout=600s
+          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/frontend --timeout=600s
 
       # Reads the release identity off the cluster rather than off a version
       # endpoint, because the backend code is fixed and serves no such route.
@@ -440,7 +460,7 @@ jobs:
 
             # Hard gate: the cluster must request exactly this release tag.
             # The registry's immutable tags pin that tag to the digest above.
-            deployed=$(kubectl get deployment "$app" \
+            deployed=$(kubectl --namespace="$KUBERNETES_NAMESPACE" get deployment "$app" \
               -o jsonpath="{.spec.template.spec.containers[?(@.name=='$app')].image}")
             if [ "$deployed" = "$expected" ]; then
               echo "deployment/$app requests $expected"
@@ -453,7 +473,7 @@ jobs:
             # than the index digest the push reported, so a miss here is noise
             # more often than a wrong release. Pods replaced by this rollout
             # can also still be terminating on the old digest.
-            image_ids=$(kubectl get pods -l "app=$app" \
+            image_ids=$(kubectl --namespace="$KUBERNETES_NAMESPACE" get pods -l "app=$app" \
               --field-selector=status.phase=Running \
               -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.imageID}{"\n"}{end}{end}')
             if printf '%s\n' "$image_ids" | grep -Fq "$digest"; then
@@ -476,11 +496,11 @@ jobs:
             echo "health check attempt $attempt failed; retrying"
             sleep 10
           done
-          kubectl get pods,services,ingress
+          kubectl --namespace="$KUBERNETES_NAMESPACE" get pods,services,ingress
           exit 1
 
       - name: write release summary
-        if: always()
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           BACKEND_DIGEST: ${{ steps.digests.outputs.backend }}
