@@ -5,6 +5,7 @@ access before returning protected records.
 """
 
 import hmac
+from datetime import timezone
 from typing import Annotated
 
 from fastapi import Depends, Request
@@ -41,6 +42,15 @@ def get_current_user(
     user_id = payload.get("sub")
     user = db.get(User, int(user_id)) if user_id is not None else None
     if user is None:
+        raise PermissionDeniedError("Not authenticated")
+
+    issued_at = payload.get("iat")
+    if isinstance(issued_at, bool) or not isinstance(issued_at, (int, float)):
+        raise PermissionDeniedError("Not authenticated")
+    updated_at = user.updated_at
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    if int(issued_at) < int(updated_at.timestamp()):
         raise PermissionDeniedError("Not authenticated")
     return user
 

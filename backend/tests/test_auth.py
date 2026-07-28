@@ -1,6 +1,8 @@
 """Register / login / me happy path, and the RBAC-adjacent negative cases
 that make sure staff can actually reach the routes patients are denied."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.db.session import get_db
@@ -9,7 +11,7 @@ from app.main import (
     _require_current_database_revision,
     app,
 )
-from app.models import AuditEvent
+from app.models import AuditEvent, User
 
 
 def test_registration_writes_audit_event(client, db_session):
@@ -122,6 +124,25 @@ def test_staff_can_reach_staff_route(staff_client):
     r = staff_client.get("/api/staff/escalations")
     assert r.status_code == 200
     assert r.json() == []
+
+
+def test_staff_token_issued_before_credential_rotation_is_rejected(
+    staff_client, db_session
+):
+    staff = db_session.query(User).filter_by(email="staff@example.com").one()
+    original_updated_at = staff.updated_at
+    try:
+        staff.updated_at = (
+            datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=2)
+        )
+        db_session.commit()
+
+        response = staff_client.get("/api/auth/me")
+
+        assert response.status_code == 403
+    finally:
+        staff.updated_at = original_updated_at
+        db_session.commit()
 
 
 def test_staff_can_read_any_patients_document(staff_client, other_patient_doc):
