@@ -63,12 +63,12 @@ help:
 	@echo ""
 	@echo "  gcp-bootstrap    one-time APIs, remote state and keyless GitHub deploy identity"
 	@echo "  gcp-up           review and apply the Terraform infrastructure plan"
-	@echo "  gcp-release      sync GitHub variables, dispatch ci.yml and wait (requires ENABLE_DELIVERY=true)"
+	@echo "  gcp-release      sync disabled config, preflight, arm, dispatch ci.yml and wait (requires ENABLE_DELIVERY=true)"
 	@echo "  gcp-deploy       run gcp-up then gcp-release"
 	@echo "  gcp-status       show Terraform, the exact GKE cluster and optional public health"
 	@echo "  gcp-down         review and destroy the application infrastructure"
 	@echo "  gcp-cleanup      retry delayed service-networking deletion (Google can retain private service-networking for days)"
-	@echo "  gcp-github-vars  sync non-secret release configuration; ENABLE_DELIVERY defaults false"
+	@echo "  gcp-github-vars  sync non-secret release configuration and leave delivery disabled"
 	@echo ""
 	@echo "Required: PROJECT_ID. Optional: REGION, GCS_LOCATION, NETWORK_NAME,"
 	@echo "SUBNETWORK_NAME, ENABLE_CLOUD_SQL, ENABLE_MODEL_ARMOR, ENABLE_VERTEX_AI and ENABLE_DELIVERY."
@@ -148,12 +148,13 @@ gcp-github-vars:
 	$(call require_var,PROJECT_ID)
 	$(call require_project)
 	$(call require_var,PUBLIC_URL)
+	@gh auth status
+	@gh variable set DEPLOY_ENABLED --body "false"
 	@set -euo pipefail; \
 	if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then \
 		echo "error: gcp-github-vars requires ENABLE_MODEL_ARMOR=true; release configuration cannot read a disabled Model Armor output" >&2; \
 		exit 1; \
 	fi
-	@gh auth status
 	@terraform -chdir=$(TERRAFORM_DIR) init -input=false -reconfigure \
 		-backend-config="bucket=$(TF_STATE_BUCKET)"
 	@set -euo pipefail; \
@@ -186,8 +187,7 @@ gcp-github-vars:
 	fi; \
 	gh variable set LANGFUSE_BASE_URL --env production --body "$(LANGFUSE_BASE_URL)"; \
 	gh variable set LANGFUSE_SAMPLE_RATE --env production --body "$(LANGFUSE_SAMPLE_RATE)"; \
-	gh variable set DEPLOY_ENABLED --body "$(ENABLE_DELIVERY)"; \
-	echo "GitHub production variables are synchronized. Delivery is $(ENABLE_DELIVERY); no secret value was read or written."
+	echo "GitHub production variables are synchronized. Delivery remains disabled; gcp-release arms it only after its preflights. No secret value was read or written."
 
 gcp-release:
 	$(call require_var,PROJECT_ID)
@@ -221,7 +221,12 @@ gcp-release:
 	fi; \
 	previous="$$(gh run list --workflow ci.yml --branch main --event workflow_dispatch \
 		--limit 1 --json databaseId --jq '.[0].databaseId // ""')"; \
-	gh workflow run ci.yml --ref main; \
+	gh variable set DEPLOY_ENABLED --body "true"; \
+	if ! gh workflow run ci.yml --ref main; then \
+		gh variable set DEPLOY_ENABLED --body "false" || true; \
+		echo "error: workflow dispatch failed; delivery was disabled again" >&2; \
+		exit 1; \
+	fi; \
 	run_id=""; \
 	for attempt in $$(seq 1 30); do \
 		run_id="$$(gh run list --workflow ci.yml --branch main --event workflow_dispatch \
@@ -263,8 +268,8 @@ gcp-status:
 		--region "$$location" --project "$(PROJECT_ID)"; \
 	context="gke_$(PROJECT_ID)_$${location}_$${cluster}"; \
 	echo "+ kubectl --context $$context --namespace=agentcare get deployment,job,ingress"; \
-	kubectl --context "$$context" --namespace=agentcare get deployment,job,ingress
-	@if [ -n "$(PUBLIC_URL)" ]; then \
+	kubectl --context "$$context" --namespace=agentcare get deployment,job,ingress; \
+	if [ -n "$(PUBLIC_URL)" ]; then \
 		echo "+ health check $(PUBLIC_URL)/api/health"; \
 		curl -fsS --max-time 10 "$(PUBLIC_URL)/api/health"; \
 		echo ""; \

@@ -612,6 +612,22 @@ def test_ci_deploys_main_only_after_every_release_gate():
     assert 1 <= deploy["timeout-minutes"] <= 60
 
 
+def test_every_ci_gate_job_has_a_bounded_timeout():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    expected_timeouts = {
+        "test": 30,
+        "frontend": 20,
+        "migrations": 15,
+        "infrastructure": 15,
+        "manifests": 10,
+        "secret-scan": 10,
+        "deploy-production": 45,
+    }
+
+    for job_name, timeout_minutes in expected_timeouts.items():
+        assert workflow["jobs"][job_name]["timeout-minutes"] == timeout_minutes
+
+
 def test_ci_runs_only_for_main_and_migration_detects_job_failure_promptly():
     source = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
@@ -1165,7 +1181,20 @@ def test_release_requires_explicit_delivery_and_model_armor_before_output_reads(
     release = makefile.split("gcp-release:", 1)[1].split("gcp-deploy:", 1)[0]
 
     assert "ENABLE_DELIVERY ?= false" in makefile
-    assert 'gh variable set DEPLOY_ENABLED --body "$(ENABLE_DELIVERY)"' in github_vars
+    disable_delivery = 'gh variable set DEPLOY_ENABLED --body "false"'
+    enable_delivery = 'gh variable set DEPLOY_ENABLED --body "true"'
+    assert github_vars.count(disable_delivery) == 1
+    assert "DEPLOY_ENABLED --body \"$(ENABLE_DELIVERY)\"" not in github_vars
+    assert enable_delivery not in github_vars
+    assert github_vars.index(disable_delivery) < github_vars.index(
+        "terraform -chdir=$(TERRAFORM_DIR) init"
+    )
+    assert github_vars.index(disable_delivery) < github_vars.index(
+        "output -raw gke_cluster_name"
+    )
+    assert github_vars.index(disable_delivery) < github_vars.index(
+        "gh variable set GCP_PROJECT_ID"
+    )
     assert 'if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then' in github_vars
     assert github_vars.index('if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then') < github_vars.index(
         "output -raw model_armor_template_name"
@@ -1175,6 +1204,24 @@ def test_release_requires_explicit_delivery_and_model_armor_before_output_reads(
     assert release.index('if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then') < release.index(
         "gcp-github-vars"
     )
+    assert release.index("gcp-github-vars") < release.index(
+        "get secret agentcare-secrets"
+    )
+    assert release.index("get secret agentcare-secrets") < release.index(
+        "local_sha="
+    )
+    assert release.index("local_sha=") < release.index(enable_delivery)
+    assert release.index(enable_delivery) < release.index("gh workflow run ci.yml --ref main")
+    assert release.index("gh workflow run ci.yml --ref main") - release.index(enable_delivery) < 300
+
+
+def test_status_health_check_stays_in_the_strict_operator_recipe():
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    status = makefile.split("gcp-status:", 1)[1].split("gcp-down:", 1)[0]
+
+    assert "set -euo pipefail" in status
+    assert status.index("set -euo pipefail") < status.index('if [ -n "$(PUBLIC_URL)" ]; then')
+    assert 'curl -fsS --max-time 10 "$(PUBLIC_URL)/api/health"' in status
 
 
 def test_shared_vpc_service_networking_keeps_explicit_delayed_cleanup_policy():
