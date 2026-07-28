@@ -1,0 +1,48 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agentcare-github-release
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["cloud.google.com"]
+    resources: ["backendconfigs"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["networking.gke.io"]
+    resources: ["frontendconfigs"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["monitoring.googleapis.com"]
+    resources: ["podmonitorings"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agentcare-github-release
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: agentcare-github-deployer@PROJECT_ID_PLACEHOLDER.iam.gserviceaccount.com
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agentcare-github-release

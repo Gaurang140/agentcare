@@ -73,7 +73,7 @@ module "gke" {
 resource "google_service_account_iam_member" "backend_workload_identity_user" {
   service_account_id = module.iam.backend_service_account_name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "serviceAccount:${module.gke.workload_pool}[default/agentcare-backend]"
+  member             = "serviceAccount:${module.gke.workload_pool}[agentcare/agentcare-backend]"
 }
 
 moved {

@@ -106,7 +106,8 @@ def test_kubernetes_base_selects_profile_without_field_overrides():
 
 def test_kubernetes_backend_uses_declared_service_account_and_skips_migrations():
     base = _load_yaml(REPO_ROOT / "infra/k8s/base/kustomization.yaml")
-    assert "service-account.yaml" in base["resources"]
+    assert "service-account.yaml" not in base["resources"]
+    assert (REPO_ROOT / "infra/k8s/platform/service-account.yaml").is_file()
 
     documents = list(
         yaml.safe_load_all(
@@ -348,7 +349,7 @@ def test_workload_identity_binding_uses_the_created_gke_pool():
     )
     assert re.search(
         r'member\s*=\s*"serviceAccount:\${module\.gke\.workload_pool}'
-        r'\[default/agentcare-backend\]"',
+        r'\[agentcare/agentcare-backend\]"',
         root,
     )
     assert re.search(
@@ -812,7 +813,6 @@ def test_terraform_bootstrap_keeps_github_deployer_least_privilege():
     expected_roles = {
         "roles/artifactregistry.writer",
         "roles/container.clusterViewer",
-        "roles/container.developer",
         "roles/serviceusage.serviceUsageConsumer",
     }
     assert set(re.findall(r'"(roles/[^"]+)"', deployment_roles)) == expected_roles
@@ -823,12 +823,194 @@ def test_terraform_bootstrap_keeps_github_deployer_least_privilege():
     ).read_text(encoding="utf-8")
 
     for excessive_role in (
+        '"roles/container.developer"',
         '"roles/owner"',
         '"roles/editor"',
         '"roles/resourcemanager.projectIamAdmin"',
         '"roles/iam.serviceAccountAdmin"',
     ):
         assert excessive_role not in source
+
+
+def test_platform_bundle_owns_the_agentcare_namespace_runtime_identity_and_release_rbac():
+    platform = REPO_ROOT / "infra/k8s/platform"
+    bundle = _load_yaml(platform / "kustomization.yaml")
+    assert bundle["namespace"] == "agentcare"
+    assert bundle["resources"] == [
+        "namespace.yaml",
+        "service-account.yaml",
+        "deployer-rbac.yaml",
+    ]
+
+    documents = list(
+        yaml.safe_load_all((platform / "deployer-rbac.yaml").read_text(encoding="utf-8"))
+    )
+    role = _resource(documents, "Role", "agentcare-github-release")
+    binding = _resource(documents, "RoleBinding", "agentcare-github-release")
+
+    assert role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["configmaps", "services"],
+            "verbs": ["get", "list", "watch", "create", "patch"],
+        },
+        {
+            "apiGroups": [""],
+            "resources": ["pods"],
+            "verbs": ["get", "list", "watch"],
+        },
+        {
+            "apiGroups": [""],
+            "resources": ["pods/log"],
+            "verbs": ["get"],
+        },
+        {
+            "apiGroups": [""],
+            "resources": ["events"],
+            "verbs": ["get", "list"],
+        },
+        {
+            "apiGroups": ["apps"],
+            "resources": ["deployments"],
+            "verbs": ["get", "list", "watch", "create", "patch"],
+        },
+        {
+            "apiGroups": ["batch"],
+            "resources": ["jobs"],
+            "verbs": ["get", "list", "watch", "create", "patch", "delete"],
+        },
+        {
+            "apiGroups": ["networking.k8s.io"],
+            "resources": ["ingresses"],
+            "verbs": ["get", "list", "watch", "create", "patch"],
+        },
+        {
+            "apiGroups": ["cloud.google.com"],
+            "resources": ["backendconfigs"],
+            "verbs": ["get", "list", "watch", "create", "patch"],
+        },
+        {
+            "apiGroups": ["networking.gke.io"],
+            "resources": ["frontendconfigs"],
+            "verbs": ["get", "list", "watch", "create", "patch"],
+        },
+        {
+            "apiGroups": ["monitoring.googleapis.com"],
+            "resources": ["podmonitorings"],
+            "verbs": ["get", "list", "watch", "create", "patch"],
+        },
+    ]
+    forbidden_resources = {
+        "secrets",
+        "roles",
+        "rolebindings",
+        "clusterroles",
+        "clusterrolebindings",
+        "namespaces",
+        "serviceaccounts",
+        "pods/exec",
+        "pods/attach",
+        "pods/portforward",
+        "serviceaccounts/token",
+    }
+    granted_resources = {
+        resource for rule in role["rules"] for resource in rule["resources"]
+    }
+    assert not granted_resources & forbidden_resources
+    assert "*" not in granted_resources
+    assert all("*" not in rule["verbs"] for rule in role["rules"])
+
+    assert binding["roleRef"] == {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "agentcare-github-release",
+    }
+    assert binding["subjects"] == [
+        {
+            "apiGroup": "rbac.authorization.k8s.io",
+            "kind": "User",
+            "name": (
+                "agentcare-github-deployer@PROJECT_ID_PLACEHOLDER."
+                "iam.gserviceaccount.com"
+            ),
+        }
+    ]
+
+    namespace = _load_yaml(platform / "namespace.yaml")
+    assert namespace == {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "agentcare"}}
+    service_account = _load_yaml(platform / "service-account.yaml")
+    assert service_account == {
+        "apiVersion": "v1",
+        "kind": "ServiceAccount",
+        "metadata": {
+            "name": "agentcare-backend",
+            "annotations": {
+                "iam.gke.io/gcp-service-account": (
+                    "agentcare-backend@PROJECT_ID_PLACEHOLDER.iam.gserviceaccount.com"
+                )
+            },
+        },
+    }
+
+
+def test_gcp_overlays_are_namespace_scoped_and_do_not_own_the_runtime_service_account():
+    for path in (
+        REPO_ROOT / "infra/k8s/overlays/gcp/kustomization.yaml",
+        REPO_ROOT / "infra/k8s/overlays/gcp-migration/kustomization.yaml",
+    ):
+        overlay = _load_yaml(path)
+        assert overlay["namespace"] == "agentcare"
+
+    gcp = _load_yaml(REPO_ROOT / "infra/k8s/overlays/gcp/kustomization.yaml")
+    assert not any("serviceaccount" in str(patch).lower() for patch in gcp.get("patches", []))
+    assert not (REPO_ROOT / "infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml").exists()
+
+    base = _load_yaml(REPO_ROOT / "infra/k8s/base/kustomization.yaml")
+    assert "service-account.yaml" not in base["resources"]
+
+
+def test_workload_identity_uses_the_agentcare_namespace():
+    root = (REPO_ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
+    assert (
+        'member             = "serviceAccount:${module.gke.workload_pool}[agentcare/agentcare-backend]"'
+        in root
+    )
+
+
+def test_operator_applies_platform_after_gke_and_before_release():
+    output = _make_dry_run("gcp-up")
+    assert "kubectl --context" in output
+    assert "kustomize infra/k8s/platform" in output
+    assert output.index("terraform -chdir=infra/terraform apply") < output.index(
+        "kustomize infra/k8s/platform"
+    )
+
+
+def test_ci_scopes_every_release_kubectl_call_and_preflights_allowed_and_forbidden_access():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    deploy = workflow["jobs"]["deploy-production"]
+    assert deploy["env"]["KUBERNETES_NAMESPACE"] == "agentcare"
+    commands = "\n".join(
+        step["run"] for step in deploy["steps"] if isinstance(step.get("run"), str)
+    )
+    assert "kubectl config set-context --current --namespace=\"$KUBERNETES_NAMESPACE\"" in commands
+    assert "kubectl get secret agentcare-secrets" not in commands
+    for allowed in (
+        "kubectl auth can-i create deployments",
+        "kubectl auth can-i patch deployments",
+        "kubectl auth can-i create jobs",
+        "kubectl auth can-i delete jobs",
+        "kubectl auth can-i list events",
+    ):
+        assert allowed in commands
+    for forbidden in (
+        "kubectl auth can-i get secrets",
+        "kubectl auth can-i create rolebindings.rbac.authorization.k8s.io",
+        "kubectl auth can-i create serviceaccounts",
+        "kubectl auth can-i create namespaces",
+        "kubectl auth can-i create pods/exec",
+    ):
+        assert forbidden in commands
 
 
 def test_github_workflows_cannot_apply_or_destroy_terraform():

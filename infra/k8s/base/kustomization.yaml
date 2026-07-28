@@ -3,7 +3,6 @@ kind: Kustomization
 
 resources:
   - configmap.yaml
-  - service-account.yaml
   - backend.yaml
   - frontend.yaml
   # secret.example.yaml is intentionally NOT listed here. It is a template

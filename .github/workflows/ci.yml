@@ -250,6 +250,7 @@ jobs:
       LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
       LANGFUSE_SAMPLE_RATE: ${{ vars.LANGFUSE_SAMPLE_RATE }}
       IMAGE_TAG: ${{ github.sha }}
+      KUBERNETES_NAMESPACE: agentcare
       REGISTRY_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
       IMAGE_REPOSITORY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/agentcare
     steps:
@@ -373,13 +374,27 @@ jobs:
           cluster_name: ${{ vars.GKE_CLUSTER }}
           location: ${{ vars.GCP_REGION }}
 
+      - name: select AgentCare namespace
+        run: kubectl config set-context --current --namespace="$KUBERNETES_NAMESPACE"
+
       - name: render release manifests
         run: >-
           python scripts/render_gcp_manifests.py
           --output "$RUNNER_TEMP/agentcare-k8s"
 
-      - name: verify runtime secret exists
-        run: kubectl get secret agentcare-secrets -o name
+      - name: preflight namespace-scoped release access
+        shell: bash
+        run: |
+          if ! kubectl auth can-i create deployments --quiet; then exit 1; fi
+          if ! kubectl auth can-i patch deployments --quiet; then exit 1; fi
+          if ! kubectl auth can-i create jobs --quiet; then exit 1; fi
+          if ! kubectl auth can-i delete jobs --quiet; then exit 1; fi
+          if ! kubectl auth can-i list events --quiet; then exit 1; fi
+          if kubectl auth can-i get secrets --quiet; then exit 1; fi
+          if kubectl auth can-i create rolebindings.rbac.authorization.k8s.io --quiet; then exit 1; fi
+          if kubectl auth can-i create serviceaccounts --quiet; then exit 1; fi
+          if kubectl auth can-i create namespaces --quiet; then exit 1; fi
+          if kubectl auth can-i create pods/exec --quiet; then exit 1; fi
 
       - name: run database migration
         id: migrate

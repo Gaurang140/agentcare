@@ -26,6 +26,7 @@ GITHUB_OWNER_ID ?=
 BOOTSTRAP_DIR := infra/bootstrap
 TERRAFORM_DIR := infra/terraform
 K8S_OVERLAY := infra/k8s/overlays/gcp
+K8S_PLATFORM := infra/k8s/platform
 
 BOOTSTRAP_PLAN := /tmp/agentcare-bootstrap.tfplan
 MAIN_PLAN := /tmp/agentcare.tfplan
@@ -128,6 +129,16 @@ gcp-up:
 		exit 1; \
 	fi
 	@terraform -chdir=$(TERRAFORM_DIR) apply -input=false $(MAIN_PLAN)
+	@set -euo pipefail; \
+	cluster="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_name)"; \
+	location="$$(terraform -chdir=$(TERRAFORM_DIR) output -raw gke_cluster_location)"; \
+	gcloud container clusters get-credentials "$$cluster" \
+		--region "$$location" --project "$(PROJECT_ID)"; \
+	context="gke_$(PROJECT_ID)_$${location}_$${cluster}"; \
+	echo "+ kubectl --context $$context kustomize $(K8S_PLATFORM) | kubectl apply -f -"; \
+	kubectl --context "$$context" kustomize $(K8S_PLATFORM) \
+		| sed "s/PROJECT_ID_PLACEHOLDER/$(PROJECT_ID)/g" \
+		| kubectl --context "$$context" apply -f -
 	@terraform -chdir=$(TERRAFORM_DIR) output
 	@echo ""
 	@echo "Infrastructure is ready. Database credentials, agentcare-secrets and DNS stay outside Terraform."

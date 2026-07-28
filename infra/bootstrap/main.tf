@@ -24,7 +24,6 @@ locals {
   deployment_roles = toset([
     "roles/artifactregistry.writer",
     "roles/container.clusterViewer",
-    "roles/container.developer",
     "roles/serviceusage.serviceUsageConsumer",
   ])
 }
