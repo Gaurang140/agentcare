@@ -215,7 +215,17 @@ npm run dev
 |---|---|---|
 | Patient | `patient@agentcare-demo.com` | `demo1234` |
 | German patient | `erika@agentcare-demo.com` | `demo1234` |
-| Staff | `staff@agentcare-demo.com` | `demo1234` |
+
+Staff credentials are never published or seeded. Provision a private local
+reviewer account when you need the approval workflow:
+
+```bash
+read -r AGENTCARE_STAFF_EMAIL
+read -rs AGENTCARE_STAFF_PASSWORD
+export AGENTCARE_STAFF_EMAIL AGENTCARE_STAFF_PASSWORD
+PYTHONPATH=backend .venv/bin/python -m app.db.provision_staff
+unset AGENTCARE_STAFF_EMAIL AGENTCARE_STAFF_PASSWORD
+```
 
 Try an administrative request:
 

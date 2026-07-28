@@ -23,11 +23,6 @@ const DEMO_ACCOUNTS = [
     email: "patient@agentcare-demo.com",
     password: "demo1234",
   },
-  {
-    label: "Staff / admin demo",
-    email: "staff@agentcare-demo.com",
-    password: "demo1234",
-  },
 ] as const;
 
 export default function LoginPage() {
@@ -70,7 +65,9 @@ function LoginForm() {
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle className="text-lg">Sign in to AgentCare</CardTitle>
-          <CardDescription>Demo access for patients and staff/admin.</CardDescription>
+          <CardDescription>
+            Use the synthetic patient below. Staff access is provisioned privately.
+          </CardDescription>
         </CardHeader>
         <form onSubmit={handleSubmit}>
           <CardContent className="flex flex-col gap-4">

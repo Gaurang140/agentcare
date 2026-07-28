@@ -91,9 +91,16 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:3000"
 
     @model_validator(mode="after")
-    def reject_unsafe_production_jwt_secret(self) -> "Settings":
+    def reject_unsafe_production_configuration(self) -> "Settings":
         if self.environment.strip().lower() in {"dev", "development", "test"}:
             return self
+
+        if not self.database_url.strip().lower().startswith(
+            ("postgresql://", "postgresql+")
+        ):
+            raise ValueError(
+                "DATABASE_URL must use PostgreSQL outside development"
+            )
 
         secret = self.jwt_secret.strip()
         if (

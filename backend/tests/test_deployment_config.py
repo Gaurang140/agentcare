@@ -163,16 +163,26 @@ def test_frontend_runtime_uses_baseline_headers_correct_font_and_writable_next_d
     assert "chown -R nextjs:nodejs .next" in dockerfile
 
 
-def test_login_card_offers_only_the_seeded_patient_and_staff_demo_accounts():
+def test_login_card_offers_only_a_synthetic_patient_account():
     login_page = (REPO_ROOT / "frontend/app/login/page.tsx").read_text(
         encoding="utf-8"
     )
 
-    assert login_page.count("@agentcare-demo.com") == 2
+    assert login_page.count("@agentcare-demo.com") == 1
     assert "patient@agentcare-demo.com" in login_page
-    assert "staff@agentcare-demo.com" in login_page
-    assert "Staff / admin demo" in login_page
+    assert "staff@agentcare-demo.com" not in login_page
+    assert "Staff / admin demo" not in login_page
     assert "Use" in login_page
+
+
+def test_container_seeding_is_explicit_and_local_compose_opts_in():
+    entrypoint = (REPO_ROOT / "backend/docker-entrypoint.sh").read_text(
+        encoding="utf-8"
+    )
+    compose = _load_yaml(REPO_ROOT / "docker-compose.yml")
+
+    assert '${SEED_DEMO_DATA:-false}" = "true"' in entrypoint
+    assert compose["services"]["backend"]["environment"]["SEED_DEMO_DATA"] == "true"
 
 
 def test_backend_docker_context_is_an_explicit_allowlist():
@@ -849,11 +859,14 @@ def test_challenge_checks_run_only_on_main_with_job_scoped_oidc():
     checks = workflow["jobs"]["checks"]
 
     assert re.search(r"(?ms)^\s*push:\s*\n\s*branches:\s*\[main\]", source)
+    assert re.search(r"(?m)^\s*workflow_dispatch:\s*$", source)
     assert workflow["permissions"] == {"contents": "read"}
     assert checks["permissions"] == {"contents": "read", "id-token": "write"}
     assert 1 <= checks["timeout-minutes"] <= 30
     checkout = checks["steps"][0]
     assert checkout["with"]["persist-credentials"] is False
+    assert 'GitHub secret SUBMISSION_TOKEN is missing' in source
+    assert 'if [ -z "$SUBMISSION_TOKEN" ]' in source
 
 
 def test_frontend_pins_patched_next_runtime_transitives():

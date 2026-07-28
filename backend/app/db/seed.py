@@ -53,7 +53,7 @@ _AGENT_RULES: dict[str, list[str]] = {
     ],
     "appointment": [
         "Prefer the earliest slot inside the patient's stated time window; never propose slots in the past.",
-        "If no slot fits the patient's stated window, pick the earliest slot overall rather than escalating immediately.",
+        "If no slot fits the patient's stated window, report that no matching slot is available; never leave the requested window.",
     ],
     "document": [
         "When document type is ambiguous, classify as other rather than guessing.",
@@ -227,17 +227,6 @@ def _seed_users(db: Session) -> None:
         preferred_language="de",
     )
 
-    if db.query(User).filter_by(email="staff@agentcare-demo.com").one_or_none() is None:
-        db.add(
-            User(
-                email="staff@agentcare-demo.com",
-                password_hash=hash_password(_DEMO_PASSWORD),
-                role="staff",
-                full_name="Admin Petra Muster",
-            )
-        )
-
-
 def seed(db: Session) -> dict[str, int]:
     """Insert any missing canonical demo records and return current counts."""
     _seed_catalog(db)
@@ -245,3 +234,17 @@ def seed(db: Session) -> dict[str, int]:
     _seed_agent_rules(db)
     db.commit()
     return _counts(db)
+
+
+def main() -> None:
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        print("seed:", seed(db))
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()

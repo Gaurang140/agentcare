@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: agentcare
       POSTGRES_PASSWORD: agentcare
@@ -29,6 +29,7 @@ services:
       DATABASE_URL: postgresql+psycopg://agentcare:agentcare@db:5432/agentcare
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env or the shell before starting Compose}
       FRONTEND_ORIGIN: http://localhost:3000
+      SEED_DEMO_DATA: "true"
     ports:
       - "8000:8000"
 

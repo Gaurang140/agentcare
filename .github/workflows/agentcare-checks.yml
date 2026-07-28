@@ -3,6 +3,7 @@ name: AgentCare Checks
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -38,6 +39,15 @@ jobs:
           python-version: '3.11'
 
       # No extra dependencies: these checks use only the Python standard library.
+
+      - name: Validate submission token
+        env:
+          SUBMISSION_TOKEN: ${{ secrets.SUBMISSION_TOKEN }}
+        run: |
+          if [ -z "$SUBMISSION_TOKEN" ]; then
+            echo "::error::GitHub secret SUBMISSION_TOKEN is missing"
+            exit 1
+          fi
 
       - name: Request GitHub OIDC token
         id: oidc

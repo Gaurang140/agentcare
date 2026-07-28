@@ -322,7 +322,12 @@ def create_run(db: Session, user: User, request_text: str) -> WorkflowRun:
 
     workflow_run = _new_workflow_run(db, user, request_text, status="running")
     write_audit(
-        db, user.id, "workflow.started", "workflow_run", workflow_run.id, {"request_text": request_text}
+        db,
+        user.id,
+        "workflow.started",
+        "workflow_run",
+        workflow_run.id,
+        {"request_length": len(request_text)},
     )
     db.commit()
     return workflow_run

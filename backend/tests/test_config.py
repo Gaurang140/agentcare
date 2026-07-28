@@ -18,6 +18,7 @@ def test_non_development_environment_rejects_unsafe_jwt_secret(secret):
             _env_file=None,
             environment="prod",
             jwt_secret=secret,
+            database_url="postgresql+psycopg://agentcare:test@db/agentcare",
         )
 
 
@@ -26,9 +27,24 @@ def test_non_development_environment_accepts_random_length_jwt_secret():
         _env_file=None,
         environment="prod",
         jwt_secret="a" * 64,
+        database_url="postgresql+psycopg://agentcare:test@db/agentcare",
     )
 
     assert settings.jwt_secret == "a" * 64
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    ["sqlite:///./agentcare.db", "sqlite+pysqlite:///:memory:"],
+)
+def test_non_development_environment_rejects_sqlite(database_url):
+    with pytest.raises(ValidationError, match="PostgreSQL"):
+        Settings(
+            _env_file=None,
+            environment="production",
+            jwt_secret="a" * 64,
+            database_url=database_url,
+        )
 
 
 def test_development_can_boot_before_local_secret_is_configured():

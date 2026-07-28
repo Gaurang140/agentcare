@@ -8,7 +8,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.models import AppointmentSlot, AuditEvent
+from app.models import AppointmentSlot, AuditEvent, User
+from app.services.workflow_service import create_run
 from app.tools.appointment_tools import book_appointment, cancel_appointment, reschedule_appointment
 from app.tools.audit_tools import write_audit
 from app.tools.escalation_tools import create_escalation, resolve_escalation
@@ -52,6 +53,22 @@ def test_write_audit_allows_null_actor_and_entity(db, seeded):
     assert row is not None
     assert row.actor_id is None
     assert row.entity_id is None
+
+
+def test_workflow_started_audit_does_not_copy_raw_request(db, seeded):
+    patient = db.query(User).filter_by(role="patient").first()
+    assert patient is not None
+    raw_request = "Book an appointment for synthetic patient 12345"
+
+    workflow = create_run(db, patient, raw_request)
+
+    row = (
+        db.query(AuditEvent)
+        .filter_by(action="workflow.started", entity_id=workflow.id)
+        .one()
+    )
+    assert raw_request not in str(row.metadata_json)
+    assert row.metadata_json == {"request_length": len(raw_request)}
 
 
 def test_book_appointment_writes_audit(db, seeded):
