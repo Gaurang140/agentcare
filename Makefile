@@ -221,12 +221,29 @@ gcp-release:
 	fi; \
 	previous="$$(gh run list --workflow ci.yml --branch main --event workflow_dispatch \
 		--limit 1 --json databaseId --jq '.[0].databaseId // ""')"; \
+	delivery_armed=false; \
+	release_committed=false; \
+	rollback_delivery() { \
+		status=$$?; \
+		if [ "$$delivery_armed" != "true" ]; then \
+			exit "$$status"; \
+		fi; \
+		if [ "$$release_committed" = "true" ]; then \
+			exit "$$status"; \
+		fi; \
+		echo "::error::release failed after delivery was armed; attempting to disable it" >&2; \
+		if gh variable set DEPLOY_ENABLED --body "false"; then \
+			echo "delivery was disabled after the failed release" >&2; \
+		else \
+			echo "::error::automatic delivery may still be armed; manual recovery: gh variable set DEPLOY_ENABLED --body false" >&2; \
+			if [ "$$status" -eq 0 ]; then exit 1; fi; \
+		fi; \
+		exit "$$status"; \
+	}; \
+	trap rollback_delivery EXIT; \
 	gh variable set DEPLOY_ENABLED --body "true"; \
-	if ! gh workflow run ci.yml --ref main; then \
-		gh variable set DEPLOY_ENABLED --body "false" || true; \
-		echo "error: workflow dispatch failed; delivery was disabled again" >&2; \
-		exit 1; \
-	fi; \
+	delivery_armed=true; \
+	gh workflow run ci.yml --ref main; \
 	run_id=""; \
 	for attempt in $$(seq 1 30); do \
 		run_id="$$(gh run list --workflow ci.yml --branch main --event workflow_dispatch \
@@ -240,7 +257,8 @@ gcp-release:
 	fi; \
 	echo "watching GitHub Actions run $$run_id"; \
 	gh run watch "$$run_id" --exit-status; \
-	gh run view "$$run_id" --json url --jq .url
+	gh run view "$$run_id" --json url --jq .url; \
+	release_committed=true
 
 gcp-deploy:
 	@set -euo pipefail; \

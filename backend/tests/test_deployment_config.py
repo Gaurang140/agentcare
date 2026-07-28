@@ -1210,9 +1210,30 @@ def test_release_requires_explicit_delivery_and_model_armor_before_output_reads(
     assert release.index("get secret agentcare-secrets") < release.index(
         "local_sha="
     )
-    assert release.index("local_sha=") < release.index(enable_delivery)
+    guard = "trap rollback_delivery EXIT"
+    committed = "release_committed=true"
+    assert release.index("local_sha=") < release.index(guard)
+    assert release.index(guard) < release.index(enable_delivery)
+    assert "delivery_armed=false" in release
+    assert "release_committed=false" in release
+    assert 'if [ "$$delivery_armed" != "true" ]; then' in release
+    assert 'if [ "$$release_committed" = "true" ]; then' in release
+    assert 'gh variable set DEPLOY_ENABLED --body "false"' in release
+    assert "manual recovery: gh variable set DEPLOY_ENABLED --body false" in release
+
+    for failure_boundary in (
+        "gh workflow run ci.yml --ref main",
+        'if [ -z "$$run_id" ] || [ "$$run_id" = "$$previous" ]; then',
+        'gh run watch "$$run_id" --exit-status',
+        'gh run view "$$run_id" --json url --jq .url',
+    ):
+        assert release.index(guard) < release.index(failure_boundary) < release.index(
+            committed
+        )
+
     assert release.index(enable_delivery) < release.index("gh workflow run ci.yml --ref main")
     assert release.index("gh workflow run ci.yml --ref main") - release.index(enable_delivery) < 300
+    assert release.rindex(committed) > release.index('gh run view "$$run_id" --json url --jq .url')
 
 
 def test_status_health_check_stays_in_the_strict_operator_recipe():
