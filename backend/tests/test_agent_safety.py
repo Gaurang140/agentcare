@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.agents import safety
-from app.models import AppointmentSlot, AuditEvent, PatientProfile
+from app.models import Appointment, AppointmentSlot, AuditEvent, PatientProfile
 from app.safety.guardrails import SANITIZED_SENTENCE
 from app.tools.appointment_tools import book_appointment, cancel_appointment
 from app.tools.followup_tools import create_reminder
@@ -25,7 +25,12 @@ def _set_language(db, patient_id: int, language: str) -> None:
 
 
 def _booked_state(db, **overrides) -> dict:
-    slot = db.query(AppointmentSlot).filter_by(status="free").order_by(AppointmentSlot.start_time).first()
+    slot = (
+        db.query(AppointmentSlot)
+        .filter_by(status="free")
+        .order_by(AppointmentSlot.start_time.desc())
+        .first()
+    )
     booking = book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
     create_reminder(
         db,
@@ -77,7 +82,7 @@ def _status_summary_state(db) -> tuple[dict, list[dict]]:
     return state, [first, second]
 
 
-def test_safe_llm_response_passes_through_after_sanitizer(db, seeded, fake_llm):
+def test_safe_llm_verdict_keeps_canonical_sql_draft(db, seeded, fake_llm):
     state = _booked_state(db)
     fake_llm(
         [
@@ -92,11 +97,76 @@ def test_safe_llm_response_passes_through_after_sanitizer(db, seeded, fake_llm):
     result = safety.run(state, db)
 
     assert "diagnosis" not in result["final_response"].lower()
-    assert result["final_response"] == "Your appointment is confirmed. Please bring your ecg_report."
+    assert state["appointment"]["doctor"] in result["final_response"]
+    assert state["appointment"]["start_time"] in result["final_response"]
+    assert "Please bring your ecg_report" not in result["final_response"]
     assert result["completed_steps"] == ["safety"]
 
 
-def test_deterministic_sanitizer_strips_poisoned_response_even_when_llm_says_safe(db, seeded, fake_llm):
+def test_safe_llm_cannot_rewrite_authoritative_sql_appointment_facts(
+    db, seeded, fake_llm
+):
+    state = _booked_state(db)
+    booking = state["appointment"]
+    fake_llm(
+        [
+            {
+                "safe": True,
+                "violations": [],
+                "rewritten": (
+                    "Your appointment is with Dr. Fabricated tomorrow at midnight."
+                ),
+            }
+        ]
+    )
+
+    result = safety.run(state, db)
+
+    assert booking["doctor"] in result["final_response"]
+    assert booking["start_time"] in result["final_response"]
+    assert "Dr. Fabricated" not in result["final_response"]
+    assert "midnight" not in result["final_response"]
+
+
+def test_draft_excludes_reminders_from_unrelated_appointments(
+    db, seeded, fake_llm
+):
+    state = _booked_state(db)
+    first_start = datetime.fromisoformat(state["appointment"]["start_time"])
+    other_slot = (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.end_time <= first_start,
+        )
+        .order_by(AppointmentSlot.start_time.desc())
+        .first()
+    )
+    other = book_appointment(
+        db,
+        patient_id=1,
+        slot_id=other_slot.id,
+        reason="unrelated appointment",
+    )
+    create_reminder(
+        db,
+        patient_id=1,
+        appointment_id=other["id"],
+        reminder_type="unrelated_secret_reminder",
+        scheduled_at=datetime.now(timezone.utc).replace(tzinfo=None)
+        + timedelta(days=2),
+    )
+    fake_llm([RuntimeError("use deterministic draft")])
+
+    result = safety.run(state, db)
+
+    assert "appointment_reminder" in result["final_response"]
+    assert "unrelated_secret_reminder" not in result["final_response"]
+
+
+def test_poisoned_llm_rewrite_is_ignored_even_when_llm_says_safe(
+    db, seeded, fake_llm
+):
     state = _booked_state(db)
     fake_llm(
         [
@@ -116,9 +186,8 @@ def test_deterministic_sanitizer_strips_poisoned_response_even_when_llm_says_saf
     final = result["final_response"]
     assert "diabetes" not in final
     assert "metformin" not in final
-    assert SANITIZED_SENTENCE in final
-    assert "Your appointment is confirmed." in final
-    assert "deterministic_sanitizer_rewrote_output" in result["safety_flags"]
+    assert state["appointment"]["doctor"] in final
+    assert "deterministic_sanitizer_rewrote_output" not in result["safety_flags"]
 
 
 def test_llm_failure_falls_back_to_deterministic_only_path(db, seeded, fake_llm):
@@ -265,14 +334,15 @@ def test_clean_model_armor_verdict_leaves_the_draft_untouched(
     db, seeded, fake_llm, model_armor_on, fake_model_armor
 ):
     state = _booked_state(db)
+    expected = safety._compose_draft(db, 1, state["appointment"], "en")
     fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
     client = fake_model_armor(response={"pi_and_jailbreak": False, "malicious_uris": False})
 
     result = safety.run(state, db)
 
-    assert result["final_response"] == _CONFIRMATION
+    assert result["final_response"] == expected
     assert _armor_audit(db) is None
-    assert client.response_calls[0]["request"].model_response_data.text == _CONFIRMATION
+    assert client.response_calls[0]["request"].model_response_data.text == expected
 
 
 def test_model_armor_failure_leaves_the_draft_to_the_deterministic_sanitizer(
@@ -281,12 +351,13 @@ def test_model_armor_failure_leaves_the_draft_to_the_deterministic_sanitizer(
     """No opinion is not a block. A screening outage must not turn every
     confirmation into a referral."""
     state = _booked_state(db)
+    expected = safety._compose_draft(db, 1, state["appointment"], "en")
     fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
     fake_model_armor(response=RuntimeError("deadline exceeded"))
 
     result = safety.run(state, db)
 
-    assert result["final_response"] == _CONFIRMATION
+    assert result["final_response"] == expected
     assert _armor_audit(db) is None
 
 
@@ -295,15 +366,10 @@ def test_deterministic_sanitizer_still_has_the_last_word_after_a_clean_armor_ver
 ):
     """Model Armor saying nothing is wrong does not publish a diagnosis."""
     state = _booked_state(db)
-    fake_llm(
-        [
-            {
-                "safe": True,
-                "violations": [],
-                "rewritten": "Your appointment is confirmed. You have diabetes.",
-            }
-        ]
-    )
+    appointment_row = db.get(Appointment, state["appointment"]["id"])
+    appointment_row.doctor.name = "Dr. Unsafe. You have diabetes"
+    db.commit()
+    fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
     fake_model_armor(response={"pi_and_jailbreak": False})
 
     result = safety.run(state, db)
@@ -317,12 +383,13 @@ def test_disabled_model_armor_never_screens_the_draft(db, seeded, fake_llm, fake
     """With no template configured the path is what it was: no call, no audit
     row, the same answer."""
     state = _booked_state(db)
+    expected = safety._compose_draft(db, 1, state["appointment"], "en")
     fake_llm([{"safe": True, "violations": [], "rewritten": _CONFIRMATION}])
     client = fake_model_armor(response={"pi_and_jailbreak": True})
 
     result = safety.run(state, db)
 
-    assert result["final_response"] == _CONFIRMATION
+    assert result["final_response"] == expected
     assert client.response_calls == []
     assert _armor_audit(db) is None
 

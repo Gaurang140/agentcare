@@ -51,8 +51,11 @@ export interface AppointmentOut {
   doctor: string;
   department: string;
   start_time: string | null;
+  end_time: string | null;
   status: string; // "pending" | "confirmed" | "cancelled"
   reason?: string | null;
+  created_at: string;
+  workflow_id: number | null;
 }
 
 export interface RescheduleRequest {

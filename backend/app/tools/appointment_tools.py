@@ -134,6 +134,8 @@ def appointment_summary(appt: Appointment, slot: AppointmentSlot | None = None) 
         "start_time": slot.start_time.isoformat(),
         "end_time": slot.end_time.isoformat(),
         "status": appt.status,
+        "created_at": appt.created_at.isoformat(),
+        "workflow_id": appt.workflow_run_id,
     }
 
 
@@ -520,9 +522,12 @@ def list_patient_appointments(db: Session, patient_id: int) -> list[dict]:
             "id": appt.id,
             "doctor": appt.doctor.name,
             "department": appt.doctor.department.name,
-            "start_time": appt.slot.start_time.isoformat() if appt.slot else None,
+            "start_time": appt.scheduled_start.isoformat(),
+            "end_time": appt.scheduled_end.isoformat(),
             "status": appt.status,
             "reason": appt.reason,
+            "created_at": appt.created_at.isoformat(),
+            "workflow_id": appt.workflow_run_id,
         }
         for appt in appts
     ]

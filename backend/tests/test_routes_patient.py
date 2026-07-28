@@ -47,6 +47,21 @@ def test_department_slots_lists_free_slots(patient_client, db_session):
     assert slots[0]["doctor"]
 
 
+def test_department_slot_window_and_limit_are_bounded(patient_client, db_session):
+    dept_id = _cardiology_id(db_session)
+
+    backwards = patient_client.get(
+        f"/api/departments/{dept_id}/slots"
+        "?date_from=2026-08-10&date_to=2026-08-01"
+    )
+    oversized = patient_client.get(
+        f"/api/departments/{dept_id}/slots?limit=101"
+    )
+
+    assert backwards.status_code == 400
+    assert oversized.status_code == 422
+
+
 def test_patient_slot_endpoint_filters_callers_existing_times(patient_client, db_session):
     dept_id = _cardiology_id(db_session)
     user = db_session.query(User).filter_by(email="patient@example.com").first()

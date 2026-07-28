@@ -17,7 +17,12 @@ from app.tools.followup_tools import ReminderItem, create_reminders_batch
 
 
 def _booked_state(db, **overrides) -> dict:
-    slot = db.query(AppointmentSlot).filter_by(status="free").order_by(AppointmentSlot.start_time).first()
+    slot = (
+        db.query(AppointmentSlot)
+        .filter_by(status="free")
+        .order_by(AppointmentSlot.start_time.desc())
+        .first()
+    )
     booking = book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
     base = {
         "workflow_id": 1,
@@ -113,12 +118,11 @@ def test_caps_reminder_count_and_clamps_days_before_appointment(db, seeded, fake
     scheduled = (
         db.query(Reminder).filter(Reminder.patient_id == 1, Reminder.reminder_type != "followup").all()
     )
-    assert len(scheduled) == 5
+    assert 1 <= len(scheduled) <= 5
     earliest = start_time - timedelta(days=90)
     for reminder in scheduled:
-        assert earliest <= reminder.scheduled_at <= start_time
-    # the five capped reminders plus the post-visit follow-up task
-    assert len(result["reminders"]) == 6
+        assert max(earliest, datetime.now()) < reminder.scheduled_at <= start_time
+    assert len(result["reminders"]) == len(scheduled) + 1
 
 
 def test_clamps_followup_days_after(db, seeded, fake_llm):
@@ -130,6 +134,34 @@ def test_clamps_followup_days_after(db, seeded, fake_llm):
 
     task = db.query(Reminder).filter_by(patient_id=1, reminder_type="followup").one()
     assert task.scheduled_at == start_time + timedelta(days=90)
+
+
+def test_expired_preappointment_reminders_are_not_created(
+    db, seeded, fake_llm
+):
+    state = _booked_state(db)
+    soon = datetime.now() + timedelta(minutes=30)
+    state["appointment"]["start_time"] = soon.isoformat()
+    fake_llm(
+        [
+            {
+                "reminders": [
+                    {
+                        "type": "appointment_reminder",
+                        "days_before_appointment": 1,
+                    }
+                ],
+                "followup_days_after": 14,
+            }
+        ]
+    )
+
+    result = followup.run(state, db)
+
+    reminders = db.query(Reminder).filter_by(patient_id=1).all()
+    assert [row.reminder_type for row in reminders] == ["followup"]
+    assert all(row.scheduled_at > datetime.now() for row in reminders)
+    assert [row["reminder_type"] for row in result["reminders"]] == ["followup"]
 
 
 # --- The batch is one transaction -------------------------------------------

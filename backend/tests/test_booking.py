@@ -746,6 +746,9 @@ def test_list_patient_appointments_reflects_bookings(db, seeded):
     assert len(appts) == 1
     assert appts[0]["id"] == booking["id"]
     assert appts[0]["status"] == "confirmed"
+    assert appts[0]["end_time"] == booking["end_time"]
+    assert appts[0]["created_at"]
+    assert appts[0]["workflow_id"] is None
 
 
 def test_find_department_fuzzy_match(db, seeded):

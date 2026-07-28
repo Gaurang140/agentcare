@@ -107,6 +107,7 @@ def run(state: AgentState, db: Session) -> dict:
         plan = invoke_structured(system, _plan_prompt(appointment, missing), FollowupOutput)
         start_time = datetime.fromisoformat(appointment["start_time"])
 
+        now = datetime.now()
         items = [
             ReminderItem(
                 spec.type,
@@ -121,6 +122,7 @@ def run(state: AgentState, db: Session) -> dict:
                 "followup", start_time + timedelta(days=_clamp_days(plan.followup_days_after))
             )
         )
+        items = [item for item in items if item.scheduled_at > now]
         created = create_reminders_batch(db, patient_id, appointment_id, items)
 
         update = {"reminders": created, "completed_steps": ["followup"]}
