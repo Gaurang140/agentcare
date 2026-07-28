@@ -379,7 +379,8 @@ jobs:
             kubectl describe job backend-migrate || true
             exit 1
           fi
-          kubectl logs job/backend-migrate --all-containers=true
+          kubectl logs job/backend-migrate --all-containers=true \
+            || echo "::warning::migration completed, but pod logs are unavailable"
 
       - name: deploy application
         id: deploy

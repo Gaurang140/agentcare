@@ -627,6 +627,19 @@ def test_ci_release_migrates_before_rollout_and_smoke_tests_public_health():
     assert "terraform apply" not in commands
     assert "terraform destroy" not in commands
 
+    migration = next(
+        step["run"] for step in steps
+        if step.get("name") == "run database migration"
+    )
+    assert migration.rstrip().endswith(
+        '|| echo "::warning::migration completed, but pod logs are unavailable"'
+    )
+    assert re.search(
+        r"if ! kubectl wait .*?; then.*?exit 1\s+fi",
+        migration,
+        re.DOTALL,
+    )
+
     build_steps = [
         step for step in steps if step.get("uses", "").startswith(
             "docker/build-push-action@"
