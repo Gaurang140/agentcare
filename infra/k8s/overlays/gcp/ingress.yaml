@@ -19,6 +19,14 @@ metadata:
     networking.gke.io/managed-certificates: "agentcare-cert"
     networking.gke.io/v1beta1.FrontendConfig: "agentcare-frontendconfig"
 spec:
+  # Avoid GKE's implicit NodePort-based default-http-backend. The Autopilot
+  # services below use container-native NEGs, so unmatched traffic belongs on
+  # the existing frontend backend as well.
+  defaultBackend:
+    service:
+      name: frontend
+      port:
+        number: 3000
   rules:
     - http:
         paths:

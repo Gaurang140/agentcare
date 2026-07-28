@@ -198,6 +198,12 @@ def test_gcp_ingress_redirects_http_to_https():
         )
     )
     ingress = _resource(ingress_documents, "Ingress", "agentcare")
+    assert ingress["spec"]["defaultBackend"] == {
+        "service": {
+            "name": "frontend",
+            "port": {"number": 3000},
+        }
+    }
     assert ingress["metadata"]["annotations"][
         "networking.gke.io/v1beta1.FrontendConfig"
     ] == (
