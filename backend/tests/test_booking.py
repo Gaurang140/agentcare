@@ -283,6 +283,62 @@ def test_reschedule_frees_old_slot_and_claims_new(db, seeded):
     assert result["start_time"] == new_slot.start_time.isoformat()
 
 
+def test_direct_reschedule_clears_the_original_booking_window_lock(db, seeded):
+    old_slot = _free_slot(db)
+    booking = book_appointment(
+        db,
+        patient_id=1,
+        slot_id=old_slot.id,
+        reason="checkup",
+        booking_window_key="department:1:2026-07-27:2026-08-02",
+    )
+    new_slot = (
+        db.query(AppointmentSlot)
+        .filter(AppointmentSlot.status == "free", AppointmentSlot.id != old_slot.id)
+        .first()
+    )
+    assert new_slot is not None
+
+    reschedule_appointment(db, booking["id"], new_slot.id)
+
+    assert db.get(Appointment, booking["id"]).booking_window_key is None
+
+
+def test_reschedule_rejects_inactive_or_cross_department_doctor(db, seeded):
+    old_slot = _free_slot(db)
+    booking = book_appointment(db, 1, old_slot.id, "checkup")
+    original_department_id = db.get(Doctor, old_slot.doctor_id).department_id
+    target = (
+        db.query(AppointmentSlot)
+        .join(Doctor)
+        .filter(
+            AppointmentSlot.status == "free",
+            Doctor.department_id != original_department_id,
+        )
+        .first()
+    )
+    if target is None:
+        target = (
+            db.query(AppointmentSlot)
+            .join(Doctor)
+            .filter(
+                AppointmentSlot.status == "free",
+                AppointmentSlot.id != old_slot.id,
+            )
+            .first()
+        )
+        assert target is not None
+        db.get(Doctor, target.doctor_id).active = False
+        db.commit()
+
+    with pytest.raises(ConflictError):
+        reschedule_appointment(db, booking["id"], target.id)
+
+    db.refresh(target)
+    assert target.status == "free"
+    assert db.get(Appointment, booking["id"]).slot_id == old_slot.id
+
+
 def test_reschedule_conflict_leaves_original_booking_intact(db, seeded):
     old_slot = _free_slot(db)
     booking = book_appointment(db, patient_id=1, slot_id=old_slot.id, reason="checkup")

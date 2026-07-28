@@ -1028,7 +1028,7 @@ def test_platform_bundle_owns_the_agentcare_namespace_runtime_identity_and_relea
         {
             "apiGroups": [""],
             "resources": ["configmaps"],
-            "verbs": ["get", "create", "patch"],
+            "verbs": ["get", "create", "patch", "delete"],
         },
         {
             "apiGroups": [""],
@@ -1053,7 +1053,7 @@ def test_platform_bundle_owns_the_agentcare_namespace_runtime_identity_and_relea
         {
             "apiGroups": ["apps"],
             "resources": ["deployments"],
-            "verbs": ["get", "create", "patch", "watch"],
+            "verbs": ["get", "create", "patch", "delete", "watch"],
         },
         {
             "apiGroups": ["batch"],
@@ -1063,7 +1063,7 @@ def test_platform_bundle_owns_the_agentcare_namespace_runtime_identity_and_relea
         {
             "apiGroups": ["batch"],
             "resources": ["cronjobs"],
-            "verbs": ["get", "create", "patch"],
+            "verbs": ["get", "create", "patch", "delete"],
         },
         {
             "apiGroups": ["policy"],
@@ -1194,6 +1194,8 @@ def test_ci_scopes_every_release_kubectl_call_and_preflights_allowed_and_forbidd
     for allowed in (
         'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create deployments',
         'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i patch deployments',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete deployments',
+        'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete configmaps',
         'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create jobs',
         'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete jobs',
         'kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i list events',

@@ -38,6 +38,7 @@ spec:
               : "${AGENTCARE_STAFF_EMAIL:?agentcare-secrets is missing AGENTCARE_STAFF_EMAIL}"
               : "${AGENTCARE_STAFF_PASSWORD:?agentcare-secrets is missing AGENTCARE_STAFF_PASSWORD}"
               alembic upgrade head
+              python -m app.db.seed
               python -m app.db.provision_staff
           envFrom:
             - secretRef:

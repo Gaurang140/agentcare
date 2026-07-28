@@ -86,8 +86,8 @@ def test_migration_job_is_explicit_and_provisions_private_staff():
     command = " ".join(container["command"] + container["args"])
 
     assert "alembic upgrade head" in command
+    assert "python -m app.db.seed" in command
     assert "python -m app.db.provision_staff" in command
-    assert "app.db.seed" not in command
 
 
 def test_ci_migrates_postgresql_17_and_rolls_back_a_failed_release():
@@ -102,14 +102,20 @@ def test_ci_migrates_postgresql_17_and_rolls_back_a_failed_release():
     )
 
     deploy = workflow["jobs"]["deploy-production"]["steps"]
+    capture = next(
+        step
+        for step in deploy
+        if step.get("name") == "capture current runtime for rollback"
+    )
     rollback = next(
         step
         for step in deploy
         if step.get("name") == "roll back failed rollout"
     )
     assert "failure()" in rollback["if"]
-    assert "rollout undo deployment/backend" in rollback["run"]
-    assert "rollout undo deployment/frontend" in rollback["run"]
+    assert 'capture_resource deployment "$app" "deployment-$app"' in capture["run"]
+    assert "rollout undo" not in rollback["run"]
+    assert 'restore_resource deployment "$app" "deployment-$app"' in rollback["run"]
 
 
 def test_terraform_enables_vertex_and_cloud_sql_recovery_by_default():

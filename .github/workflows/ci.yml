@@ -417,9 +417,12 @@ jobs:
         run: |
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create deployments --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i patch deployments --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete deployments --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete configmaps --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create jobs --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete jobs --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create cronjobs --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete cronjobs --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create poddisruptionbudgets.policy --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i list events --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create managedcertificates.networking.gke.io --quiet; then exit 1; fi
@@ -460,18 +463,54 @@ jobs:
           kubectl --namespace="$KUBERNETES_NAMESPACE" describe job backend-migrate || true
           exit 1
 
+      - name: capture current runtime for rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          rollback_dir="$RUNNER_TEMP/agentcare-rollback"
+          mkdir -p "$rollback_dir"
+
+          capture_resource() {
+            kind="$1"
+            name="$2"
+            file="$3"
+            raw="$rollback_dir/$file.raw.json"
+            if ! kubectl --namespace="$KUBERNETES_NAMESPACE" get "$kind" "$name" \
+              --ignore-not-found -o json >"$raw"; then
+              echo "::error::failed to capture $kind/$name for rollback"
+              exit 1
+            fi
+            if [ -s "$raw" ]; then
+              jq 'del(
+                  .metadata.annotations."deployment.kubernetes.io/revision",
+                  .metadata.creationTimestamp,
+                  .metadata.generation,
+                  .metadata.managedFields,
+                  .metadata.resourceVersion,
+                  .metadata.uid,
+                  .status
+                )' "$raw" >"$rollback_dir/$file.json"
+              rm -f "$raw"
+              echo "$kind/$name exists and can be restored"
+            else
+              rm -f "$raw"
+              rm -f "$rollback_dir/$file.json"
+              touch "$rollback_dir/$file.absent"
+            fi
+          }
+
+          capture_resource configmap agentcare-config configmap
+          for app in backend frontend; do
+            capture_resource deployment "$app" "deployment-$app"
+          done
+          for cronjob in send-due-reminders recover-stalled-workflows; do
+            capture_resource cronjob "$cronjob" "cronjob-$cronjob"
+          done
+
       - name: deploy application
         id: deploy
         run: |
           kubectl --namespace="$KUBERNETES_NAMESPACE" apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp"
-          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/backend --timeout=600s
-          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/frontend --timeout=600s
-
-      - name: roll back failed rollout
-        if: failure() && steps.deploy.outcome == 'failure'
-        run: |
-          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout undo deployment/backend
-          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout undo deployment/frontend
           kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/backend --timeout=600s
           kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/frontend --timeout=600s
 
@@ -521,6 +560,7 @@ jobs:
           exit "$status"
 
       - name: smoke test public health
+        id: smoke
         shell: bash
         run: |
           for attempt in {1..30}; do
@@ -529,8 +569,7 @@ jobs:
                 .status == "ok"
                 and .db == true
                 and .database_dialect == "postgresql"
-                and (.database_revision | type == "string" and length > 0)
-                and .database_revision != "unmanaged"
+                and .database_revision == "c1d2e3f4a5b6"
                 and .release == $release
               ' <<<"$health" >/dev/null; then
                 exit 0
@@ -541,6 +580,43 @@ jobs:
           done
           kubectl --namespace="$KUBERNETES_NAMESPACE" get pods,services,ingress
           exit 1
+
+      - name: roll back failed rollout
+        if: >-
+          failure()
+          && (steps.deploy.outcome == 'failure'
+          || steps.verify-release.outcome == 'failure'
+          || steps.smoke.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          rollback_dir="$RUNNER_TEMP/agentcare-rollback"
+
+          restore_resource() {
+            kind="$1"
+            name="$2"
+            file="$3"
+            if [ -f "$rollback_dir/$file.absent" ]; then
+              kubectl --namespace="$KUBERNETES_NAMESPACE" delete "$kind" "$name" \
+                --ignore-not-found=true
+            else
+              kubectl --namespace="$KUBERNETES_NAMESPACE" apply \
+                -f "$rollback_dir/$file.json"
+            fi
+          }
+
+          restore_resource configmap agentcare-config configmap
+          for cronjob in send-due-reminders recover-stalled-workflows; do
+            restore_resource cronjob "$cronjob" "cronjob-$cronjob"
+          done
+          for app in backend frontend; do
+            restore_resource deployment "$app" "deployment-$app"
+          done
+          for app in backend frontend; do
+            if [ ! -f "$rollback_dir/deployment-$app.absent" ]; then
+              kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status \
+                "deployment/$app" --timeout=600s
+            fi
+          done
 
       - name: write release summary
         if: ${{ !cancelled() }}

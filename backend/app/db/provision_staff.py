@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,7 @@ from app.db.session import SessionLocal
 from app.models import User
 
 _MIN_PASSWORD_LENGTH = 16
+_LEGACY_PUBLIC_STAFF_EMAIL = "staff@agentcare-demo.com"
 
 
 def provision_staff(
@@ -29,6 +31,20 @@ def provision_staff(
         )
 
     user = db.query(User).filter_by(email=normalized_email).one_or_none()
+    legacy_user = None
+    if normalized_email != _LEGACY_PUBLIC_STAFF_EMAIL:
+        legacy_user = db.query(User).filter_by(email=_LEGACY_PUBLIC_STAFF_EMAIL).one_or_none()
+        if legacy_user is not None and legacy_user.role != "staff":
+            raise ValueError("The legacy staff email belongs to a patient")
+
+    if user is None and legacy_user is not None:
+        user = legacy_user
+        user.email = normalized_email
+    elif user is not None and legacy_user is not None:
+        legacy_user.email = f"retired-staff-{legacy_user.id}@agentcare.invalid"
+        legacy_user.password_hash = hash_password(secrets.token_urlsafe(48))
+        legacy_user.full_name = "Retired legacy staff"
+
     if user is None:
         user = User(
             email=normalized_email,

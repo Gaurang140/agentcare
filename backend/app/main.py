@@ -28,6 +28,20 @@ from app.scheduler import start_scheduler, stop_scheduler
 from app.services import workflow_service
 
 logger = get_logger(__name__)
+EXPECTED_DATABASE_REVISION = "c1d2e3f4a5b6"
+
+
+def _require_current_database_revision(
+    revision: str | None,
+    environment: str,
+) -> str:
+    if environment.strip().lower() in {"dev", "development", "test"}:
+        return revision or "unmanaged"
+    if revision != EXPECTED_DATABASE_REVISION:
+        raise RuntimeError(
+            "database revision does not match this application release"
+        )
+    return revision
 
 
 @asynccontextmanager
@@ -108,14 +122,10 @@ def health(db: Annotated[Session, Depends(get_db)]) -> dict:
         }:
             raise
         revision = "unmanaged"
-    if not revision:
-        if settings.environment.strip().lower() not in {
-            "dev",
-            "development",
-            "test",
-        }:
-            raise RuntimeError("database has no Alembic revision")
-        revision = "unmanaged"
+    revision = _require_current_database_revision(
+        revision,
+        settings.environment,
+    )
     return {
         "status": "ok",
         "db": True,

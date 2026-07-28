@@ -407,6 +407,56 @@ def _create_run_unchecked(
     return workflow_run
 
 
+def create_run_claim(
+    db: Session,
+    user: User,
+    request_text: str,
+    *,
+    idempotency_key: str | None = None,
+) -> tuple[WorkflowRun, bool]:
+    """Return the workflow and whether this caller created it."""
+    normalized_key = (idempotency_key or "").strip() or None
+    existing = find_idempotent_run(db, user.id, normalized_key)
+    if existing is not None:
+        return existing, False
+
+    try:
+        return (
+            _create_run_unchecked(
+                db,
+                user,
+                request_text,
+                normalized_key,
+            ),
+            True,
+        )
+    except IntegrityError:
+        db.rollback()
+        existing = find_idempotent_run(db, user.id, normalized_key)
+        if existing is not None:
+            return existing, False
+        raise
+
+
+def release_run_claim(db: Session, workflow_run_id: int) -> None:
+    """Remove a run that failed before graph execution was enqueued.
+
+    Uploads may fail after the idempotency row is committed. Removing that
+    claim lets the caller safely retry the same key; already stored documents
+    are checksum-deduplicated on the retry.
+    """
+    db.rollback()
+    workflow_run = db.get(WorkflowRun, workflow_run_id)
+    if workflow_run is None:
+        return
+
+    db.query(Escalation).filter_by(workflow_run_id=workflow_run_id).delete(
+        synchronize_session=False
+    )
+    db.delete(workflow_run)
+    db.commit()
+
+
 def create_run(
     db: Session,
     user: User,
@@ -415,24 +465,12 @@ def create_run(
     idempotency_key: str | None = None,
 ) -> WorkflowRun:
     """Create a workflow or replay the patient-scoped idempotent result."""
-    normalized_key = (idempotency_key or "").strip() or None
-    existing = find_idempotent_run(db, user.id, normalized_key)
-    if existing is not None:
-        return existing
-
-    try:
-        return _create_run_unchecked(
-            db,
-            user,
-            request_text,
-            normalized_key,
-        )
-    except IntegrityError:
-        db.rollback()
-        existing = find_idempotent_run(db, user.id, normalized_key)
-        if existing is not None:
-            return existing
-        raise
+    return create_run_claim(
+        db,
+        user,
+        request_text,
+        idempotency_key=idempotency_key,
+    )[0]
 
 
 def execute_workflow(

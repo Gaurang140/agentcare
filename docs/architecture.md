@@ -308,7 +308,7 @@ validated deployment sentinels. It rejects mutable image tags and unresolved
 values. The migration Job must complete before application manifests are
 applied.
 
-This repository does not claim a current public environment. Each deployment
-must verify the new API, database, runtime identity, Model Armor path and
-optional Langfuse export through the checks in
+The README publishes the hackathon URL. Each release is considered verified
+only after checking the API, database, runtime identity, Model Armor path and
+optional Langfuse export through
 [GCP deployment](deployment-gcp.md).

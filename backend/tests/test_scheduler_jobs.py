@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.models import AuditEvent, Escalation, Reminder, WorkflowRun
 from app.scheduler import start_scheduler, stop_scheduler
 from app.services.workflow_service import escalate_stalled_workflows
@@ -150,14 +152,26 @@ def test_job_command_dispatches_exactly_one_job(monkeypatch):
     monkeypatch.setattr(
         jobs_module,
         "_run_reminder_job",
-        lambda: called.append("reminders"),
+        lambda **_kwargs: called.append("reminders"),
     )
     monkeypatch.setattr(
         jobs_module,
         "_run_stalled_job",
-        lambda: called.append("recovery"),
+        lambda **_kwargs: called.append("recovery"),
     )
 
     jobs_module.main(["reminders"])
 
     assert called == ["reminders"]
+
+
+def test_job_command_propagates_failure_to_the_external_scheduler(monkeypatch):
+    import app.jobs as jobs_module
+
+    def fail(**_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(jobs_module, "_run_reminder_job", fail)
+
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        jobs_module.main(["reminders"])

@@ -38,9 +38,9 @@ No prompt is treated as an authorization or safety control.
 | Application to Langfuse | Trace spans | disabled by default, trace sampling and an export allowlist |
 | Runtime to GCP | Backend pod identity and VPC traffic | Workload Identity, scoped IAM, regional PSC endpoint and private DNS |
 
-No current public environment is asserted by this repository. A health check
-alone would not verify the last two external boundaries. The deployment and
-observability guides list the checks required for every new environment.
+The public URL is a synthetic-data demo, not evidence of every external
+boundary by itself. The deployment and observability guides list the checks
+required for every release.
 
 ## Deterministic healthcare boundary
 
@@ -270,8 +270,8 @@ to zero and an exporter failure does not stop workflow processing.
   It cannot guarantee detection of every identifier or free-text disclosure.
 - Original patient text remains in the domain database. Database access,
   backup encryption, retention and deletion policy require an operator.
-- No current live environment proves a Vertex response, Model Armor verdict,
-  Workload Identity binding or Langfuse export.
+- External Vertex, Model Armor, Workload Identity and Langfuse behavior must be
+  reverified after every release; local tests use fakes for those providers.
 - Model Armor fails open to deterministic controls. This preserves
   availability but removes provider screening during an outage.
 - Upload validation does not include malware scanning, PDF active-content

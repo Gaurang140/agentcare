@@ -1,8 +1,14 @@
 """Register / login / me happy path, and the RBAC-adjacent negative cases
 that make sure staff can actually reach the routes patients are denied."""
 
+import pytest
+
 from app.db.session import get_db
-from app.main import app
+from app.main import (
+    EXPECTED_DATABASE_REVISION,
+    _require_current_database_revision,
+    app,
+)
 from app.models import AuditEvent
 
 
@@ -151,3 +157,16 @@ def test_live_endpoint_does_not_require_database(client):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_production_readiness_requires_the_application_database_head():
+    with pytest.raises(RuntimeError, match="revision"):
+        _require_current_database_revision("old-revision", "prod")
+
+    assert (
+        _require_current_database_revision(
+            EXPECTED_DATABASE_REVISION,
+            "prod",
+        )
+        == EXPECTED_DATABASE_REVISION
+    )

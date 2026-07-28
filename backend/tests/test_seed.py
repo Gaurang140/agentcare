@@ -85,6 +85,70 @@ def test_staff_is_provisioned_privately_and_can_be_rotated() -> None:
         db.close()
 
 
+def test_staff_provisioning_replaces_the_legacy_public_account() -> None:
+    db = _fresh_session()
+    try:
+        legacy = User(
+            email="staff@agentcare-demo.com",
+            password_hash="legacy-public-hash",
+            role="staff",
+            full_name="Legacy demo staff",
+        )
+        db.add(legacy)
+        db.commit()
+        legacy_id = legacy.id
+
+        user = provision_staff(
+            db,
+            email="private-reviewer@example.test",
+            password="a-strong-private-password",
+        )
+
+        assert user.id == legacy_id
+        assert user.email == "private-reviewer@example.test"
+        assert db.query(User).filter_by(email="staff@agentcare-demo.com").one_or_none() is None
+        assert verify_password("a-strong-private-password", user.password_hash)
+    finally:
+        db.close()
+
+
+def test_staff_provisioning_disables_legacy_account_when_private_user_exists() -> None:
+    db = _fresh_session()
+    try:
+        private = User(
+            email="private-reviewer@example.test",
+            password_hash="previous-private-hash",
+            role="staff",
+            full_name="Private reviewer",
+        )
+        legacy = User(
+            email="staff@agentcare-demo.com",
+            password_hash="legacy-public-hash",
+            role="staff",
+            full_name="Legacy demo staff",
+        )
+        db.add_all([private, legacy])
+        db.commit()
+        private_id = private.id
+        legacy_id = legacy.id
+
+        user = provision_staff(
+            db,
+            email="private-reviewer@example.test",
+            password="a-new-strong-private-password",
+        )
+
+        assert user.id == private_id
+        assert verify_password("a-new-strong-private-password", user.password_hash)
+        assert db.query(User).filter_by(email="staff@agentcare-demo.com").one_or_none() is None
+        retired = db.get(User, legacy_id)
+        assert retired is not None
+        assert retired.email == f"retired-staff-{legacy_id}@agentcare.invalid"
+        assert retired.full_name == "Retired legacy staff"
+    finally:
+        db.close()
+
+
 @pytest.mark.parametrize("password", ["demo1234", "too-short"])
 def test_staff_provisioning_rejects_public_or_weak_password(password) -> None:
     db = _fresh_session()

@@ -277,6 +277,30 @@ export default function AppointmentsPage() {
                 : ""}
             </DialogDescription>
           </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelTarget(null)} disabled={cancelling}>
+              Keep appointment
+            </Button>
+            <Button variant="destructive" onClick={handleConfirmCancel} disabled={cancelling}>
+              {cancelling ? "Cancelling..." : "Cancel appointment"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={rescheduleTarget !== null}
+        onOpenChange={(open) => !open && closeRescheduleDialog()}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reschedule this appointment</DialogTitle>
+            <DialogDescription>
+              {rescheduleTarget
+                ? `Pick a new open slot in ${rescheduleTarget.department}.`
+                : ""}
+            </DialogDescription>
+          </DialogHeader>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Label htmlFor="reschedule-from">From</Label>
@@ -311,30 +335,6 @@ export default function AppointmentsPage() {
               />
             </div>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setCancelTarget(null)} disabled={cancelling}>
-              Keep appointment
-            </Button>
-            <Button variant="destructive" onClick={handleConfirmCancel} disabled={cancelling}>
-              {cancelling ? "Cancelling..." : "Cancel appointment"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={rescheduleTarget !== null}
-        onOpenChange={(open) => !open && closeRescheduleDialog()}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Reschedule this appointment</DialogTitle>
-            <DialogDescription>
-              {rescheduleTarget
-                ? `Pick a new open slot in ${rescheduleTarget.department}.`
-                : ""}
-            </DialogDescription>
-          </DialogHeader>
           {!rescheduleDepartmentFound ? (
             <p className="text-sm text-muted-foreground">
               Could not match this appointment&apos;s department to the catalog.

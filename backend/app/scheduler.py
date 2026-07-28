@@ -30,24 +30,28 @@ _STALLED_CHECK_INTERVAL_SECONDS = 600
 _scheduler: BackgroundScheduler | None = None
 
 
-def _run_reminder_job() -> None:
+def _run_reminder_job(*, raise_errors: bool = False) -> None:
     db = db_session_module.SessionLocal()
     try:
         result = send_due_reminders(db)
         logger.info("reminder_job_ran", **result)
     except Exception:  # noqa: BLE001 - a scheduler job must never crash the process
         logger.error("reminder_job_failed", exc_info=True)
+        if raise_errors:
+            raise
     finally:
         db.close()
 
 
-def _run_stalled_job() -> None:
+def _run_stalled_job(*, raise_errors: bool = False) -> None:
     db = db_session_module.SessionLocal()
     try:
         result = escalate_stalled_workflows(db)
         logger.info("stalled_job_ran", **result)
     except Exception:  # noqa: BLE001 - a scheduler job must never crash the process
         logger.error("stalled_job_failed", exc_info=True)
+        if raise_errors:
+            raise
     finally:
         db.close()
 

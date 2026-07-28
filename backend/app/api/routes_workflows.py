@@ -116,17 +116,27 @@ def create_request(
         uploads.append((filename, content))
         total_bytes += len(content)
 
-    document_ids = [
-        store_document(db, current_user.id, filename, content, None)["id"]
-        for filename, content in uploads
-    ]
-
-    workflow_run = workflow_service.create_run(
+    workflow_run, created = workflow_service.create_run_claim(
         db,
         current_user,
         text,
         idempotency_key=idempotency_key,
     )
+    if not created:
+        return CreateRequestResponse(
+            workflow_id=workflow_run.id,
+            status=workflow_run.status,
+        )
+
+    try:
+        document_ids = [
+            store_document(db, current_user.id, filename, content, None)["id"]
+            for filename, content in uploads
+        ]
+    except Exception:
+        workflow_service.release_run_claim(db, workflow_run.id)
+        raise
+
     if workflow_run.status == "running":
         background_tasks.add_task(run_workflow_background, workflow_run.id, document_ids)
 

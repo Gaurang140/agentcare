@@ -170,6 +170,102 @@ def test_request_idempotency_key_replays_original_run_before_uploading_again(
     ).count() == 0
 
 
+def test_lost_idempotency_race_does_not_store_or_enqueue_duplicate_upload(
+    patient_client, db_session, monkeypatch
+):
+    import app.api.routes_workflows as routes
+
+    user = db_session.query(User).filter_by(email="patient@example.com").one()
+    winner = WorkflowRun(
+        user_id=user.id,
+        patient_id=user.id,
+        thread_id="wf-idempotency-winner",
+        request_text="winner",
+        status="running",
+        idempotency_key="concurrent-submit-12345678",
+    )
+    db_session.add(winner)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        routes.workflow_service,
+        "find_idempotent_run",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        routes.workflow_service,
+        "create_run_claim",
+        lambda *_args, **_kwargs: (winner, False),
+    )
+    monkeypatch.setattr(
+        routes,
+        "store_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("duplicate upload stored")
+        ),
+    )
+
+    response = patient_client.post(
+        "/api/requests",
+        headers={"Idempotency-Key": "concurrent-submit-12345678"},
+        data={"text": "losing concurrent request"},
+        files={"files": ("loser.txt", b"synthetic", "text/plain")},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "workflow_id": winner.id,
+        "status": "running",
+    }
+
+
+def test_upload_failure_releases_claim_so_same_key_can_be_retried(
+    patient_client, db_session, monkeypatch, fake_llm
+):
+    fake_llm([])
+    original_store_document = routes_workflows.store_document
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("synthetic storage outage")
+        return original_store_document(*args, **kwargs)
+
+    monkeypatch.setattr(routes_workflows, "store_document", fail_once)
+    headers = {"Idempotency-Key": "retry-after-upload-failure"}
+    payload = {"text": "what medication should I take"}
+    files = {"files": ("synthetic.txt", b"synthetic referral", "text/plain")}
+
+    with pytest.raises(RuntimeError, match="synthetic storage outage"):
+        patient_client.post(
+            "/api/requests",
+            headers=headers,
+            data=payload,
+            files=files,
+        )
+
+    assert db_session.query(WorkflowRun).filter_by(
+        idempotency_key="retry-after-upload-failure"
+    ).one_or_none() is None
+
+    retried = patient_client.post(
+        "/api/requests",
+        headers=headers,
+        data=payload,
+        files=files,
+    )
+
+    assert retried.status_code == 202
+    assert db_session.query(WorkflowRun).filter_by(
+        idempotency_key="retry-after-upload-failure"
+    ).count() == 1
+    assert db_session.query(PatientDocument).filter_by(
+        filename="synthetic.txt"
+    ).count() == 1
+
+
 def test_upload_rejects_disallowed_extension(patient_client, db_session):
     before = db_session.query(PatientDocument).count()
 

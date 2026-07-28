@@ -164,7 +164,13 @@ def _book_or_reschedule(
             workflow_run_id=workflow_id,
             booking_window_key=booking_window_key,
         )
-    return reschedule_appointment(db, existing_id, slot_id, workflow_run_id=workflow_id)
+    return reschedule_appointment(
+        db,
+        existing_id,
+        slot_id,
+        workflow_run_id=workflow_id,
+        booking_window_key=booking_window_key,
+    )
 
 
 def _window_booking_key(

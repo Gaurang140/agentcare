@@ -300,7 +300,11 @@ def book_appointment(
 
 
 def reschedule_appointment(
-    db: Session, appointment_id: int, new_slot_id: int, workflow_run_id: int | None = None
+    db: Session,
+    appointment_id: int,
+    new_slot_id: int,
+    workflow_run_id: int | None = None,
+    booking_window_key: str | None = None,
 ) -> dict:
     """Claim new_slot_id, then free the old slot - both in one transaction.
 
@@ -332,6 +336,18 @@ def reschedule_appointment(
     if new_slot is None:
         db.rollback()
         raise ConflictError("Slot is no longer available")
+    old_doctor = db.get(Doctor, appt.doctor_id)
+    new_doctor = db.get(Doctor, new_slot.doctor_id)
+    if (
+        old_doctor is None
+        or new_doctor is None
+        or not new_doctor.active
+        or new_doctor.department_id != old_doctor.department_id
+    ):
+        db.rollback()
+        raise ConflictError(
+            "Rescheduling requires an active doctor in the same department"
+        )
 
     if _patient_has_active_overlap(
         db,
@@ -349,6 +365,7 @@ def reschedule_appointment(
         "scheduled_start": new_slot.start_time,
         "scheduled_end": new_slot.end_time,
         "status": "confirmed",
+        "booking_window_key": booking_window_key,
     }
     if workflow_run_id is not None:
         appointment_values["workflow_run_id"] = workflow_run_id
