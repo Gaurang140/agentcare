@@ -4,10 +4,10 @@ the department/patient lookups booking depends on.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import text, update
 from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import ConflictError
@@ -65,6 +65,36 @@ def _cardiology_id(db) -> int:
     return dept.id
 
 
+def _ranged_cardiology_slots(
+    db, ranges: list[tuple[int, int]]
+) -> list[AppointmentSlot]:
+    """Free slots on a date outside the seeded calendar, one doctor per range."""
+    department_id = _cardiology_id(db)
+    doctors = [
+        Doctor(
+            department_id=department_id,
+            name=f"Dr. Range Booking {index}",
+        )
+        for index in range(len(ranges))
+    ]
+    db.add_all(doctors)
+    db.flush()
+
+    start = datetime.combine(date.today() + timedelta(days=3650), time(hour=9))
+    slots = [
+        AppointmentSlot(
+            doctor_id=doctor.id,
+            start_time=start + timedelta(minutes=start_offset),
+            end_time=start + timedelta(minutes=end_offset),
+            status="free",
+        )
+        for doctor, (start_offset, end_offset) in zip(doctors, ranges, strict=True)
+    ]
+    db.add_all(slots)
+    db.commit()
+    return slots
+
+
 def test_double_booking_conflicts(db, seeded):
     slot = _free_slot(db)
     book_appointment(db, patient_id=1, slot_id=slot.id, reason="checkup")
@@ -85,6 +115,104 @@ def test_book_appointment_returns_confirmed_booking(db, seeded):
 def test_book_appointment_missing_slot_conflicts(db, seeded):
     with pytest.raises(ConflictError):
         book_appointment(db, patient_id=1, slot_id=999_999, reason="checkup")
+
+
+def test_patient_cannot_book_two_doctors_at_the_same_time(db, seeded):
+    original_slot, target_slot = _ranged_cardiology_slots(db, [(0, 60), (0, 60)])
+    original = book_appointment(
+        db, patient_id=1, slot_id=original_slot.id, reason="first consultation"
+    )
+
+    with pytest.raises(ConflictError):
+        book_appointment(db, patient_id=1, slot_id=target_slot.id, reason="duplicate time")
+
+    db.refresh(original_slot)
+    db.refresh(target_slot)
+    persisted = db.get(Appointment, original["id"])
+    assert target_slot.status == "free"
+    assert original_slot.status == "booked"
+    assert persisted.slot_id == original_slot.id
+    assert persisted.status == "confirmed"
+    assert persisted.reason == "first consultation"
+
+
+def test_patient_cannot_book_partially_overlapping_ranges(db, seeded):
+    original_slot, target_slot = _ranged_cardiology_slots(db, [(0, 60), (30, 90)])
+    original = book_appointment(
+        db, patient_id=1, slot_id=original_slot.id, reason="first consultation"
+    )
+
+    with pytest.raises(ConflictError):
+        book_appointment(db, patient_id=1, slot_id=target_slot.id, reason="overlap")
+
+    db.refresh(original_slot)
+    db.refresh(target_slot)
+    persisted = db.get(Appointment, original["id"])
+    assert target_slot.status == "free"
+    assert original_slot.status == "booked"
+    assert persisted.slot_id == original_slot.id
+    assert persisted.status == "confirmed"
+    assert persisted.scheduled_start == original_slot.start_time
+    assert persisted.scheduled_end == original_slot.end_time
+
+
+def test_adjacent_patient_appointments_are_allowed(db, seeded):
+    first_slot, adjacent_slot = _ranged_cardiology_slots(db, [(0, 60), (60, 120)])
+    first = book_appointment(db, patient_id=1, slot_id=first_slot.id, reason="first")
+
+    adjacent = book_appointment(
+        db, patient_id=1, slot_id=adjacent_slot.id, reason="adjacent"
+    )
+
+    db.refresh(first_slot)
+    db.refresh(adjacent_slot)
+    assert first["status"] == "confirmed"
+    assert adjacent["status"] == "confirmed"
+    assert first_slot.status == "booked"
+    assert adjacent_slot.status == "booked"
+
+
+@pytest.mark.parametrize("history_status", ["cancelled", "completed"])
+def test_cancelled_or_completed_history_does_not_block_a_new_booking(
+    db, seeded, history_status
+):
+    history_slot, target_slot = _ranged_cardiology_slots(db, [(0, 60), (30, 90)])
+    history = book_appointment(
+        db, patient_id=1, slot_id=history_slot.id, reason="historical"
+    )
+    history_row = db.get(Appointment, history["id"])
+    history_row.status = history_status
+    history_slot.status = "free"
+    db.commit()
+
+    result = book_appointment(
+        db, patient_id=1, slot_id=target_slot.id, reason="new consultation"
+    )
+
+    db.refresh(target_slot)
+    assert result["status"] == "confirmed"
+    assert target_slot.status == "booked"
+    assert db.get(Appointment, history["id"]).status == history_status
+
+
+def test_available_slots_excludes_patient_conflicts(db, seeded):
+    booked_slot, overlapping_slot, later_slot = _ranged_cardiology_slots(
+        db, [(0, 60), (30, 90), (90, 120)]
+    )
+    book_appointment(db, patient_id=1, slot_id=booked_slot.id, reason="consultation")
+
+    slots = get_available_slots(
+        db,
+        department_id=_cardiology_id(db),
+        date_from=booked_slot.start_time.date(),
+        date_to=booked_slot.start_time.date(),
+        limit=1,
+        patient_id=1,
+    )
+
+    assert [slot["slot_id"] for slot in slots] == [later_slot.id]
+    db.refresh(overlapping_slot)
+    assert overlapping_slot.status == "free"
 
 
 def test_reschedule_frees_old_slot_and_claims_new(db, seeded):
@@ -125,6 +253,96 @@ def test_reschedule_conflict_leaves_original_booking_intact(db, seeded):
 
     db.refresh(old_slot)
     assert old_slot.status == "booked"
+
+
+def test_reschedule_into_patient_overlap_rolls_back_every_change(db, seeded):
+    existing_slot, original_slot, target_slot = _ranged_cardiology_slots(
+        db, [(0, 60), (120, 180), (30, 90)]
+    )
+    existing = book_appointment(
+        db, patient_id=1, slot_id=existing_slot.id, reason="existing"
+    )
+    original = book_appointment(
+        db, patient_id=1, slot_id=original_slot.id, reason="move me"
+    )
+
+    with pytest.raises(ConflictError):
+        reschedule_appointment(
+            db, appointment_id=original["id"], new_slot_id=target_slot.id
+        )
+
+    db.refresh(existing_slot)
+    db.refresh(original_slot)
+    db.refresh(target_slot)
+    persisted = db.get(Appointment, original["id"])
+    assert target_slot.status == "free"
+    assert existing_slot.status == "booked"
+    assert original_slot.status == "booked"
+    assert persisted.slot_id == original_slot.id
+    assert persisted.doctor_id == original_slot.doctor_id
+    assert persisted.scheduled_start == original_slot.start_time
+    assert persisted.scheduled_end == original_slot.end_time
+    assert persisted.status == "confirmed"
+    assert persisted.reason == "move me"
+    assert db.get(Appointment, existing["id"]).slot_id == existing_slot.id
+
+
+def test_stale_concurrent_reschedule_loses_compare_and_swap(db, seeded):
+    original_slot, winning_slot, target_slot = _ranged_cardiology_slots(
+        db, [(0, 30), (60, 90), (120, 150)]
+    )
+    booking = book_appointment(
+        db, patient_id=1, slot_id=original_slot.id, reason="consultation"
+    )
+    stale_appointment = db.get(Appointment, booking["id"])
+
+    # Commit a competing reschedule while retaining this session's stale
+    # expected slot id, reproducing the compare-and-swap losing path without
+    # relying on timing or SQLite's single-writer locking.
+    db.expire_on_commit = False
+    db.execute(
+        update(AppointmentSlot)
+        .where(AppointmentSlot.id == original_slot.id)
+        .values(status="free")
+    )
+    db.execute(
+        update(AppointmentSlot)
+        .where(AppointmentSlot.id == winning_slot.id)
+        .values(status="booked")
+    )
+    db.execute(
+        update(Appointment)
+        .where(Appointment.id == booking["id"])
+        .values(
+            slot_id=winning_slot.id,
+            doctor_id=winning_slot.doctor_id,
+            scheduled_start=winning_slot.start_time,
+            scheduled_end=winning_slot.end_time,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    assert stale_appointment.slot_id == original_slot.id
+
+    with pytest.raises(ConflictError):
+        reschedule_appointment(
+            db, appointment_id=booking["id"], new_slot_id=target_slot.id
+        )
+
+    db.expire_on_commit = True
+    db.expire_all()
+    persisted = db.get(Appointment, booking["id"])
+    db.refresh(original_slot)
+    db.refresh(winning_slot)
+    db.refresh(target_slot)
+    assert target_slot.status == "free"
+    assert original_slot.status == "free"
+    assert winning_slot.status == "booked"
+    assert persisted.slot_id == winning_slot.id
+    assert persisted.doctor_id == winning_slot.doctor_id
+    assert persisted.scheduled_start == winning_slot.start_time
+    assert persisted.scheduled_end == winning_slot.end_time
+    assert persisted.status == "confirmed"
 
 
 def test_cancel_frees_slot(db, seeded):

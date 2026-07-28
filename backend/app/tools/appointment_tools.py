@@ -5,13 +5,12 @@ Booking and rescheduling claim a slot with a single conditional UPDATE
 never both succeed - the loser's UPDATE affects zero rows and raises
 ConflictError, never a lost-update race.
 
-Cancelling and rescheduling claim the appointment row the same way
-(`WHERE status IN ('pending', 'confirmed')`, see _claim_active_appointment).
-Without that, a cancel or a reschedule that arrives twice acts on an
-appointment that already gave its slot back, and since the slot is rebookable
-in between, the second one frees a slot another patient now holds. The guard
-lives in the tools rather than in the agent, so the patient routes in
-api/routes_patient.py are covered by the same rule.
+Cancelling conditionally changes an active appointment's status. Rescheduling
+uses a compare-and-swap update that additionally requires the slot id the
+caller originally observed. Without those guards, a repeated cancel or stale
+reschedule could free a slot another patient now holds. The guards live in the
+tools rather than in the agent, so the patient routes in api/routes_patient.py
+are covered by the same rule.
 """
 
 from __future__ import annotations
@@ -30,22 +29,60 @@ _SLOT_START_HOUR = 9
 _SLOT_END_HOUR = 17
 _SLOT_MINUTES = 30
 
-# How each backend names the one-confirmed-booking-per-run index in the
-# IntegrityError it raises. Postgres quotes the index name; sqlite names the
-# indexed column instead ("UNIQUE constraint failed: appointments.workflow_run_id"),
-# so both spellings have to be recognized. Anything else the flush can raise -
-# a foreign key that does not resolve, some future constraint - is a bug and
-# stays an IntegrityError rather than becoming a retryable slot conflict.
+# How each backend names the known booking conflicts in the IntegrityError it
+# raises. Postgres quotes constraint/index names; sqlite names the workflow-run
+# indexed column but uses the explicit trigger messages for range conflicts.
+# Anything else the flush can raise - a foreign key that does not resolve,
+# some future constraint - is a bug and stays an IntegrityError rather than
+# becoming a retryable booking conflict.
 _RUN_INDEX_MARKERS = ("uq_appointments_workflow_run", "appointments.workflow_run_id")
+_PATIENT_OVERLAP_MARKER = "ex_appointments_patient_schedule"
+_DOCTOR_OVERLAP_MARKER = "ex_appointment_slots_doctor_schedule"
+_NAMED_CONFLICT_MARKERS = (
+    *_RUN_INDEX_MARKERS,
+    _PATIENT_OVERLAP_MARKER,
+    _DOCTOR_OVERLAP_MARKER,
+)
 
 # The statuses that still hold a slot. Anything else - today only "cancelled" -
 # has already given its slot back, so it must not be moved or freed again.
 _ACTIVE_STATUSES = ("pending", "confirmed")
 
 
-def _is_one_booking_per_run_violation(exc: IntegrityError) -> bool:
+def _is_named_booking_conflict(exc: IntegrityError) -> bool:
     message = str(exc.orig)
-    return any(marker in message for marker in _RUN_INDEX_MARKERS)
+    return any(marker in message for marker in _NAMED_CONFLICT_MARKERS)
+
+
+def _active_patient_appointment_query(
+    db: Session, patient_id: int, exclude_appointment_id: int | None = None
+):
+    query = db.query(Appointment).filter(
+        Appointment.patient_id == patient_id,
+        Appointment.status.in_(_ACTIVE_STATUSES),
+    )
+    if exclude_appointment_id is not None:
+        query = query.filter(Appointment.id != exclude_appointment_id)
+    return query
+
+
+def _patient_has_active_overlap(
+    db: Session,
+    patient_id: int,
+    target_start: datetime,
+    target_end: datetime,
+    *,
+    exclude_appointment_id: int | None = None,
+) -> bool:
+    return (
+        _active_patient_appointment_query(db, patient_id, exclude_appointment_id)
+        .filter(
+            Appointment.scheduled_start < target_end,
+            Appointment.scheduled_end > target_start,
+        )
+        .first()
+        is not None
+    )
 
 
 def _claim_active_appointment(db: Session, appointment_id: int, new_status: str) -> int:
@@ -108,6 +145,8 @@ def get_available_slots(
     date_from: date,
     date_to: date,
     limit: int = 10,
+    patient_id: int | None = None,
+    exclude_appointment_id: int | None = None,
 ) -> list[dict]:
     """Free slots for any active doctor in department_id, within [date_from, date_to].
 
@@ -118,7 +157,7 @@ def get_available_slots(
     range_start = datetime.combine(date_from, time.min)
     range_end = datetime.combine(date_to, time.max)
 
-    slots = (
+    query = (
         db.query(AppointmentSlot)
         .join(Doctor, AppointmentSlot.doctor_id == Doctor.id)
         .filter(
@@ -128,10 +167,25 @@ def get_available_slots(
             AppointmentSlot.start_time >= range_start,
             AppointmentSlot.start_time <= range_end,
         )
-        .order_by(AppointmentSlot.start_time)
-        .limit(limit)
-        .all()
     )
+    if patient_id is not None:
+        patient_overlap = (
+            select(Appointment.id)
+            .where(
+                Appointment.patient_id == patient_id,
+                Appointment.status.in_(_ACTIVE_STATUSES),
+                Appointment.scheduled_start < AppointmentSlot.end_time,
+                Appointment.scheduled_end > AppointmentSlot.start_time,
+            )
+            .correlate(AppointmentSlot)
+        )
+        if exclude_appointment_id is not None:
+            patient_overlap = patient_overlap.where(
+                Appointment.id != exclude_appointment_id
+            )
+        query = query.filter(~patient_overlap.exists())
+
+    slots = query.order_by(AppointmentSlot.start_time).limit(limit).all()
     return [
         {
             "slot_id": slot.id,
@@ -157,20 +211,36 @@ def book_appointment(
     A partial unique index lets a run hold only one confirmed appointment,
     so a replayed or retried run cannot book the patient twice.
     """
+    slot = db.get(AppointmentSlot, slot_id)
+    if slot is None:
+        db.rollback()
+        raise ConflictError("Slot is no longer available")
+
+    if _patient_has_active_overlap(
+        db,
+        patient_id,
+        slot.start_time,
+        slot.end_time,
+    ):
+        db.rollback()
+        raise ConflictError("Patient already has an appointment at this time")
+
     claimed = db.execute(
         update(AppointmentSlot)
         .where(AppointmentSlot.id == slot_id, AppointmentSlot.status == "free")
         .values(status="booked")
     )
     if claimed.rowcount == 0:
+        db.rollback()
         raise ConflictError("Slot is no longer available")
 
-    slot = db.get(AppointmentSlot, slot_id)
     appt = Appointment(
         patient_id=patient_id,
         doctor_id=slot.doctor_id,
         slot_id=slot_id,
         status="confirmed",
+        scheduled_start=slot.start_time,
+        scheduled_end=slot.end_time,
         reason=reason,
         workflow_run_id=workflow_run_id,
     )
@@ -181,9 +251,9 @@ def book_appointment(
         # Roll back either way, so the slot claim above is released rather
         # than left held by a booking that never happened.
         db.rollback()
-        if not _is_one_booking_per_run_violation(exc):
+        if not _is_named_booking_conflict(exc):
             raise
-        raise ConflictError("This request already has a confirmed appointment") from exc
+        raise ConflictError("Appointment conflicts with an existing booking") from exc
     write_audit(
         db,
         None,
@@ -221,7 +291,24 @@ def reschedule_appointment(
     """
     appt = db.get(Appointment, appointment_id)
     if appt is None:
+        db.rollback()
         raise NotFoundError(f"Appointment {appointment_id} not found")
+
+    expected_old_slot_id = appt.slot_id
+    new_slot = db.get(AppointmentSlot, new_slot_id)
+    if new_slot is None:
+        db.rollback()
+        raise ConflictError("Slot is no longer available")
+
+    if _patient_has_active_overlap(
+        db,
+        appt.patient_id,
+        new_slot.start_time,
+        new_slot.end_time,
+        exclude_appointment_id=appointment_id,
+    ):
+        db.rollback()
+        raise ConflictError("Patient already has an appointment at this time")
 
     claimed = db.execute(
         update(AppointmentSlot)
@@ -229,39 +316,46 @@ def reschedule_appointment(
         .values(status="booked")
     )
     if claimed.rowcount == 0:
+        db.rollback()
         raise ConflictError("Slot is no longer available")
 
+    appointment_values = {
+        "slot_id": new_slot_id,
+        "doctor_id": new_slot.doctor_id,
+        "scheduled_start": new_slot.start_time,
+        "scheduled_end": new_slot.end_time,
+        "status": "confirmed",
+    }
+    if workflow_run_id is not None:
+        appointment_values["workflow_run_id"] = workflow_run_id
+
     try:
-        old_slot_id = _claim_active_appointment(db, appointment_id, "confirmed")
-    except ConflictError:
-        # Same rollback as the IntegrityError path below: the claim on the new
-        # slot is released rather than left held by a reschedule that never
-        # happened. A cancelled appointment has already given its old slot
-        # back, so moving it would free whoever holds that slot now.
+        moved = db.execute(
+            update(Appointment)
+            .where(
+                Appointment.id == appointment_id,
+                Appointment.slot_id == expected_old_slot_id,
+                Appointment.status.in_(_ACTIVE_STATUSES),
+            )
+            .values(**appointment_values)
+            .execution_options(synchronize_session=False)
+        )
+    except IntegrityError as exc:
         db.rollback()
-        raise
+        if not _is_named_booking_conflict(exc):
+            raise
+        raise ConflictError("Appointment conflicts with an existing booking") from exc
+
+    if moved.rowcount == 0:
+        db.rollback()
+        raise ConflictError(f"Appointment {appointment_id} changed concurrently")
 
     db.execute(
-        update(AppointmentSlot).where(AppointmentSlot.id == old_slot_id).values(status="free")
+        update(AppointmentSlot)
+        .where(AppointmentSlot.id == expected_old_slot_id)
+        .values(status="free")
     )
-
-    new_slot = db.get(AppointmentSlot, new_slot_id)
-    appt.slot_id = new_slot_id
-    appt.doctor_id = new_slot.doctor_id
-    if workflow_run_id is not None:
-        appt.workflow_run_id = workflow_run_id
-    try:
-        db.flush()
-    except IntegrityError as exc:
-        # Same index and the same rollback as book_appointment: the claim on
-        # the new slot is released rather than left held by a reschedule that
-        # never happened. A cancelled appointment sits outside the index, so
-        # confirming one again is how a reschedule reaches it - the run would
-        # end up holding two live bookings.
-        db.rollback()
-        if not _is_one_booking_per_run_violation(exc):
-            raise
-        raise ConflictError("This request already has a confirmed appointment") from exc
+    db.refresh(appt)
 
     write_audit(
         db,
@@ -269,7 +363,7 @@ def reschedule_appointment(
         "appointment.rescheduled",
         "appointment",
         appt.id,
-        {"old_slot_id": old_slot_id, "new_slot_id": new_slot_id},
+        {"old_slot_id": expected_old_slot_id, "new_slot_id": new_slot_id},
     )
     db.commit()
     return appointment_summary(appt, new_slot)
@@ -398,6 +492,31 @@ def list_patient_appointments(db: Session, patient_id: int) -> list[dict]:
             "doctor": appt.doctor.name,
             "department": appt.doctor.department.name,
             "start_time": appt.slot.start_time.isoformat() if appt.slot else None,
+            "status": appt.status,
+            "reason": appt.reason,
+        }
+        for appt in appts
+    ]
+
+
+def list_active_patient_appointments(
+    db: Session,
+    patient_id: int,
+    *,
+    exclude_appointment_id: int | None = None,
+) -> list[dict]:
+    """A patient's active appointments, optionally excluding one being moved."""
+    appts = (
+        _active_patient_appointment_query(db, patient_id, exclude_appointment_id)
+        .order_by(Appointment.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": appt.id,
+            "doctor": appt.doctor.name,
+            "department": appt.doctor.department.name,
+            "start_time": appt.scheduled_start.isoformat(),
             "status": appt.status,
             "reason": appt.reason,
         }
