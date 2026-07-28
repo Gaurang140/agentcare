@@ -490,7 +490,9 @@ def test_ci_deploys_main_only_after_every_release_gate():
         "secret-scan",
     ]
     assert deploy["if"] == (
-        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+        "(github.event_name == 'push' || github.event_name == 'workflow_dispatch')"
+        " && github.ref == 'refs/heads/main'"
+        " && vars.DEPLOY_ENABLED == 'true'"
     )
     assert deploy["permissions"] == {
         "contents": "read",
@@ -503,6 +505,7 @@ def test_ci_deploys_main_only_after_every_release_gate():
     assert deploy["concurrency"] == {
         "group": "agentcare-production",
         "cancel-in-progress": False,
+        "queue": "max",
     }
 
 
@@ -666,23 +669,41 @@ def test_terraform_bootstrap_restricts_github_identity_to_repo_id_and_main():
     assert "attribute.repository_id/${var.github_repository_id}" in source
 
 
-def test_terraform_bootstrap_grants_only_application_deployment_roles():
+def test_terraform_bootstrap_separates_deployment_and_infrastructure_roles():
     source = (
         REPO_ROOT / "infra/bootstrap/main.tf"
     ).read_text(encoding="utf-8")
 
+    def _role_block(name: str) -> str:
+        match = re.search(rf"{name}\s*=\s*toset\(\[(.*?)\]\)", source, re.DOTALL)
+        assert match is not None, f"{name} is not declared as a toset list"
+        return match.group(1)
+
+    deployment_roles = _role_block("deployment_roles")
+    infrastructure_roles = _role_block("infrastructure_roles")
+
+    # The identity used on every application release stays at push-an-image
+    # and roll-a-Deployment level.
     for role in (
         "roles/artifactregistry.writer",
         "roles/container.clusterViewer",
         "roles/container.developer",
         "roles/serviceusage.serviceUsageConsumer",
     ):
-        assert f'"{role}"' in source
+        assert f'"{role}"' in deployment_roles
 
-    for excessive_role in (
-        "roles/owner",
-        "roles/editor",
+    # The sharp roles exist only in the Terraform identity's set, which the
+    # protected production-infra environment gates.
+    for admin_role in (
         "roles/resourcemanager.projectIamAdmin",
         "roles/iam.serviceAccountAdmin",
+    ):
+        assert f'"{admin_role}"' in infrastructure_roles
+        assert admin_role not in deployment_roles
+
+    # Nobody gets blanket project ownership.
+    for excessive_role in (
+        '"roles/owner"',
+        '"roles/editor"',
     ):
         assert excessive_role not in source

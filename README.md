@@ -6,8 +6,9 @@ administration while keeping medical decisions with clinicians.
 > **Status:** The application is live on GCP and its public health check was
 > verified on 2026-07-28. The last recorded cloud profile uses Vertex with
 > `gemini-2.5-flash`. Automatic GitHub-to-GKE deployment is implemented but
-> remains inactive until the repository remote, GitHub production environment
-> and keyless Google identity are configured. Langfuse tracing is implemented,
+> remains inactive until the repository remote, the GitHub environments and the
+> keyless Google identities are configured and the repository variable
+> `DEPLOY_ENABLED` is set to `true`. Langfuse tracing is implemented,
 > privacy-masked and disabled by default until keys and sampling are set.
 
 [Open the live application](https://agentcare.136-69-65-187.sslip.io)
@@ -351,11 +352,21 @@ using those claims for a new environment.
 GCP is the sole deployment target. Terraform creates GKE Autopilot, Cloud SQL,
 Artifact Registry, GCS, IAM and Model Armor. After one-time activation, every
 successful push to `main` builds commit-addressed images, runs the migration
-Job, updates GKE and checks the public health endpoint. Terraform never runs
-as part of an ordinary code release.
+Job, updates GKE, verifies the cluster requests exactly the release it
+published and checks the public health endpoint.
+
+Terraform never runs as part of an ordinary code release. It has its own
+workflow, its own Google identity and a required reviewer, so an application
+build cannot change IAM or delete the cluster.
+
+Once the one-time setup is done, the environment is one command up and one
+command down: `make gcp-up` and `make gcp-down`. Run `make help` for the rest.
+Getting there still needs billing, a login, a GitHub repository, DNS and
+secrets by hand.
 
 Use [GCP deployment](docs/deployment-gcp.md) for the first environment and
-Terraform lifecycle. Use [CI/CD](docs/ci-cd.md) for automatic releases.
+Terraform lifecycle. Use [CI/CD](docs/ci-cd.md) for the pipelines and the
+operator targets.
 
 ## Documentation
 

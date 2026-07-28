@@ -13,7 +13,7 @@ guide explains source ownership.
 
 | Path | Owner and purpose |
 |---|---|
-| `.github/workflows/` | CI, automatic application deployment and organizer checks |
+| `.github/workflows/` | CI, application deployment, the Terraform infrastructure workflow and organizer checks |
 | `backend/` | Python API, LangGraph workflow, SQL domain logic, safety and tests |
 | `frontend/` | Next.js patient portal and staff console |
 | `infra/bootstrap/` | One-time Terraform for remote state and GitHub OIDC |
@@ -23,6 +23,7 @@ guide explains source ownership.
 | `evals/` | Reproducible safety and workflow evaluation dataset and scorer |
 | `scripts/` | Synthetic seed and deterministic deployment renderer |
 | `docs/` | Public architecture, security, operations and demo documentation |
+| `Makefile` | Operator lifecycle commands: bootstrap, up, status, down, cleanup |
 | `requirements.txt` | Pinned Python runtime, test and evaluation dependencies |
 | `docker-compose.yml` | Complete local stack for development and demonstration |
 | `.env.example` | Configuration names with no secret values |
@@ -85,9 +86,10 @@ the authorization boundary.
 ```text
 infra/
   bootstrap/
-    main.tf                state bucket, GitHub OIDC and deployer identity
+    README.md              bootstrap walkthrough and identity explanation
+    main.tf                state bucket, GitHub OIDC, deployer and infra identities
     variables.tf           project and immutable GitHub identity inputs
-    outputs.tf             GitHub production environment values
+    outputs.tf             GitHub production and production-infra values
     versions.tf            Terraform and Google provider constraints
   terraform/
     modules/               Artifact Registry, GCS, GKE, IAM, SQL, Model Armor
@@ -102,8 +104,9 @@ infra/
 ```
 
 The bootstrap and application stacks have different lifecycles. Bootstrap
-creates the state bucket and keyless deployment identity. The main stack owns
-the resources that can be created or destroyed for an AgentCare environment.
+creates the state bucket and two keyless identities: the application deployer
+and the separately gated infrastructure identity. The main stack owns the
+resources that can be created or destroyed for an AgentCare environment.
 
 The committed Kubernetes files contain named sentinels. The deployment runner
 copies the complete `infra/k8s` tree to a temporary directory and replaces
@@ -136,8 +139,9 @@ duplicate backend tests:
 | `README.md` | project entry point, local start and evidence summary |
 | `docs/architecture.md` | graph, agents, tools, state and runtime boundaries |
 | `docs/security.md` | enforced controls and known limitations |
-| `docs/ci-cd.md` | GitHub release flow and automatic deployment |
+| `docs/ci-cd.md` | GitHub release flow, automatic deployment and the operator lifecycle |
 | `docs/deployment-gcp.md` | first deployment, Terraform lifecycle and teardown |
+| `infra/bootstrap/README.md` | bootstrap stack, both GitHub identities and their outputs |
 | `docs/observability.md` | audit, logs, metrics, Grafana and Langfuse |
 | `docs/decisions.md` | engineering decisions and rejected alternatives |
 | `docs/demo-script.md` | two-minute demonstration sequence |
@@ -194,7 +198,8 @@ The following are references in source, not values stored in source:
 - Artifact Registry images
 - GCS document and Terraform state buckets
 - Model Armor template and private endpoint
-- GitHub `production` environment variables
+- GitHub `production` and `production-infra` environment variables
+- GitHub repository variable `DEPLOY_ENABLED`
 - GitHub Actions secrets, including `SUBMISSION_TOKEN`
 - Langfuse project and secret key
 - Google user login and Application Default Credentials

@@ -254,21 +254,29 @@ language, but Terraform is the only supported operator path.
 
 ## Automatic application delivery, reviewed infrastructure
 
-**Decision:** Deploy the application after every successful push to `main`.
-Keep Terraform apply and destroy outside that workflow.
+**Decision:** Deploy the application after every successful push to `main`
+while the repository variable `DEPLOY_ENABLED` is `true`. Run Terraform apply
+and destroy only in the separate `infrastructure` workflow, under its own
+`agentcare-github-infra` identity and behind the `production-infra` required
+reviewer.
 
 **Why:** Application releases are frequent and should be repeatable. IAM,
 Cloud SQL and cluster changes have a larger failure radius and need a reviewed
-plan.
+plan. Two identities keep an application release from ever carrying
+infrastructure-admin permissions.
 
 The deployment job requires every backend, frontend, migration,
 infrastructure, manifest and secret-scan gate. It authenticates through
-branch-restricted Workload Identity, builds full-SHA image tags, migrates
-before rollout and checks the public health endpoint.
+branch-restricted Workload Identity, builds full-SHA image tags into a
+registry with immutable tags, migrates before rollout, verifies the cluster
+requests exactly the release it published and checks the public health
+endpoint. With `DEPLOY_ENABLED` unset the deploy job is skipped and CI stays
+green, which is the intended state before the infrastructure exists.
 
 **Trade-off:** One-time activation is longer because the operator must create
-remote state, keyless GitHub trust, production variables and the runtime
-Secret. After activation, code changes need only an ordinary push to `main`.
+remote state, keyless GitHub trust, both GitHub environments, production
+variables and the runtime Secret. After activation, code changes need only an
+ordinary push to `main`.
 
 ## One optional LLM tracing provider
 

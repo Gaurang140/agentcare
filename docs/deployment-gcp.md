@@ -10,7 +10,8 @@ releases are documented in [CI/CD](ci-cd.md).
 | Public application health | verified at the existing public `/api/health` endpoint |
 | Database connectivity | public health returned `db: true` |
 | Last recorded cloud model profile | Vertex with `gemini-2.5-flash` |
-| Automatic GitHub deployment | implemented in source, not active until the GitHub and Workload Identity setup is completed |
+| Automatic GitHub deployment | implemented in source, inactive until the GitHub setup is complete and the repository variable `DEPLOY_ENABLED` is `true` |
+| Terraform from GitHub Actions | implemented in `.github/workflows/infrastructure.yml` behind a required reviewer, not live-verified |
 | Langfuse export | implemented and disabled by default, not live-verified |
 | Live GCP configuration inspection | blocked until the intended Google account is active locally |
 
@@ -21,17 +22,29 @@ verification in this guide before its environment is described as deployed.
 
 ```mermaid
 flowchart LR
-    OP["Operator"] --> TF["Terraform plan and apply"]
+    OP["Operator: make gcp-up or the<br/>reviewed infrastructure workflow"] --> TF["Terraform plan and apply"]
     TF --> INFRA["GKE, Cloud SQL, GCS,<br/>IAM, Model Armor and registry"]
     DEV["Push to GitHub main"] --> CI["All CI gates"]
-    CI --> CD["Build SHA images,<br/>migrate and roll out"]
+    CI --> CD["Build SHA images, migrate,<br/>roll out and verify pod digests"]
     CD --> GKE["Existing GKE environment"]
 ```
 
-Terraform owns infrastructure. It runs when infrastructure changes and always
-requires an operator-reviewed plan. GitHub Actions owns application releases.
-After one-time activation, a successful push to `main` updates GKE without a
-manual Terraform command.
+Terraform owns infrastructure. It runs when infrastructure changes and always on
+a reviewed plan, either from an operator's shell or from the `infrastructure`
+workflow behind the `production-infra` reviewer. GitHub Actions owns application
+releases. After one-time activation, a successful push to `main` updates GKE
+without a manual Terraform command.
+
+The two workflows, the two Google identities and the release gates are described
+in [CI/CD](ci-cd.md). This guide is the manual and first-time path: it keeps the
+raw commands, because the first environment is where you want to see and review
+every step.
+
+The root `Makefile` wraps those commands as `make gcp-bootstrap`, `gcp-up`,
+`gcp-status`, `gcp-down`, `gcp-cleanup` and `gcp-github-vars`. Each target
+prints every command before running it. They are described in
+[the operator lifecycle](ci-cd.md#3-the-operator-lifecycle) and named again at
+the step they cover below.
 
 The repository configures:
 
@@ -161,9 +174,19 @@ The bootstrap creates:
 
 - the versioned GCS state bucket
 - all Google APIs used by the stack, including `aiplatform.googleapis.com`
-- a dedicated GitHub deployer service account
-- a Workload Identity pool and branch-restricted provider
-- only the roles needed to push images and update GKE
+- a GitHub application deployer service account holding only the roles needed to
+  push images and update GKE
+- a separate GitHub infrastructure service account holding the project roles
+  Terraform needs to apply and destroy the main stack, plus object access to the
+  state bucket
+- one Workload Identity pool and a branch-restricted provider, shared by both
+  accounts
+
+Two identities, on purpose. An application release runs on every push and must
+never be able to change IAM or delete the cluster, so the deployer stays at
+push-an-image and roll-a-Deployment level. The full comparison is in
+[CI/CD](ci-cd.md#why-there-are-two-github-identities). The details of each role
+are commented next to `local.infrastructure_roles` in `infra/bootstrap/main.tf`.
 
 Terraform needs Service Usage enabled before it can manage the remaining
 services:
@@ -194,6 +217,9 @@ terraform -chdir=infra/bootstrap plan \
 terraform -chdir=infra/bootstrap apply /tmp/agentcare-bootstrap.tfplan
 ```
 
+`make gcp-bootstrap PROJECT_ID=... GITHUB_REPOSITORY_ID=... GITHUB_OWNER_ID=...`
+runs the same enable, init, plan and apply sequence and then prints the outputs.
+
 Capture the non-secret outputs:
 
 ```bash
@@ -206,7 +232,17 @@ export GCP_WORKLOAD_IDENTITY_PROVIDER="$(
 export GCP_DEPLOYER_SERVICE_ACCOUNT="$(
   terraform -chdir=infra/bootstrap output -raw deployer_service_account_email
 )"
+export GCP_INFRA_SERVICE_ACCOUNT="$(
+  terraform -chdir=infra/bootstrap output -raw infra_service_account_email
+)"
 ```
+
+`GCP_DEPLOYER_SERVICE_ACCOUNT` belongs in the GitHub `production` environment
+and `GCP_INFRA_SERVICE_ACCOUNT` in `production-infra`. Do not put the
+infrastructure account in `production`: it is the identity that can change IAM
+and delete the cluster, and only the reviewed infrastructure workflow may use
+it. [CI/CD](ci-cd.md#45-configure-the-github-environments) has the full variable
+tables.
 
 The bootstrap creates no service-account key. Keep its ignored local state
 encrypted and backed up because it is the trust root for remote state.
@@ -218,7 +254,7 @@ gcloud services list --enabled \
   --filter='NAME:(aiplatform.googleapis.com artifactregistry.googleapis.com cloudresourcemanager.googleapis.com compute.googleapis.com container.googleapis.com dns.googleapis.com iam.googleapis.com iamcredentials.googleapis.com logging.googleapis.com modelarmor.googleapis.com monitoring.googleapis.com networkconnectivity.googleapis.com servicenetworking.googleapis.com serviceusage.googleapis.com sqladmin.googleapis.com storage.googleapis.com sts.googleapis.com)'
 ```
 
-## 5. Initialize remote state and create infrastructure
+## 5. Create the main stack
 
 For a new account:
 
@@ -244,6 +280,16 @@ saved plan:
 terraform -chdir=infra/terraform apply /tmp/agentcare.tfplan
 terraform -chdir=infra/terraform output
 ```
+
+`make gcp-up PROJECT_ID=...` runs the same init, plan and apply, but it passes
+only `project_id` and `region`. Everything else keeps the default declared in
+`infra/terraform/variables.tf`, and two of those defaults matter here:
+`gcs_location` stays `europe-west3` whatever region you choose, and
+`enable_vertex_ai` is `false`. The `vertex` model profile needs
+`roles/aiplatform.user` on the backend service account, so either use the
+explicit plan above with `-var="enable_vertex_ai=true"` or change the default in
+`variables.tf`. The same applies to the `infrastructure` workflow, which passes
+the same two variables.
 
 If this checkout already has local state for an existing account, do not make
 a new remote state and apply over it. Back it up and migrate:
@@ -386,9 +432,13 @@ unset DB_PASSWORD
 ## 8. Make the first application release
 
 The normal path is GitHub Actions. Complete every environment variable and
-secret in [CI/CD](ci-cd.md), then push `main`.
+secret in [CI/CD](ci-cd.md), set the repository variable `DEPLOY_ENABLED` to
+`true`, then push `main`.
 
-For a first manual release or CI/CD diagnosis, build commit-addressed images:
+For a first manual release or CI/CD diagnosis, build commit-addressed images.
+Registry tags are immutable, so this only succeeds for a SHA the pipeline has
+not published yet; a released commit is redeployed with `gh workflow run
+ci.yml --ref main`, which reuses the published images:
 
 ```bash
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
@@ -532,6 +582,16 @@ rm /tmp/agentcare-cookies.txt "/tmp/${SMOKE_FILENAME}"
 
 ## 11. Observe the deployment
 
+For a quick combined view of Terraform outputs, the cluster, the workloads and
+the public health endpoint:
+
+```bash
+make gcp-status PROJECT_ID="$PROJECT_ID" PUBLIC_URL="$PUBLIC_URL"
+```
+
+It is read only and every step tolerates a missing stack, cluster or kubectl
+context.
+
 Cloud logs:
 
 `Google Cloud Console → Logging → Logs Explorer`
@@ -554,19 +614,25 @@ data.
 
 ## 12. Activate automatic releases
 
-Complete [CI/CD](ci-cd.md) once. The required path is:
+Complete the one-time activation in [CI/CD](ci-cd.md) once. The required path
+is:
 
 ```text
-push main → all CI gates → keyless Google auth → build SHA images
-→ migration Job → GKE rollout → public health check
+push main → all CI gates → DEPLOY_ENABLED gate → keyless Google auth
+→ build SHA images → migration Job → GKE rollout
+→ verify pod image digests → public health check
 ```
 
 Terraform does not run in this application release. A failed gate leaves the
-current release running.
+current release running. The digest check reads the running pods and compares
+them with the images the run pushed. It is not a version endpoint: the backend
+serves none, and `/api/health` proves reachability only.
 
 ## 13. Roll back application code
 
-Prefer an auditable Git revert:
+Artifact Registry uses immutable tags, so a released commit-SHA tag can never be
+moved to a different image. There is no retag rollback. Prefer an auditable Git
+revert:
 
 ```bash
 git log --oneline -n 10
@@ -593,6 +659,19 @@ gcloud sql backups list --instance=agentcare-postgres
 ```
 
 ## 14. Destroy the environment
+
+`make gcp-down PROJECT_ID=...` does this whole sequence in one command. It asks
+you to type the project ID first, then deletes the application overlay and the
+migration Job, purges the document objects and applies a destroy plan. It purges
+before the destroy so the bucket can be deleted in the same run, and it leaves
+the runtime Secret alone because the Secret goes with the cluster. The steps
+below do the same work with a review point before each destructive command. Use
+them when the environment holds anything you would regret losing.
+
+There is also a reviewed remote path: run the `infrastructure` workflow with
+action `destroy` and type `destroy` in the confirm input. Bring the application
+down with `make gcp-down` or the kubectl commands below before doing that. The
+workflow only runs Terraform.
 
 First remove Kubernetes resources so GCP can delete the load balancer:
 
@@ -639,8 +718,28 @@ gcloud storage rm --recursive "${BUCKET_URI}/**"
 Object deletion is irreversible. Re-run the saved destroy plan only if its
 configuration is still current. Otherwise create and review a new plan.
 
-Keep the bootstrap state bucket and GitHub identity if you will deploy again.
-Destroy `infra/bootstrap` only after the main stack is gone and its state
+### The destroy is not finished on the first run
+
+A destroy commonly fails on `google_service_networking_connection` and the
+reserved IP range behind it. Google keeps the private services network of a
+deleted Cloud SQL instance for some time, documented as up to about four days,
+and the connection cannot be removed until it is released. That failure is the
+documented wait and not a broken configuration.
+
+Run the destroy again later:
+
+```bash
+make gcp-cleanup PROJECT_ID="$PROJECT_ID"
+```
+
+It re-plans and re-applies the same destroy, is safe to repeat and becomes a
+no-op once the plan reports nothing left. The cluster, the database and the
+load balancer are already gone at that point, so what remains is the peering and
+its reserved internal range. Check the billing report rather than assuming the
+cost is zero while you wait.
+
+Keep the bootstrap state bucket and both GitHub identities if you will deploy
+again. Destroy `infra/bootstrap` only after the main stack is gone and its state
 history is no longer required.
 
 Confirm expensive resources are gone:
@@ -656,15 +755,39 @@ gcloud billing projects describe "$PROJECT_ID"
 
 ### GitHub push runs CI but no deployment
 
-Confirm the push is on `main`, every gate passed and the workflow contains
-`deploy production`. Then check the `production` environment variables in
-[CI/CD](ci-cd.md).
+The deploy job is skipped rather than failed, so the run is green. Check, in
+order: the push is on `main`, the repository variable `DEPLOY_ENABLED` is
+exactly `true` and every gate passed. Then check the nine required `production`
+environment variables in [CI/CD](ci-cd.md). An empty one fails the job with a
+named error instead of skipping it.
 
 ### GitHub cannot authenticate to Google
 
 Confirm the numeric repository ID, owner ID and `main` branch match the
-bootstrap values. Confirm `id-token: write` remains limited to the deployment
-job.
+bootstrap values. In `ci.yml`, `id-token: write` stays limited to the deploy
+job; `infrastructure.yml` declares it at workflow level because it holds a
+single job that needs it. A manual run of either workflow has to be started from
+`main`: the provider condition only accepts `refs/heads/main`.
+
+### The release fails after a successful rollout
+
+The `verify release identity` step fails only when a Deployment requests a
+different image than the release tag. A pod image ID that does not contain the
+release digest is printed as a warning, because containerd can report a
+different digest form than the registry returned. Check:
+
+```bash
+kubectl get deployment backend \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
+kubectl get pods -l app=backend \
+  -o jsonpath='{range .items[*]}{.status.phase}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
+```
+
+### The infrastructure workflow does nothing
+
+It waits for the `production-infra` reviewer before the first step runs. Approve
+it in the run page. A push only starts it for changes under
+`infra/terraform/**` or `infra/bootstrap/**`; anything else needs a manual run.
 
 ### Migration fails
 

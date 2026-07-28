@@ -12,6 +12,9 @@ metadata:
     app: backend-migrate
 spec:
   backoffLimit: 3
+  # Below the workflow's 600s wait, so a hung migration dies and fails the
+  # release instead of surviving as a zombie after the workflow gives up.
+  activeDeadlineSeconds: 540
   ttlSecondsAfterFinished: 600
   template:
     metadata:

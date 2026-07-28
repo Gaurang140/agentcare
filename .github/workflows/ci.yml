@@ -3,6 +3,9 @@ name: ci
 on:
   push:
   pull_request:
+  # Redeploys a known commit on main by hand once the infrastructure has been
+  # recreated, without an empty commit to trigger a push.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -115,7 +118,7 @@ jobs:
 
       - name: check bootstrap formatting
         working-directory: infra/bootstrap
-        run: terraform fmt -check
+        run: terraform fmt -check -recursive
 
       - name: initialize providers without remote state
         run: terraform init -backend=false -input=false
@@ -201,7 +204,12 @@ jobs:
       - infrastructure
       - manifests
       - secret-scan
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # With DEPLOY_ENABLED unset the expression reads an empty string, so CI
+    # stays green before the infrastructure exists.
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && github.ref == 'refs/heads/main'
+      && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -212,6 +220,9 @@ jobs:
     concurrency:
       group: agentcare-production
       cancel-in-progress: false
+      # Every main release waits its turn instead of replacing the one pending
+      # slot; GitHub queues up to 100 runs in order.
+      queue: max
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION }}
@@ -268,10 +279,30 @@ jobs:
       - name: authenticate Docker to Artifact Registry
         run: gcloud auth configure-docker "$REGISTRY_HOST" --quiet
 
+      # Release tags are immutable in this registry, so rebuilding a commit
+      # that already shipped could never repoint its tag. When the tag exists
+      # this run reuses the published image, which is exactly what a
+      # workflow_dispatch redeploy after infrastructure recreation wants.
+      - name: look up existing release images
+        id: existing
+        shell: bash
+        run: |
+          for app in backend frontend; do
+            digest=$(gcloud artifacts docker images describe \
+              "$IMAGE_REPOSITORY/$app:$IMAGE_TAG" \
+              --format='value(image_summary.digest)' 2>/dev/null || true)
+            echo "$app=$digest" >> "$GITHUB_OUTPUT"
+            if [ -n "$digest" ]; then
+              echo "$app:$IMAGE_TAG is already published as $digest; its build is skipped"
+            fi
+          done
+
       - name: set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
       - name: build and push backend
+        id: build-backend
+        if: steps.existing.outputs.backend == ''
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -283,6 +314,8 @@ jobs:
           cache-to: type=gha,mode=max,scope=agentcare-backend
 
       - name: build and push frontend
+        id: build-frontend
+        if: steps.existing.outputs.frontend == ''
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: frontend
@@ -293,6 +326,32 @@ jobs:
           build-args: BACKEND_URL=http://backend:8000
           cache-from: type=gha,scope=agentcare-frontend
           cache-to: type=gha,mode=max,scope=agentcare-frontend
+
+      # One release digest per image, whether this run built it or an earlier
+      # run published it under the immutable tag.
+      - name: resolve release digests
+        id: digests
+        shell: bash
+        env:
+          EXISTING_BACKEND: ${{ steps.existing.outputs.backend }}
+          EXISTING_FRONTEND: ${{ steps.existing.outputs.frontend }}
+          BUILT_BACKEND: ${{ steps.build-backend.outputs.digest }}
+          BUILT_FRONTEND: ${{ steps.build-frontend.outputs.digest }}
+        run: |
+          status=0
+          for app in backend frontend; do
+            case "$app" in
+              backend) digest="${EXISTING_BACKEND:-$BUILT_BACKEND}" ;;
+              frontend) digest="${EXISTING_FRONTEND:-$BUILT_FRONTEND}" ;;
+            esac
+            if [ -z "$digest" ]; then
+              echo "::error::no published or freshly built digest for $app"
+              status=1
+            fi
+            echo "$app=$digest" >> "$GITHUB_OUTPUT"
+            echo "$app releases as $digest"
+          done
+          exit "$status"
 
       - name: get GKE credentials
         uses: google-github-actions/get-gke-credentials@3da1e46a907576cefaa90c484278bb5b259dd395 # v3
@@ -310,21 +369,72 @@ jobs:
         run: kubectl get secret agentcare-secrets -o name
 
       - name: run database migration
+        id: migrate
         shell: bash
         run: |
           kubectl delete job backend-migrate --ignore-not-found=true --wait=true
           kubectl apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp-migration"
           if ! kubectl wait --for=condition=complete job/backend-migrate --timeout=600s; then
             kubectl logs job/backend-migrate --all-containers=true || true
+            # A job that never starts writes no logs at all. The events on the
+            # describe output carry the reason (unschedulable, image pull,
+            # deadline exceeded).
+            kubectl describe job backend-migrate || true
             exit 1
           fi
           kubectl logs job/backend-migrate --all-containers=true
 
       - name: deploy application
+        id: deploy
         run: |
           kubectl apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp"
           kubectl rollout status deployment/backend --timeout=600s
           kubectl rollout status deployment/frontend --timeout=600s
+
+      # Reads the release identity off the cluster rather than off a version
+      # endpoint, because the backend code is fixed and serves no such route.
+      - name: verify release identity
+        id: verify-release
+        shell: bash
+        env:
+          BACKEND_DIGEST: ${{ steps.digests.outputs.backend }}
+          FRONTEND_DIGEST: ${{ steps.digests.outputs.frontend }}
+        run: |
+          status=0
+          for app in backend frontend; do
+            case "$app" in
+              backend) digest="$BACKEND_DIGEST" ;;
+              frontend) digest="$FRONTEND_DIGEST" ;;
+            esac
+            expected="$IMAGE_REPOSITORY/$app:$IMAGE_TAG"
+
+            # Hard gate: the cluster must request exactly this release tag.
+            # The registry's immutable tags pin that tag to the digest above.
+            deployed=$(kubectl get deployment "$app" \
+              -o jsonpath="{.spec.template.spec.containers[?(@.name=='$app')].image}")
+            if [ "$deployed" = "$expected" ]; then
+              echo "deployment/$app requests $expected"
+            else
+              echo "::error::deployment/$app requests '$deployed', expected '$expected'"
+              status=1
+            fi
+
+            # Soft signal only: containerd may report the config digest rather
+            # than the index digest the push reported, so a miss here is noise
+            # more often than a wrong release. Pods replaced by this rollout
+            # can also still be terminating on the old digest.
+            image_ids=$(kubectl get pods -l "app=$app" \
+              --field-selector=status.phase=Running \
+              -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{.imageID}{"\n"}{end}{end}')
+            if printf '%s\n' "$image_ids" | grep -Fq "$digest"; then
+              echo "a running $app pod reports $digest"
+            else
+              echo "::warning::no running $app pod reports the release digest $digest"
+              echo "image ids reported by running $app pods:"
+              printf '%s\n' "$image_ids"
+            fi
+          done
+          exit "$status"
 
       - name: smoke test public health
         shell: bash
@@ -338,3 +448,29 @@ jobs:
           done
           kubectl get pods,services,ingress
           exit 1
+
+      - name: write release summary
+        if: always()
+        shell: bash
+        env:
+          BACKEND_DIGEST: ${{ steps.digests.outputs.backend }}
+          FRONTEND_DIGEST: ${{ steps.digests.outputs.frontend }}
+          MIGRATION_OUTCOME: ${{ steps.migrate.outcome }}
+          ROLLOUT_OUTCOME: ${{ steps.deploy.outcome }}
+          RELEASE_CHECK_OUTCOME: ${{ steps.verify-release.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### agentcare release"
+            echo
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| release sha | \`$IMAGE_TAG\` |"
+            echo "| backend digest | \`${BACKEND_DIGEST:-not built}\` |"
+            echo "| frontend digest | \`${FRONTEND_DIGEST:-not built}\` |"
+            echo "| public url | ${PUBLIC_URL:-not set} |"
+            echo "| migration | ${MIGRATION_OUTCOME:-did not run} |"
+            echo "| rollout | ${ROLLOUT_OUTCOME:-did not run} |"
+            echo "| release check | ${RELEASE_CHECK_OUTCOME:-did not run} |"
+            echo "| job | $JOB_STATUS |"
+          } >> "$GITHUB_STEP_SUMMARY"
