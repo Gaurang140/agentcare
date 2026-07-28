@@ -390,6 +390,7 @@ jobs:
           if ! kubectl auth can-i create jobs --quiet; then exit 1; fi
           if ! kubectl auth can-i delete jobs --quiet; then exit 1; fi
           if ! kubectl auth can-i list events --quiet; then exit 1; fi
+          if ! kubectl auth can-i create managedcertificates.networking.gke.io --quiet; then exit 1; fi
           if kubectl auth can-i get secrets --quiet; then exit 1; fi
           if kubectl auth can-i create rolebindings.rbac.authorization.k8s.io --quiet; then exit 1; fi
           if kubectl auth can-i create serviceaccounts --quiet; then exit 1; fi

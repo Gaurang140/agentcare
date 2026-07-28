@@ -851,13 +851,18 @@ def test_platform_bundle_owns_the_agentcare_namespace_runtime_identity_and_relea
     assert role["rules"] == [
         {
             "apiGroups": [""],
-            "resources": ["configmaps", "services"],
-            "verbs": ["get", "list", "watch", "create", "patch"],
+            "resources": ["configmaps"],
+            "verbs": ["get", "create", "patch"],
+        },
+        {
+            "apiGroups": [""],
+            "resources": ["services"],
+            "verbs": ["get", "list", "create", "patch"],
         },
         {
             "apiGroups": [""],
             "resources": ["pods"],
-            "verbs": ["get", "list", "watch"],
+            "verbs": ["get", "list"],
         },
         {
             "apiGroups": [""],
@@ -872,32 +877,37 @@ def test_platform_bundle_owns_the_agentcare_namespace_runtime_identity_and_relea
         {
             "apiGroups": ["apps"],
             "resources": ["deployments"],
-            "verbs": ["get", "list", "watch", "create", "patch"],
+            "verbs": ["get", "create", "patch", "watch"],
         },
         {
             "apiGroups": ["batch"],
             "resources": ["jobs"],
-            "verbs": ["get", "list", "watch", "create", "patch", "delete"],
+            "verbs": ["get", "create", "patch", "delete", "watch"],
         },
         {
             "apiGroups": ["networking.k8s.io"],
             "resources": ["ingresses"],
-            "verbs": ["get", "list", "watch", "create", "patch"],
+            "verbs": ["get", "list", "create", "patch"],
         },
         {
             "apiGroups": ["cloud.google.com"],
             "resources": ["backendconfigs"],
-            "verbs": ["get", "list", "watch", "create", "patch"],
+            "verbs": ["get", "create", "patch"],
         },
         {
             "apiGroups": ["networking.gke.io"],
             "resources": ["frontendconfigs"],
-            "verbs": ["get", "list", "watch", "create", "patch"],
+            "verbs": ["get", "create", "patch"],
+        },
+        {
+            "apiGroups": ["networking.gke.io"],
+            "resources": ["managedcertificates"],
+            "verbs": ["get", "create", "patch"],
         },
         {
             "apiGroups": ["monitoring.googleapis.com"],
             "resources": ["podmonitorings"],
-            "verbs": ["get", "list", "watch", "create", "patch"],
+            "verbs": ["get", "create", "patch"],
         },
     ]
     forbidden_resources = {
@@ -1001,6 +1011,7 @@ def test_ci_scopes_every_release_kubectl_call_and_preflights_allowed_and_forbidd
         "kubectl auth can-i create jobs",
         "kubectl auth can-i delete jobs",
         "kubectl auth can-i list events",
+        "kubectl auth can-i create managedcertificates.networking.gke.io",
     ):
         assert allowed in commands
     for forbidden in (
