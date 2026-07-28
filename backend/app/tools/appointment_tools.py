@@ -225,44 +225,43 @@ def book_appointment(
         db.rollback()
         raise ConflictError("Patient already has an appointment at this time")
 
-    claimed = db.execute(
-        update(AppointmentSlot)
-        .where(AppointmentSlot.id == slot_id, AppointmentSlot.status == "free")
-        .values(status="booked")
-    )
-    if claimed.rowcount == 0:
-        db.rollback()
-        raise ConflictError("Slot is no longer available")
-
-    appt = Appointment(
-        patient_id=patient_id,
-        doctor_id=slot.doctor_id,
-        slot_id=slot_id,
-        status="confirmed",
-        scheduled_start=slot.start_time,
-        scheduled_end=slot.end_time,
-        reason=reason,
-        workflow_run_id=workflow_run_id,
-    )
-    db.add(appt)
     try:
+        claimed = db.execute(
+            update(AppointmentSlot)
+            .where(AppointmentSlot.id == slot_id, AppointmentSlot.status == "free")
+            .values(status="booked")
+        )
+        if claimed.rowcount == 0:
+            raise ConflictError("Slot is no longer available")
+
+        appt = Appointment(
+            patient_id=patient_id,
+            doctor_id=slot.doctor_id,
+            slot_id=slot_id,
+            status="confirmed",
+            scheduled_start=slot.start_time,
+            scheduled_end=slot.end_time,
+            reason=reason,
+            workflow_run_id=workflow_run_id,
+        )
+        db.add(appt)
         db.flush()
-    except IntegrityError as exc:
-        # Roll back either way, so the slot claim above is released rather
-        # than left held by a booking that never happened.
+        write_audit(
+            db,
+            None,
+            "appointment.booked",
+            "appointment",
+            appt.id,
+            {"slot_id": slot_id, "patient_id": patient_id},
+        )
+        db.commit()
+    except Exception as exc:
+        # Audit writes flush too, and commit may surface deferred database
+        # constraints. Every failure after the slot claim must release it.
         db.rollback()
-        if not _is_named_booking_conflict(exc):
-            raise
-        raise ConflictError("Appointment conflicts with an existing booking") from exc
-    write_audit(
-        db,
-        None,
-        "appointment.booked",
-        "appointment",
-        appt.id,
-        {"slot_id": slot_id, "patient_id": patient_id},
-    )
-    db.commit()
+        if isinstance(exc, IntegrityError) and _is_named_booking_conflict(exc):
+            raise ConflictError("Appointment conflicts with an existing booking") from exc
+        raise
     return appointment_summary(appt, slot)
 
 
@@ -310,15 +309,6 @@ def reschedule_appointment(
         db.rollback()
         raise ConflictError("Patient already has an appointment at this time")
 
-    claimed = db.execute(
-        update(AppointmentSlot)
-        .where(AppointmentSlot.id == new_slot_id, AppointmentSlot.status == "free")
-        .values(status="booked")
-    )
-    if claimed.rowcount == 0:
-        db.rollback()
-        raise ConflictError("Slot is no longer available")
-
     appointment_values = {
         "slot_id": new_slot_id,
         "doctor_id": new_slot.doctor_id,
@@ -330,6 +320,14 @@ def reschedule_appointment(
         appointment_values["workflow_run_id"] = workflow_run_id
 
     try:
+        claimed = db.execute(
+            update(AppointmentSlot)
+            .where(AppointmentSlot.id == new_slot_id, AppointmentSlot.status == "free")
+            .values(status="booked")
+        )
+        if claimed.rowcount == 0:
+            raise ConflictError("Slot is no longer available")
+
         moved = db.execute(
             update(Appointment)
             .where(
@@ -340,32 +338,31 @@ def reschedule_appointment(
             .values(**appointment_values)
             .execution_options(synchronize_session=False)
         )
-    except IntegrityError as exc:
+        if moved.rowcount == 0:
+            raise ConflictError(f"Appointment {appointment_id} changed concurrently")
+
+        db.execute(
+            update(AppointmentSlot)
+            .where(AppointmentSlot.id == expected_old_slot_id)
+            .values(status="free")
+        )
+        db.refresh(appt)
+        write_audit(
+            db,
+            None,
+            "appointment.rescheduled",
+            "appointment",
+            appt.id,
+            {"old_slot_id": expected_old_slot_id, "new_slot_id": new_slot_id},
+        )
+        db.commit()
+    except Exception as exc:
+        # Restore the new/old slot claims and the appointment CAS for any
+        # failure, including the audit flush and commit itself.
         db.rollback()
-        if not _is_named_booking_conflict(exc):
-            raise
-        raise ConflictError("Appointment conflicts with an existing booking") from exc
-
-    if moved.rowcount == 0:
-        db.rollback()
-        raise ConflictError(f"Appointment {appointment_id} changed concurrently")
-
-    db.execute(
-        update(AppointmentSlot)
-        .where(AppointmentSlot.id == expected_old_slot_id)
-        .values(status="free")
-    )
-    db.refresh(appt)
-
-    write_audit(
-        db,
-        None,
-        "appointment.rescheduled",
-        "appointment",
-        appt.id,
-        {"old_slot_id": expected_old_slot_id, "new_slot_id": new_slot_id},
-    )
-    db.commit()
+        if isinstance(exc, IntegrityError) and _is_named_booking_conflict(exc):
+            raise ConflictError("Appointment conflicts with an existing booking") from exc
+        raise
     return appointment_summary(appt, new_slot)
 
 

@@ -10,8 +10,16 @@ import pytest
 from sqlalchemy import text, update
 from sqlalchemy.exc import IntegrityError
 
+import app.tools.appointment_tools as appointment_tools
 from app.exceptions import ConflictError
-from app.models import Appointment, AppointmentSlot, Department, Doctor, WorkflowRun
+from app.models import (
+    Appointment,
+    AppointmentSlot,
+    AuditEvent,
+    Department,
+    Doctor,
+    WorkflowRun,
+)
 from app.tools.appointment_tools import (
     book_appointment,
     cancel_appointment,
@@ -215,6 +223,45 @@ def test_available_slots_excludes_patient_conflicts(db, seeded):
     assert overlapping_slot.status == "free"
 
 
+def _force_transaction_failure(db, monkeypatch, failure_stage: str) -> type[Exception]:
+    if failure_stage == "audit":
+
+        def fail_audit_with_unrelated_integrity_error(session, *_args, **_kwargs):
+            session.add(AuditEvent(action=None, entity_type="appointment"))
+            session.flush()
+
+        monkeypatch.setattr(
+            appointment_tools,
+            "write_audit",
+            fail_audit_with_unrelated_integrity_error,
+        )
+        return IntegrityError
+
+    def fail_commit():
+        raise RuntimeError("forced commit failure")
+
+    monkeypatch.setattr(db, "commit", fail_commit)
+    return RuntimeError
+
+
+@pytest.mark.parametrize("failure_stage", ["audit", "commit"])
+def test_booking_rolls_back_when_audit_or_commit_fails(
+    db, seeded, monkeypatch, failure_stage
+):
+    target_slot = _free_slot(db)
+    appointment_count = db.query(Appointment).count()
+    expected_exception = _force_transaction_failure(db, monkeypatch, failure_stage)
+
+    with pytest.raises(expected_exception):
+        book_appointment(
+            db, patient_id=1, slot_id=target_slot.id, reason="rollback booking"
+        )
+
+    db.expire_all()
+    assert db.get(AppointmentSlot, target_slot.id).status == "free"
+    assert db.query(Appointment).count() == appointment_count
+
+
 def test_reschedule_frees_old_slot_and_claims_new(db, seeded):
     old_slot = _free_slot(db)
     booking = book_appointment(db, patient_id=1, slot_id=old_slot.id, reason="checkup")
@@ -343,6 +390,44 @@ def test_stale_concurrent_reschedule_loses_compare_and_swap(db, seeded):
     assert persisted.scheduled_start == winning_slot.start_time
     assert persisted.scheduled_end == winning_slot.end_time
     assert persisted.status == "confirmed"
+
+
+@pytest.mark.parametrize("failure_stage", ["audit", "commit"])
+def test_reschedule_rolls_back_when_audit_or_commit_fails(
+    db, seeded, monkeypatch, failure_stage
+):
+    original_slot, target_slot = _ranged_cardiology_slots(db, [(0, 30), (60, 90)])
+    booking = book_appointment(
+        db, patient_id=1, slot_id=original_slot.id, reason="original reason"
+    )
+    original = db.get(Appointment, booking["id"])
+    expected = {
+        "slot_id": original.slot_id,
+        "doctor_id": original.doctor_id,
+        "scheduled_start": original.scheduled_start,
+        "scheduled_end": original.scheduled_end,
+        "status": original.status,
+        "reason": original.reason,
+    }
+    expected_exception = _force_transaction_failure(db, monkeypatch, failure_stage)
+
+    with pytest.raises(expected_exception):
+        reschedule_appointment(
+            db, appointment_id=booking["id"], new_slot_id=target_slot.id
+        )
+
+    db.expire_all()
+    persisted = db.get(Appointment, booking["id"])
+    assert db.get(AppointmentSlot, target_slot.id).status == "free"
+    assert db.get(AppointmentSlot, original_slot.id).status == "booked"
+    assert {
+        "slot_id": persisted.slot_id,
+        "doctor_id": persisted.doctor_id,
+        "scheduled_start": persisted.scheduled_start,
+        "scheduled_end": persisted.scheduled_end,
+        "status": persisted.status,
+        "reason": persisted.reason,
+    } == expected
 
 
 def test_cancel_frees_slot(db, seeded):
