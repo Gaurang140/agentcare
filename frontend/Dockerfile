@@ -27,6 +27,7 @@ RUN groupadd --system --gid 1001 nodejs \
 # does not include them. The application has no public/ assets.
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+RUN mkdir -p .next && chown -R nextjs:nodejs .next
 
 USER nextjs
 EXPOSE 3000

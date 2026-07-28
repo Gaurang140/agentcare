@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import re
+import runpy
 import subprocess
+import sys
+from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import yaml
+from alembic.config import Config
+
+from app.db.session import engine
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -66,6 +73,105 @@ def test_compose_uses_documented_env_files_and_requires_operator_jwt():
     assert environment["JWT_SECRET"].startswith("${JWT_SECRET:?")
     assert "LLM_MODEL" not in environment
     assert "LLM_BASE_URL" not in environment
+
+
+def test_alembic_escapes_percent_in_runtime_database_url(monkeypatch):
+    """A percent in a database password must not trigger ConfigParser interpolation."""
+
+    class FakeMigrationContext:
+        def __init__(self) -> None:
+            self.config = Config()
+
+        def configure(self, **_kwargs: object) -> None:
+            pass
+
+        @contextmanager
+        def begin_transaction(self):
+            yield
+
+        def run_migrations(self) -> None:
+            pass
+
+        def is_offline_mode(self) -> bool:
+            return True
+
+    fake_context = FakeMigrationContext()
+    fake_alembic = ModuleType("alembic")
+    fake_alembic.context = fake_context
+    monkeypatch.setitem(sys.modules, "alembic", fake_alembic)
+
+    import app.config
+
+    database_url = "postgresql+psycopg://user:pa%ss@db:5432/agentcare"
+    monkeypatch.setattr(
+        app.config, "settings", SimpleNamespace(database_url=database_url)
+    )
+
+    runpy.run_path(str(REPO_ROOT / "backend/alembic/env.py"))
+
+    assert fake_context.config.get_main_option("sqlalchemy.url") == database_url
+
+
+def test_application_engine_pre_pings_pooled_connections():
+    """A stale pooled connection must be checked before a request reuses it."""
+
+    assert engine.pool._pre_ping is True
+
+
+def test_local_runtime_config_limits_exposure_and_supports_large_uploads():
+    compose = _load_yaml(REPO_ROOT / "docker-compose.yml")
+    db_healthcheck = compose["services"]["db"]["healthcheck"]
+
+    assert db_healthcheck["test"] == [
+        "CMD-SHELL",
+        "pg_isready -h 127.0.0.1 -U agentcare -d agentcare",
+    ]
+    assert db_healthcheck["start_period"] == "10s"
+    assert compose["services"]["prometheus"]["ports"] == ["127.0.0.1:9090:9090"]
+    assert compose["services"]["grafana"]["ports"] == ["127.0.0.1:3001:3000"]
+
+    frontend_config = (REPO_ROOT / "frontend/next.config.ts").read_text(
+        encoding="utf-8"
+    )
+    assert 'proxyClientMaxBodySize: "32mb"' in frontend_config
+    assert "GCP Ingress routes /api directly to the backend" in frontend_config
+
+
+def test_frontend_runtime_uses_baseline_headers_correct_font_and_writable_next_dir():
+    frontend_config = (REPO_ROOT / "frontend/next.config.ts").read_text(
+        encoding="utf-8"
+    )
+    for header in (
+        "X-Content-Type-Options",
+        "X-Frame-Options",
+        "Referrer-Policy",
+        "Permissions-Policy",
+    ):
+        assert header in frontend_config
+    assert "Content-Security-Policy" not in frontend_config
+    assert "Strict-Transport-Security" not in frontend_config
+    assert "proxyTimeout" not in frontend_config
+
+    globals_css = (REPO_ROOT / "frontend/app/globals.css").read_text(
+        encoding="utf-8"
+    )
+    assert "--font-sans: var(--font-geist-sans);" in globals_css
+
+    dockerfile = (REPO_ROOT / "frontend/Dockerfile").read_text(encoding="utf-8")
+    assert "mkdir -p .next" in dockerfile
+    assert "chown -R nextjs:nodejs .next" in dockerfile
+
+
+def test_login_card_offers_only_the_seeded_patient_and_staff_demo_accounts():
+    login_page = (REPO_ROOT / "frontend/app/login/page.tsx").read_text(
+        encoding="utf-8"
+    )
+
+    assert login_page.count("@agentcare-demo.com") == 2
+    assert "patient@agentcare-demo.com" in login_page
+    assert "staff@agentcare-demo.com" in login_page
+    assert "Staff / admin demo" in login_page
+    assert "Use" in login_page
 
 
 def test_backend_docker_context_is_an_explicit_allowlist():

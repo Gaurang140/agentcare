@@ -17,6 +17,19 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, login } from "@/lib/api";
 
+const DEMO_ACCOUNTS = [
+  {
+    label: "Patient demo",
+    email: "patient@agentcare-demo.com",
+    password: "demo1234",
+  },
+  {
+    label: "Staff / admin demo",
+    email: "staff@agentcare-demo.com",
+    password: "demo1234",
+  },
+] as const;
+
 export default function LoginPage() {
   // useSearchParams needs a Suspense boundary during static export/prerender
   // (Next.js bails a page to client-only render otherwise); the form itself
@@ -57,7 +70,7 @@ function LoginForm() {
       <Card className="w-full max-w-sm">
         <CardHeader>
           <CardTitle className="text-lg">Sign in to AgentCare</CardTitle>
-          <CardDescription>Administrative access for patients and staff.</CardDescription>
+          <CardDescription>Demo access for patients and staff/admin.</CardDescription>
         </CardHeader>
         <form onSubmit={handleSubmit}>
           <CardContent className="flex flex-col gap-4">
@@ -82,6 +95,35 @@ function LoginForm() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
+            </div>
+            <div className="rounded-lg border border-dashed p-3" aria-label="Demo accounts">
+              <p className="text-xs font-medium text-muted-foreground">Demo accounts</p>
+              <div className="mt-2 flex flex-col gap-2">
+                {DEMO_ACCOUNTS.map((account) => (
+                  <div
+                    key={account.email}
+                    className="flex items-center justify-between gap-3 text-xs"
+                  >
+                    <div>
+                      <p className="font-medium text-foreground">{account.label}</p>
+                      <p className="text-muted-foreground">
+                        {account.email} / {account.password}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={() => {
+                        setEmail(account.email);
+                        setPassword(account.password);
+                      }}
+                    >
+                      Use
+                    </Button>
+                  </div>
+                ))}
+              </div>
             </div>
           </CardContent>
           <CardFooter className="flex flex-col items-stretch gap-3">

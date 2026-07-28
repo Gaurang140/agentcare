@@ -8,10 +8,11 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U agentcare -d agentcare"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U agentcare -d agentcare"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 10s
 
   backend:
     build:
@@ -47,7 +48,7 @@ services:
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     depends_on:
       - backend
 
@@ -61,7 +62,7 @@ services:
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     depends_on:
       - prometheus
 
