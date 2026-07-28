@@ -19,3 +19,4 @@ node_modules/
 .worktrees/
 gha-creds-*.json
 gha-kubeconfig-*
+graphify-out/
