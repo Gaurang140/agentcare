@@ -44,6 +44,39 @@ def _booked_state(db, **overrides) -> dict:
     return base
 
 
+def _status_summary_state(db) -> tuple[dict, list[dict]]:
+    first_slot = (
+        db.query(AppointmentSlot)
+        .filter_by(status="free")
+        .order_by(AppointmentSlot.start_time)
+        .first()
+    )
+    second_slot = (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.start_time >= first_slot.end_time,
+        )
+        .order_by(AppointmentSlot.start_time)
+        .first()
+    )
+    first = book_appointment(db, patient_id=1, slot_id=first_slot.id, reason="private first")
+    second = book_appointment(db, patient_id=1, slot_id=second_slot.id, reason="private second")
+    state = {
+        "workflow_id": 1,
+        "patient_id": 1,
+        "appointment": {
+            "status": "summary",
+            "appointments": [
+                {"id": first["id"], "doctor": "forged state doctor", "reason": "state secret"},
+                {"id": second["id"], "doctor": "another forged doctor", "reason": "state secret"},
+            ],
+        },
+        "documents_result": None,
+    }
+    return state, [first, second]
+
+
 def test_safe_llm_response_passes_through_after_sanitizer(db, seeded, fake_llm):
     state = _booked_state(db)
     fake_llm(
@@ -115,6 +148,45 @@ def test_draft_reflects_live_db_status_not_stale_state_dict(db, seeded, fake_llm
 
     assert "cancelled" in result["final_response"].lower()
     assert "confirmed" not in result["final_response"].lower()
+
+
+def test_status_summary_draft_renders_every_sql_appointment_and_ignores_state_text(
+    db, seeded, fake_llm
+):
+    state, bookings = _status_summary_state(db)
+    _set_language(db, 1, "en")
+    fake_llm([RuntimeError("llm down")])
+
+    result = safety.run(state, db)
+
+    final = result["final_response"]
+    for booking in bookings:
+        assert booking["doctor"] in final
+        assert booking["start_time"] in final
+    assert final.count("Your appointment with") == 2
+    assert "forged state doctor" not in final
+    assert "state secret" not in final
+    assert "private first" not in final
+    assert "private second" not in final
+    assert "No appointment has been booked yet." not in final
+
+
+def test_status_summary_draft_renders_every_sql_appointment_in_german(
+    db, seeded, fake_llm
+):
+    state, bookings = _status_summary_state(db)
+    _set_language(db, 1, "de")
+    fake_llm([RuntimeError("llm down")])
+
+    result = safety.run(state, db)
+
+    final = result["final_response"]
+    for booking in bookings:
+        assert booking["doctor"] in final
+        assert booking["start_time"] in final
+    assert final.count("Ihr Termin bei") == 2
+    assert final.count("bestätigt") == 2
+    assert "Es ist noch kein Termin gebucht." not in final
 
 
 # --- Language preference (PatientProfile.preferred_language) ----------------

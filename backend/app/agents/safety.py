@@ -55,6 +55,7 @@ _APPOINTMENT_STATUS_DE = {
     "cancelled": "storniert",
     "completed": "abgeschlossen",
 }
+_ACTIVE_APPOINTMENT_STATUSES = ("pending", "confirmed")
 
 
 class SafetyOutput(BaseModel):
@@ -75,6 +76,63 @@ def _preferred_language(db: Session, patient_id: int) -> str:
     return language if language in _LANGUAGE_INSTRUCTIONS else _DEFAULT_LANGUAGE
 
 
+def _summary_appointment_rows(
+    db: Session,
+    patient_id: int,
+    appointment_ref: dict,
+) -> list[Appointment]:
+    """Resolve a status summary's ids back to the patient's current SQL rows.
+
+    The state envelope is routing context, not appointment data: doctor,
+    department, time, status, and reason all come from SQL here. Invalid,
+    duplicate, other-patient, and no-longer-active references are ignored.
+    """
+    refs = appointment_ref.get("appointments")
+    if not isinstance(refs, list):
+        return []
+
+    appointment_ids: list[int] = []
+    for ref in refs:
+        appointment_id = ref.get("id") if isinstance(ref, dict) else None
+        if type(appointment_id) is int and appointment_id not in appointment_ids:
+            appointment_ids.append(appointment_id)
+    if not appointment_ids:
+        return []
+
+    rows = (
+        db.query(Appointment)
+        .filter(
+            Appointment.id.in_(appointment_ids),
+            Appointment.patient_id == patient_id,
+            Appointment.status.in_(_ACTIVE_APPOINTMENT_STATUSES),
+        )
+        .all()
+    )
+    rows_by_id = {row.id: row for row in rows}
+    return [rows_by_id[appointment_id] for appointment_id in appointment_ids if appointment_id in rows_by_id]
+
+
+def _appointment_line(appt_row: Appointment, language: str) -> str:
+    if appt_row.slot:
+        when = appt_row.slot.start_time.isoformat()
+    else:
+        when = (
+            "einen noch nicht festgelegten Zeitpunkt"
+            if language == "de"
+            else "an unscheduled time"
+        )
+    if language == "de":
+        status = _APPOINTMENT_STATUS_DE.get(appt_row.status, appt_row.status)
+        return (
+            f"Ihr Termin bei {appt_row.doctor.name} "
+            f"({appt_row.doctor.department.name}) ist {status} für {when}."
+        )
+    return (
+        f"Your appointment with {appt_row.doctor.name} "
+        f"({appt_row.doctor.department.name}) is {appt_row.status} for {when}."
+    )
+
+
 def _compose_draft(db: Session, patient_id: int, appointment_ref: dict | None, language: str) -> str:
     """The deterministic draft, in `language` ("en" or "de") - this is what
     ships as final_response outright whenever the LLM review step fails
@@ -82,25 +140,16 @@ def _compose_draft(db: Session, patient_id: int, appointment_ref: dict | None, l
     a German-preferring patient."""
     lines: list[str] = []
 
-    appt_row = None
-    if appointment_ref and appointment_ref.get("id"):
+    appointment_rows: list[Appointment] = []
+    if appointment_ref and appointment_ref.get("status") == "summary":
+        appointment_rows = _summary_appointment_rows(db, patient_id, appointment_ref)
+    elif appointment_ref and appointment_ref.get("id"):
         appt_row = db.get(Appointment, appointment_ref["id"])
-    if appt_row is not None:
-        if appt_row.slot:
-            when = appt_row.slot.start_time.isoformat()
-        else:
-            when = "einen noch nicht festgelegten Zeitpunkt" if language == "de" else "an unscheduled time"
-        if language == "de":
-            status = _APPOINTMENT_STATUS_DE.get(appt_row.status, appt_row.status)
-            lines.append(
-                f"Ihr Termin bei {appt_row.doctor.name} "
-                f"({appt_row.doctor.department.name}) ist {status} für {when}."
-            )
-        else:
-            lines.append(
-                f"Your appointment with {appt_row.doctor.name} "
-                f"({appt_row.doctor.department.name}) is {appt_row.status} for {when}."
-            )
+        if appt_row is not None:
+            appointment_rows = [appt_row]
+
+    if appointment_rows:
+        lines.extend(_appointment_line(appt_row, language) for appt_row in appointment_rows)
     else:
         lines.append(_NO_APPOINTMENT_LINE[language])
 

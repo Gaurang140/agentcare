@@ -32,7 +32,7 @@ from app.models import (
     WorkflowRun,
 )
 from app.services import workflow_service
-from app.tools.appointment_tools import get_available_slots
+from app.tools.appointment_tools import book_appointment, get_available_slots
 
 _SLOT_WINDOW_DAYS = 14
 
@@ -144,6 +144,62 @@ def test_full_booking_workflow_persists_everything(db, seeded, fake_llm):
     assert db.query(AuditEvent).filter_by(entity_type="workflow_run").count() >= 4
     assert run.state["department_name"] == "Cardiology"
     assert len(client.chat.completions.calls) == len(script)
+
+
+def test_status_workflow_reports_every_current_appointment_from_sql(
+    db, seeded, fake_llm
+):
+    dept_id = _cardiology_id(db)
+    today = date.today()
+    slots = get_available_slots(
+        db,
+        dept_id,
+        today,
+        today + timedelta(days=_SLOT_WINDOW_DAYS),
+        limit=10,
+    )
+    first_slot = slots[0]
+    second_slot = next(
+        slot for slot in slots[1:] if slot["start_time"] >= first_slot["end_time"]
+    )
+    first = book_appointment(
+        db, patient_id=1, slot_id=first_slot["slot_id"], reason="private first"
+    )
+    second = book_appointment(
+        db, patient_id=1, slot_id=second_slot["slot_id"], reason="private second"
+    )
+    client = fake_llm(
+        [
+            {"next_step": "route_department", "reasoning": "nothing routed yet"},
+            {
+                "intent": "status",
+                "department": None,
+                "confidence": 0.95,
+                "reason": "status request",
+            },
+            {"next_step": "handle_appointment", "reasoning": "read current appointments"},
+            {"next_step": "schedule_followup", "reasoning": "status summary needs no reminders"},
+            {"next_step": "finalize", "reasoning": "report current appointments"},
+            RuntimeError("safety llm down"),
+        ]
+    )
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "What appointments do I currently have?", []
+    )
+
+    assert run.status == "completed"
+    assert run.state["appointment"]["status"] == "summary"
+    assert len(run.state["appointment"]["appointments"]) == 2
+    assert db.query(Reminder).count() == 0
+    assert first["doctor"] in run.state["final_response"]
+    assert first["start_time"] in run.state["final_response"]
+    assert second["doctor"] in run.state["final_response"]
+    assert second["start_time"] in run.state["final_response"]
+    assert "No appointment has been booked yet." not in run.state["final_response"]
+    assert "private first" not in run.state["final_response"]
+    assert "private second" not in run.state["final_response"]
+    assert len(client.chat.completions.calls) == 6
 
 
 def test_emergency_short_circuits_to_escalation(db, seeded, fake_llm):
