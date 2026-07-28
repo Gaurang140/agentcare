@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import runpy
 import subprocess
@@ -1340,6 +1341,129 @@ def test_release_requires_explicit_delivery_and_model_armor_before_output_reads(
     assert release.index(enable_delivery) < release.index("gh workflow run ci.yml --ref main")
     assert release.index("gh workflow run ci.yml --ref main") - release.index(enable_delivery) < 300
     assert release.rindex(committed) > release.index('gh run view "$$run_id" --json url --jq .url')
+
+
+def test_release_disables_delivery_after_ambiguous_enable_response(tmp_path):
+    """A failed CLI response after a remote enable must still trigger rollback.
+
+    This catches moving the arming marker below the remote mutation: the fake
+    `gh` applies `true` to its state file before returning a nonzero status.
+    """
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    delivery_state = tmp_path / "delivery-state"
+
+    def fake_command(name: str, script: str) -> None:
+        command = fake_bin / name
+        command.write_text(script, encoding="utf-8")
+        command.chmod(0o755)
+
+    fake_command(
+        "gh",
+        """#!/bin/bash
+set -euo pipefail
+if [ "$1" = "auth" ]; then
+  exit 0
+fi
+if [ "$1" = "repo" ]; then
+  printf 'agentcare/example\\n'
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  exit 0
+fi
+if [ "$1" = "variable" ] && [ "$2" = "set" ]; then
+  value=""
+  for ((index = 1; index <= $#; index++)); do
+    if [ "${!index}" = "--body" ]; then
+      next=$((index + 1))
+      value="${!next}"
+      break
+    fi
+  done
+  if [ "$3" = "DEPLOY_ENABLED" ]; then
+    printf '%s\\n' "$value" >> "$FAKE_DELIVERY_STATE"
+    if [ "$value" = "true" ]; then
+      # The remote write succeeded, but the client received an ambiguous error.
+      exit 73
+    fi
+  fi
+  exit 0
+fi
+if [ "$1" = "variable" ] && [ "$2" = "delete" ]; then
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\\n' "$*" >&2
+exit 99
+""",
+    )
+    fake_command(
+        "terraform",
+        """#!/bin/bash
+set -euo pipefail
+if [[ " $* " == *" output -raw gke_cluster_name "* ]]; then
+  printf 'agentcare-cluster\\n'
+elif [[ " $* " == *" output -raw gke_cluster_location "* ]]; then
+  printf 'europe-west3\\n'
+elif [[ " $* " == *" output -raw documents_bucket_name "* ]]; then
+  printf 'agentcare-documents\\n'
+elif [[ " $* " == *" output -raw model_armor_template_name "* ]]; then
+  printf 'projects/example/locations/europe-west3/templates/guard\\n'
+elif [[ " $* " == *" output -raw workload_identity_provider "* ]]; then
+  printf 'projects/1/locations/global/workloadIdentityPools/pool/providers/provider\\n'
+elif [[ " $* " == *" output -raw deployer_service_account_email "* ]]; then
+  printf 'deployer@example.iam.gserviceaccount.com\\n'
+fi
+""",
+    )
+    fake_command("gcloud", "#!/bin/bash\nexit 0\n")
+    fake_command("kubectl", "#!/bin/bash\nexit 0\n")
+    fake_command(
+        "git",
+        """#!/bin/bash
+if [ "$1" = "rev-parse" ]; then
+  printf 'same-sha\\n'
+elif [ "$1" = "ls-remote" ]; then
+  printf 'same-sha\\trefs/heads/main\\n'
+fi
+""",
+    )
+
+    harness = tmp_path / "Makefile"
+    harness.write_text(f"include {REPO_ROOT / 'Makefile'}\n", encoding="utf-8")
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "FAKE_DELIVERY_STATE": str(delivery_state),
+    }
+    result = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "-f",
+            str(harness),
+            "gcp-release",
+            "PROJECT_ID=agentcare-example",
+            "PUBLIC_URL=https://agentcare.example",
+            "ENABLE_DELIVERY=true",
+            "ENABLE_MODEL_ARMOR=true",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert delivery_state.read_text(encoding="utf-8").splitlines() == [
+        "false",
+        "true",
+        "false",
+    ]
 
 
 def test_status_health_check_stays_in_the_strict_operator_recipe():

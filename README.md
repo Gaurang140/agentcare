@@ -109,7 +109,7 @@ backend/
   tests/             unit, integration, graph and deployment tests
   llm.yaml           model profiles and parameters
 frontend/            patient portal and staff console
-docs/                architecture, security, operations and demo guides
+docs/                architecture, security, CI/CD, deployment and observability guides
 evals/               golden safety dataset and scoring scripts
 infra/
   bootstrap/         remote state, APIs and narrow GitHub deployment trust

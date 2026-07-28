@@ -76,7 +76,7 @@ export IMAGE_TAG="$(git rev-parse HEAD)"
 export DOCUMENTS_BUCKET="YOUR_BUCKET"
 export MODEL_ARMOR_TEMPLATE="projects/YOUR_PROJECT_ID/locations/europe-west3/templates/agentcare-guard"
 export PUBLIC_URL="https://YOUR_DOMAIN"
-export LLM_PROFILE="vertex"
+export LLM_PROFILE="groq"
 export LANGFUSE_PUBLIC_KEY=""
 export LANGFUSE_BASE_URL="https://cloud.langfuse.com"
 export LANGFUSE_SAMPLE_RATE="0"
@@ -88,8 +88,9 @@ kubectl kustomize "$RENDERED_K8S/overlays/gcp"
 kubectl --namespace=agentcare apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp"
 ```
 
-The output path must not already exist. Rendering never proves that cloud
-resources or credentials exist.
+The output path must not already exist. Terraform does not grant Vertex AI by
+default, so this manual example uses the configured Groq profile. Rendering
+never proves that cloud resources, credentials or a live model provider exist.
 
 ## Apply in order
 
@@ -100,8 +101,31 @@ overlay:
 kubectl --namespace=agentcare delete job backend-migrate --ignore-not-found
 kubectl --namespace=agentcare apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp-migration"
 kubectl --namespace=agentcare apply -k "$RENDERED_K8S/overlays/gcp-migration"
-kubectl --namespace=agentcare wait --for=condition=complete job/backend-migrate --timeout=600s
-kubectl --namespace=agentcare logs job/backend-migrate
+migration_complete=false
+for attempt in {1..120}; do
+  echo "migration Job condition check $attempt/120"
+  conditions="$(kubectl --namespace=agentcare get job backend-migrate \
+    -o jsonpath='{range .status.conditions[*]}{.type}={.status}{"\n"}{end}' || true)"
+  if grep -Fxq "Complete=True" <<<"$conditions"; then
+    kubectl --namespace=agentcare logs job/backend-migrate --all-containers=true \
+      || echo "warning: migration completed, but pod logs are unavailable" >&2
+    migration_complete=true
+    break
+  fi
+  if grep -Fxq "Failed=True" <<<"$conditions"; then
+    echo "error: database migration Job reported Failed=True" >&2
+    kubectl --namespace=agentcare logs job/backend-migrate --all-containers=true || true
+    kubectl --namespace=agentcare describe job/backend-migrate || true
+    exit 1
+  fi
+  sleep 5
+done
+if [ "$migration_complete" != "true" ]; then
+  echo "error: database migration Job did not become Complete=True or Failed=True within 600 seconds" >&2
+  kubectl --namespace=agentcare logs job/backend-migrate --all-containers=true || true
+  kubectl --namespace=agentcare describe job/backend-migrate || true
+  exit 1
+fi
 kubectl --namespace=agentcare apply -k "$RENDERED_K8S/overlays/gcp"
 ```
 

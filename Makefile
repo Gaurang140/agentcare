@@ -70,8 +70,9 @@ help:
 	@echo "  gcp-cleanup      retry delayed service-networking deletion (Google can retain private service-networking for days)"
 	@echo "  gcp-github-vars  sync non-secret release configuration and leave delivery disabled"
 	@echo ""
-	@echo "Required: PROJECT_ID. Optional: REGION, GCS_LOCATION, NETWORK_NAME,"
-	@echo "SUBNETWORK_NAME, ENABLE_CLOUD_SQL, ENABLE_MODEL_ARMOR, ENABLE_VERTEX_AI and ENABLE_DELIVERY."
+	@echo "Required: PROJECT_ID (all lifecycle targets). gcp-bootstrap also requires GITHUB_REPOSITORY_ID and GITHUB_OWNER_ID."
+	@echo "gcp-github-vars, gcp-release and gcp-deploy also require PUBLIC_URL; gcp-release and gcp-deploy require ENABLE_DELIVERY=true."
+	@echo "Defaults: REGION, GCS_LOCATION, NETWORK_NAME, SUBNETWORK_NAME, TF_STATE_BUCKET, ENABLE_CLOUD_SQL, ENABLE_MODEL_ARMOR, ENABLE_VERTEX_AI, LLM_PROFILE and LANGFUSE_* (release targets require ENABLE_MODEL_ARMOR=true)."
 
 gcp-bootstrap:
 	$(call require_var,PROJECT_ID)
@@ -241,8 +242,8 @@ gcp-release:
 		exit "$$status"; \
 	}; \
 	trap rollback_delivery EXIT; \
-	gh variable set DEPLOY_ENABLED --body "true"; \
 	delivery_armed=true; \
+	gh variable set DEPLOY_ENABLED --body "true"; \
 	gh workflow run ci.yml --ref main; \
 	run_id=""; \
 	for attempt in $$(seq 1 30); do \
