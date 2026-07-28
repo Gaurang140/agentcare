@@ -18,6 +18,7 @@ node_modules/
 .DS_Store
 .superpowers/
 docs/superpowers/
+graphify-out/
 .worktrees/
 gha-creds-*.json
 gha-kubeconfig-*

@@ -24,7 +24,7 @@ flowchart TB
     CP[("LangGraph checkpointer<br/>SQLite file or PostgresSaver")]
     STORAGE["Document storage<br/>local or GCS adapter"]
     SSE["SSE workflow timeline"]
-    JOBS["APScheduler reminders and stall sweep"]
+    JOBS["Recurring jobs<br/>APScheduler locally, CronJobs on GKE"]
 
     UI --> API
     API --> WS

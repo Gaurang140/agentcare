@@ -281,8 +281,9 @@ to zero and an exporter failure does not stop workflow processing.
 - HS256 session signing depends on protecting and rotating one shared secret.
 - Graph dispatch uses process-local background work. A process loss can leave
   a run pending until checkpoint resume or the stall sweep hands it to staff.
-- The backend is intentionally single-replica while APScheduler jobs remain
-  in-process without a distributed lock.
+- Local mode runs APScheduler inside one backend process. GKE disables it and
+  runs reminders and stalled-workflow recovery as `Forbid` Kubernetes
+  CronJobs, allowing two rolling API replicas.
 
 These constraints must be resolved before real patient data or public
 production traffic is considered.
