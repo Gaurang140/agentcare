@@ -445,6 +445,42 @@ def test_ci_defaults_to_read_only_and_verifies_kubeconform_archive():
     assert "v0.7.0" not in install
 
 
+def test_ci_adds_postgres_constraint_coverage_without_replacing_sqlite():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    backend = workflow["jobs"]["test"]
+    postgres = backend["services"]["postgres"]
+
+    assert postgres == {
+        "image": "postgres:16",
+        "env": {
+            "POSTGRES_DB": "agentcare_test",
+            "POSTGRES_USER": "agentcare_test",
+            "POSTGRES_PASSWORD": "agentcare_test",
+        },
+        "ports": ["5432:5432"],
+        "options": (
+            "--health-cmd pg_isready "
+            "--health-interval 10s "
+            "--health-timeout 5s "
+            "--health-retries 5"
+        ),
+    }
+    assert backend["env"]["POSTGRES_TEST_URL"] == (
+        "postgresql+psycopg://"
+        "agentcare_test:agentcare_test@localhost:5432/agentcare_test"
+    )
+
+    backend_commands = "\n".join(
+        step["run"]
+        for step in backend["steps"]
+        if isinstance(step.get("run"), str)
+    )
+    assert "pytest -q backend evals/test_evidence_safety.py" in backend_commands
+    assert workflow["jobs"]["migrations"]["env"]["DATABASE_URL"].startswith(
+        "sqlite:///"
+    )
+
+
 def test_ci_validates_terraform_with_pinned_hashicorp_setup():
     workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
     job = workflow["jobs"]["infrastructure"]
