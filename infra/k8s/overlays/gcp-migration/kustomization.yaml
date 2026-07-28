@@ -10,5 +10,5 @@ resources:
 
 images:
   - name: agentcare-backend
-    newName: REGION-docker.pkg.dev/PROJECT/agentcare/backend
-    newTag: TAG
+    newName: REGION_PLACEHOLDER-docker.pkg.dev/PROJECT_ID_PLACEHOLDER/agentcare/backend
+    newTag: IMAGE_TAG_PLACEHOLDER

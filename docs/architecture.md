@@ -284,10 +284,29 @@ GCP is the sole cloud target. The committed design maps:
 - the backend Kubernetes service account to a runtime Google service account
   through GKE Workload Identity
 
-These adapters and manifests are configured in the repository. They do not
-prove that a cluster, database, bucket, Model Armor template or Vertex model is
-live. Terraform declares the KSA-to-GSA binding, while the migration Job and
-application workloads are applied in separate ordered stages. Public DNS, TLS
-readiness, secret material, database creation, migration and smoke tests
-remain operator responsibilities. Deployment itself is manual.
-See [GCP deployment](deployment-gcp.md) for the canonical procedure.
+Terraform owns those resources. A small bootstrap stack creates remote state,
+enables the required services and establishes branch-restricted GitHub
+Workload Identity. The main stack creates the application infrastructure.
+Neither stack runs during an ordinary code release.
+
+After one-time activation, GitHub Actions owns application delivery:
+
+```mermaid
+flowchart LR
+    PUSH["Push main"] --> GATES["Test, lint, build,<br/>migration, manifest and secret gates"]
+    GATES --> AUTH["Short-lived Google identity"]
+    AUTH --> IMAGES["Build and push<br/>commit-SHA images"]
+    IMAGES --> MIGRATION["Run migration Job"]
+    MIGRATION --> ROLLOUT["Apply app and wait<br/>for both rollouts"]
+    ROLLOUT --> HEALTH["Public health check"]
+```
+
+The renderer copies Kubernetes source to a temporary directory and replaces
+validated deployment sentinels. It rejects mutable image tags and unresolved
+values. The migration Job must complete before application manifests are
+applied.
+
+The existing public health endpoint was verified on 2026-07-28. That proves
+the API and database were reachable at that time. It does not prove a current
+Vertex response, Model Armor verdict or Langfuse export. Each new environment
+must run the smoke checks in [GCP deployment](deployment-gcp.md).

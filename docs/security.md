@@ -35,10 +35,12 @@ No prompt is treated as an authorization or safety control.
 | Model to application | Generated fields and prose | Pydantic validation, transition guards and output sanitizer |
 | Agent to domain data | Tool arguments and repeated execution | Transactions, conditional updates, idempotency checks and audit |
 | Staff to paused graph | Approval and note | Staff RBAC, persisted decision claim and same-thread resume |
+| Application to Langfuse | Trace spans | disabled by default, trace sampling and an export allowlist |
 | Runtime to GCP | Backend pod identity and VPC traffic | Workload Identity, scoped IAM, regional PSC endpoint and private DNS |
 
-The last row is configured but not live-verified. The deployment runbook lists
-the operator checks required before trusting the binding.
+The public health endpoint was verified on 2026-07-28. Health alone does not
+verify the last two external boundaries. The deployment and observability
+guides list the checks required before trusting them in a new environment.
 
 ## Deterministic healthcare boundary
 
@@ -240,6 +242,16 @@ connections, and the documented direct DSN requests TLS. That DSN does not
 verify server identity. Repository configuration alone does not prove the
 runtime identity, private DNS or TLS path in a live cluster.
 
+GitHub Actions uses short-lived Workload Identity Federation. Its trust rule
+matches the immutable repository ID, immutable owner ID and `main` branch.
+No Google service-account key is created or stored in GitHub.
+
+Optional Langfuse tracing exports only operational attributes from an
+allowlist: trace name, environment, release, tags, model, usage, cost,
+observation type, level and error type. It deletes content, prompts, messages,
+tool values, identifiers, metadata and exception messages. Sampling defaults
+to zero and an exporter failure does not stop workflow processing.
+
 ## Known limitations
 
 - This project uses synthetic data and has not been assessed or certified for
@@ -248,8 +260,8 @@ runtime identity, private DNS or TLS path in a live cluster.
   It cannot guarantee detection of every identifier or free-text disclosure.
 - Original patient text remains in the domain database. Database access,
   backup encryption, retention and deletion policy require an operator.
-- Model Armor, Vertex authentication and the complete GCP runtime have not
-  been live-verified.
+- The 2026-07-28 public health check did not prove a current Vertex response,
+  Model Armor verdict, Workload Identity binding or Langfuse export.
 - Model Armor fails open to deterministic controls. This preserves
   availability but removes provider screening during an outage.
 - Upload validation does not include malware scanning, PDF active-content

@@ -1,13 +1,8 @@
-# State backend: local by default, so `terraform init -backend=false && terraform
-# validate` (or a first `terraform plan`) works with zero setup and no bucket has
-# to exist first. For a shared environment, provision a protected state
-# bucket through the organization's bootstrap process, set its exact name in
-# the commented block, then run `terraform init -migrate-state`.
+# The bootstrap stack creates the versioned bucket. Its name is supplied at
+# init time with `-backend-config="bucket=$TF_STATE_BUCKET"` so this source
+# never embeds an environment account or globally unique bucket name.
 terraform {
-  backend "local" {}
-
-  # backend "gcs" {
-  #   bucket = "agentcare-terraform-state" # create by hand once, outside this config
-  #   prefix = "terraform/state"
-  # }
+  backend "gcs" {
+    prefix = "agentcare/production"
+  }
 }

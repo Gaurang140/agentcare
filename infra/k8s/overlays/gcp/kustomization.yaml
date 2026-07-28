@@ -20,6 +20,10 @@ patches:
   # the terraform in infra/terraform/ just paid to create.
   - path: configmap-model-armor.yaml
 
+  # Environment-specific model, origin, release and Langfuse values are
+  # rendered into a temporary copy by scripts/render_gcp_manifests.py.
+  - path: configmap-runtime.yaml
+
   # Terraform binds this KSA name to the backend Google service account. The
   # operator replaces PROJECT_ID before rendering the environment artifact.
   - path: serviceaccount-workload-identity.yaml
@@ -36,13 +40,11 @@ patches:
         value:
           cloud.google.com/backend-config: '{"default": "backend-backendconfig"}'
 
-# REGION-docker.pkg.dev/PROJECT/agentcare/{backend,frontend} are placeholders.
-# The manual runbook rewrites both names and tags to Git-SHA-addressed
-# Artifact Registry images before rendering.
+# The renderer replaces each sentinel with one validated deployment value.
 images:
   - name: agentcare-backend
-    newName: REGION-docker.pkg.dev/PROJECT/agentcare/backend
-    newTag: TAG
+    newName: REGION_PLACEHOLDER-docker.pkg.dev/PROJECT_ID_PLACEHOLDER/agentcare/backend
+    newTag: IMAGE_TAG_PLACEHOLDER
   - name: agentcare-frontend
-    newName: REGION-docker.pkg.dev/PROJECT/agentcare/frontend
-    newTag: TAG
+    newName: REGION_PLACEHOLDER-docker.pkg.dev/PROJECT_ID_PLACEHOLDER/agentcare/frontend
+    newTag: IMAGE_TAG_PLACEHOLDER

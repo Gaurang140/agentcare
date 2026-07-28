@@ -17,4 +17,4 @@ metadata:
   name: agentcare-config
 data:
   STORAGE_BACKEND: "gcs"
-  GCS_BUCKET: "REPLACE_ME"
+  GCS_BUCKET: "DOCUMENTS_BUCKET_PLACEHOLDER"

@@ -23,7 +23,7 @@ spec:
         runAsUser: 1001
       containers:
         - name: frontend
-          image: agentcare-frontend:latest
+          image: agentcare-frontend:replace-by-overlay
           ports:
             - name: http
               containerPort: 3000

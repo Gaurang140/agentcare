@@ -39,3 +39,23 @@ def test_development_can_boot_before_local_secret_is_configured():
     )
 
     assert settings.jwt_secret == ""
+
+
+def test_langfuse_sampling_is_disabled_by_default():
+    settings = Settings(_env_file=None)
+
+    assert settings.langfuse_sample_rate == 0
+
+
+@pytest.mark.parametrize("sample_rate", [-0.01, 1.01])
+def test_langfuse_sampling_rejects_values_outside_zero_to_one(sample_rate):
+    with pytest.raises(ValidationError, match="langfuse_sample_rate"):
+        Settings(_env_file=None, langfuse_sample_rate=sample_rate)
+
+
+def test_langfuse_uses_official_base_url_environment_name(monkeypatch):
+    monkeypatch.setenv("LANGFUSE_BASE_URL", "https://eu.cloud.langfuse.com")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.langfuse_base_url == "https://eu.cloud.langfuse.com"

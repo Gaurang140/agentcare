@@ -5,8 +5,7 @@
 # (backend/app/safety/model_armor.py). The deterministic layers keep deciding
 # first and last, so this template is a second opinion, never the only one.
 #
-# Enabling the API is an operator prerequisite documented in
-# docs/deployment-gcp.md; this configuration does not enable project APIs.
+# The bootstrap stack enables the API before the main stack is planned.
 locals {
   target_google_api = "modelarmor.${var.location}.rep.googleapis.com"
 }

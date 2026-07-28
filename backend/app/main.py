@@ -22,6 +22,7 @@ from app.config import settings
 from app.db.session import get_db
 from app.exceptions import register_exception_handlers
 from app.logging_setup import configure_logging, get_logger
+from app.observability.tracing import shutdown_tracing
 from app.scheduler import start_scheduler, stop_scheduler
 from app.services import workflow_service
 
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
     stop_scheduler()
     workflow_service.close_graph()
+    shutdown_tracing()
 
 
 app = FastAPI(title="AgentCare", lifespan=lifespan)

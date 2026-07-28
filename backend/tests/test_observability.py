@@ -17,12 +17,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Department, User
+from app.observability import tracing
 from app.services import workflow_service
 from app.tools.appointment_tools import get_available_slots
 
 _SLOT_WINDOW_DAYS = 14
 
 _MISSING_DEPENDENCY_EVENT = "langfuse_disabled_missing_dependency"
+_INITIALIZATION_FAILURE_EVENT = "langfuse_disabled_initialization_failed"
 
 
 @pytest.fixture(autouse=True)
@@ -101,13 +103,14 @@ def _full_booking_script(slot_id: int) -> list[dict]:
 
 def _record_logger(monkeypatch) -> _RecordingLogger:
     recorder = _RecordingLogger()
-    monkeypatch.setattr(workflow_service, "logger", recorder)
+    monkeypatch.setattr(tracing, "logger", recorder)
     return recorder
 
 
 def test_workflow_completes_untraced_when_langchain_is_missing(db, seeded, fake_llm, monkeypatch):
     monkeypatch.setattr(settings, "langfuse_public_key", "pk-lf-test")
     monkeypatch.setattr(settings, "langfuse_secret_key", "sk-lf-test")
+    monkeypatch.setattr(settings, "langfuse_sample_rate", 1.0)
     # Exactly what a machine without `langchain` does to the handler import.
     monkeypatch.setitem(sys.modules, "langfuse.langchain", None)
 
@@ -116,7 +119,7 @@ def test_workflow_completes_untraced_when_langchain_is_missing(db, seeded, fake_
 
     # Tracing that cannot attach must not build a client either: with fake
     # keys that would start a real exporter thread from a unit test.
-    monkeypatch.setattr(workflow_service, "_ensure_langfuse_client", _no_client)
+    monkeypatch.setattr(tracing, "_ensure_langfuse_client", _no_client)
     recorder = _record_logger(monkeypatch)
     client = fake_llm(_full_booking_script(_first_free_slot_id(db)))
 
@@ -141,3 +144,30 @@ def test_tracing_stays_silent_when_no_langfuse_keys_are_set(db, seeded, fake_llm
 
     assert run.status == "completed"
     assert recorder.events == []
+
+
+def test_workflow_completes_when_langfuse_client_initialization_fails(
+    db, seeded, fake_llm, monkeypatch
+):
+    monkeypatch.setattr(settings, "langfuse_public_key", "pk-lf-test")
+    monkeypatch.setattr(settings, "langfuse_secret_key", "sk-lf-test")
+    monkeypatch.setattr(settings, "langfuse_sample_rate", 1.0, raising=False)
+
+    def _broken_client() -> None:
+        raise RuntimeError("Langfuse is unavailable")
+
+    monkeypatch.setattr(
+        tracing,
+        "_ensure_langfuse_client",
+        _broken_client,
+    )
+    recorder = _record_logger(monkeypatch)
+    client = fake_llm(_full_booking_script(_first_free_slot_id(db)))
+
+    run = workflow_service.start_workflow(
+        db, _patient_user(db), "I need a cardiology appointment next week", []
+    )
+
+    assert run.status == "completed"
+    assert _INITIALIZATION_FAILURE_EVENT in recorder.events
+    assert len(client.chat.completions.calls) == 9

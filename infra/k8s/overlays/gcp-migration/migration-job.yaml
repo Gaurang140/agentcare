@@ -25,7 +25,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: migrate
-          image: agentcare-backend:latest
+          image: agentcare-backend:replace-by-overlay
           securityContext:
             readOnlyRootFilesystem: false
             allowPrivilegeEscalation: false

@@ -3,11 +3,14 @@
 AgentCare turns plain-language patient requests into auditable hospital
 administration while keeping medical decisions with clinicians.
 
-> **Status:** The local application, safety gates, persistence, human approval
-> flow and automated tests are implemented. Groq is the default model profile.
-> Local and Vertex profiles are configured. Vertex construction is unit-tested,
-> but no live Vertex response, GCP deployment or live Model Armor call has been
-> verified. The committed GCP configuration still requires operator setup.
+> **Status:** The application is live on GCP and its public health check was
+> verified on 2026-07-28. The last recorded cloud profile uses Vertex with
+> `gemini-2.5-flash`. Automatic GitHub-to-GKE deployment is implemented but
+> remains inactive until the repository remote, GitHub production environment
+> and keyless Google identity are configured. Langfuse tracing is implemented,
+> privacy-masked and disabled by default until keys and sampling are set.
+
+[Open the live application](https://agentcare.136-69-65-187.sslip.io)
 
 AgentCare handles registration, department routing, appointment work,
 document coordination, reminders and follow-up. It does not diagnose,
@@ -25,8 +28,9 @@ prescribe or recommend doses.
 | Structured model output | `invoke_structured` owns application policy and delegates schema handling to LangChain |
 | Auditability | Tool mutations, agent exits and approvals write append-only `AuditEvent` rows |
 | Model profiles | Groq default, local OpenAI-compatible and configured Vertex through Google GenAI |
-| Cloud target | GCP configuration is committed; live provisioning and verification remain operator work |
+| Cloud target | Existing GCP health is verified; Terraform owns infrastructure and GitHub Actions owns application releases |
 | Evaluation | Two-phase harness and a measured no-key safety baseline are committed |
+| LLM observability | Optional Langfuse traces export operational metadata only through an allowlist |
 
 ## How a request runs
 
@@ -76,7 +80,7 @@ Presidio plus deterministic patterns redacting supported identifiers.
 | Persistence | SQLAlchemy, Alembic, SQLite or Postgres |
 | Frontend | Next.js App Router, React, Tailwind and shadcn/ui |
 | Safety | Deterministic gates, Presidio and optional Model Armor |
-| Observability | Append-only audit, SSE, Prometheus and Grafana |
+| Observability | SQL audit, SSE, structured logs, Prometheus, Grafana and optional Langfuse |
 | Deployment | Terraform HCL, GKE Autopilot and Kustomize |
 
 ## Repository map
@@ -88,6 +92,7 @@ backend/
     api/          FastAPI routes and backend authorization
     auth/         cookies, password hashing and RBAC
     models/       SQLAlchemy domain entities
+    observability/privacy-safe optional Langfuse tracing
     safety/       request, injection, PII and output controls
     services/     workflow execution and storage adapters
     tools/        transactional domain operations and audit writes
@@ -98,10 +103,11 @@ frontend/         patient portal and staff console
 docs/             architecture, security, decisions, deployment and demo
 evals/            golden dataset and two-phase scoring harness
 infra/
+  bootstrap/      remote state and keyless GitHub-to-GCP trust
   terraform/      GCP resources, managed by Terraform
   k8s/            Kustomize base and GCP overlay
 monitoring/       local Prometheus and Grafana configuration
-scripts/          idempotent synthetic demo seed
+scripts/          synthetic seed and validated manifest renderer
 ```
 
 ## Prerequisites
@@ -265,8 +271,8 @@ Backend tests inject fake model clients, so they need no key or network:
 ```bash
 PYTHONPATH=backend .venv/bin/python -m pytest -q backend evals/test_evidence_safety.py
 .venv/bin/python evals/phase2_score.py --selftest
-.venv/bin/ruff check backend evals
-.venv/bin/python -m compileall backend evals -q
+.venv/bin/ruff check backend evals scripts
+.venv/bin/python -m compileall backend evals scripts -q
 ```
 
 Frontend checks:
@@ -281,10 +287,12 @@ npm run build
 Infrastructure checks:
 
 ```bash
-terraform -chdir=infra/terraform fmt -check -recursive
+terraform fmt -check -recursive infra/bootstrap infra/terraform
+terraform -chdir=infra/bootstrap init -backend=false -input=false
+terraform -chdir=infra/bootstrap validate
 terraform -chdir=infra/terraform init -backend=false -input=false
 terraform -chdir=infra/terraform validate
-kubectl kustomize infra/k8s/overlays/gcp >/dev/null
+kubectl kustomize infra/k8s/base >/dev/null
 ```
 
 No test count is stated here because it changes with the repository. The
@@ -311,9 +319,9 @@ judge key. See [evals/README.md](evals/README.md).
 
 | Profile | Provider path | Status |
 |---|---|---|
-| `groq` | OpenAI-compatible endpoint through `langchain-openai` | Default |
+| `groq` | OpenAI-compatible endpoint through `langchain-openai` | Local default |
 | `local` | OpenAI-compatible local server | Configured |
-| `vertex` | `google_genai`, Gemini with `vertexai: true` | Construction unit-tested, not live-tested |
+| `vertex` | `google_genai`, Gemini with `vertexai: true` | Last recorded GCP profile |
 
 Environment variables override YAML fields. `.env.example` documents the full
 surface.
@@ -334,31 +342,30 @@ the documented local Vertex path unless the operator explicitly mounts ADC.
 parsing. AgentCare adds transport retries, strict-schema compatibility,
 one corrective prompt, fallback selection and application-specific errors.
 
-The Vertex profile and Google GenAI package are configured, but no live
-authentication, quota or response has been verified. The same distinction
-applies to Model Armor and the GCP deployment.
+The public health check does not prove a current model response or Model Armor
+verdict. Run the model-assisted and controlled injection smoke checks before
+using those claims for a new environment.
 
 ## Deployment
 
-GCP is the sole deployment target. The repository contains GKE Autopilot,
-Cloud SQL, Artifact Registry, GCS, IAM and Model Armor configuration under
-`infra/terraform` and `infra/k8s`.
+GCP is the sole deployment target. Terraform creates GKE Autopilot, Cloud SQL,
+Artifact Registry, GCS, IAM and Model Armor. After one-time activation, every
+successful push to `main` builds commit-addressed images, runs the migration
+Job, updates GKE and checks the public health endpoint. Terraform never runs
+as part of an ordinary code release.
 
-Those files are configured, not proof of a live environment. Manual deployment
-is canonical. The migration overlay must succeed before the application
-overlay is applied. Billing, API enablement, secrets, database setup, public
-DNS, TLS and smoke tests remain operator actions.
-
-Use [docs/deployment-gcp.md](docs/deployment-gcp.md) as the only cloud
-runbook. The manifest-local reference is
-[infra/k8s/README.md](infra/k8s/README.md).
+Use [GCP deployment](docs/deployment-gcp.md) for the first environment and
+Terraform lifecycle. Use [CI/CD](docs/ci-cd.md) for automatic releases.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md): runtime, graph, state and persistence
 - [Security](docs/security.md): trust boundaries, controls and limitations
 - [Decisions](docs/decisions.md): current choices and trade-offs
+- [Repository guide](docs/repository-guide.md): purpose and ownership of every folder
 - [GCP deployment](docs/deployment-gcp.md): provision, verify, roll back and tear down
+- [CI/CD](docs/ci-cd.md): keyless GitHub-to-GKE automatic releases
+- [Observability](docs/observability.md): SQL audit, logs, metrics, Grafana and Langfuse
 - [Demo script](docs/demo-script.md): judge-ready two-minute walkthrough
 - [Evaluation](evals/README.md): dataset, runner and scorer
 

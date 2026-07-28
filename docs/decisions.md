@@ -195,9 +195,10 @@ must remain one replica while APScheduler jobs have no distributed lock.
 
 The backend KSA/GSA relationship is declarative. Kubernetes migrations are a
 separate Job-only stage that must succeed before the application overlay.
-Deployment remains manual. The configuration is committed but not evidence
-of live deployment. Operator work still includes billing, API enablement,
-database and secret creation, DNS, TLS, migration and smoke tests.
+Infrastructure plan, apply and destroy remain manual. After one-time trust and
+environment setup, application delivery is automatic for successful pushes to
+`main`. A release builds commit-addressed images, runs the migration, applies
+the application and checks public health.
 
 ## Process-local background execution
 
@@ -221,9 +222,8 @@ the backend horizontally.
 HashiCorp Terraform 1.15.8. Keep the existing Terraform language source,
 module boundaries, provider constraints and dependency lock file unchanged.
 
-**Why:** The project has no live infrastructure state to migrate, and its
-operator prefers Terraform. One executable name removes an unnecessary choice
-from setup, validation, deployment and teardown.
+**Why:** The operator prefers Terraform. One executable name removes an
+unnecessary choice from setup, validation, deployment and teardown.
 
 **Scope:**
 
@@ -236,9 +236,7 @@ from setup, validation, deployment and teardown.
   references and no operator use.
 - Remove generated `.terraform` cache data from the working copy; `terraform
   init` recreates it.
-- Preserve ignored internal planning artifacts in a separate local archive
-  commit before removing their working copies. The archive is not merged into
-  `main` or pushed automatically.
+- Keep remote main-stack state in the versioned bootstrap bucket.
 
 **Non-goals:** This decision does not change GCP resources, Kubernetes
 manifests, application code, agents, APIs, database behavior, safety controls,
@@ -253,3 +251,38 @@ checks remain green.
 **Trade-off:** The repository no longer continuously validates a second
 Terraform-compatible CLI. The infrastructure remains ordinary Terraform
 language, but Terraform is the only supported operator path.
+
+## Automatic application delivery, reviewed infrastructure
+
+**Decision:** Deploy the application after every successful push to `main`.
+Keep Terraform apply and destroy outside that workflow.
+
+**Why:** Application releases are frequent and should be repeatable. IAM,
+Cloud SQL and cluster changes have a larger failure radius and need a reviewed
+plan.
+
+The deployment job requires every backend, frontend, migration,
+infrastructure, manifest and secret-scan gate. It authenticates through
+branch-restricted Workload Identity, builds full-SHA image tags, migrates
+before rollout and checks the public health endpoint.
+
+**Trade-off:** One-time activation is longer because the operator must create
+remote state, keyless GitHub trust, production variables and the runtime
+Secret. After activation, code changes need only an ordinary push to `main`.
+
+## One optional LLM tracing provider
+
+**Decision:** Use Langfuse as the only optional LLM tracing provider. Keep SQL
+audit, logs and Prometheus as separate signals.
+
+**Why:** Langfuse shows model timing, token use and cost. A second tracing
+backend would duplicate events, configuration, privacy review and spend.
+SQL audit remains the authority for approvals and domain mutations.
+
+AgentCare exports an allowlist of operational trace attributes. It removes
+content, prompts, tool values, identifiers, metadata and exception messages.
+Sampling defaults to zero.
+
+**Trade-off:** Trace content is intentionally unavailable during debugging.
+An operator can see timing, model, usage, cost, release and error type without
+copying patient text to the tracing service.

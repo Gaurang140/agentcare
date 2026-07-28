@@ -33,7 +33,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: backend
-          image: agentcare-backend:latest
+          image: agentcare-backend:replace-by-overlay
           securityContext:
             # NOT read-only: docker-entrypoint.sh writes the SQLite app db and
             # checkpoints.db next to the app, and local-mode file uploads land

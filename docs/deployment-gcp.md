@@ -1,85 +1,133 @@
-# Deploy AgentCare to GCP
+# Deploy AgentCare to Google Cloud
 
-This is the only end-to-end cloud runbook for AgentCare.
+This is the canonical infrastructure and first-release runbook. Daily code
+releases are documented in [CI/CD](ci-cd.md).
 
-> **Current status:** GCP infrastructure source, Kubernetes manifests and
-> deployment adapters are committed. No live GCP project, Vertex response,
-> Model Armor call, database migration or deployed workload has been verified
-> from this repository. Treat every success check below as operator work and
-> record its output for the environment you create.
+## Current truth
 
-GCP is the sole deployment target. Infrastructure source is in
-`infra/terraform`, which is Terraform HCL. The executable in this guide is
-Terraform. Kubernetes source is in `infra/k8s`.
-
-## What the repository configures
-
-| Layer | Configured resource |
+| Claim | State on 2026-07-28 |
 |---|---|
-| Images | Artifact Registry repository |
-| Compute | Regional GKE Autopilot cluster |
-| Database | Cloud SQL for PostgreSQL 17 with private IP |
-| Documents | GCS bucket with public access prevention |
-| Runtime identity | Backend KSA/GSA pair plus a dedicated GKE node GSA |
-| Safety provider | Model Armor template plus a regional PSC endpoint and private DNS |
-| Metrics | Google Managed Service for Prometheus through PodMonitoring |
-| Workloads | Ordered migration Job, then backend, frontend, Services and TLS-1.2 HTTPS-redirecting GCE Ingress |
+| Public application health | verified at the existing public `/api/health` endpoint |
+| Database connectivity | public health returned `db: true` |
+| Last recorded cloud model profile | Vertex with `gemini-2.5-flash` |
+| Automatic GitHub deployment | implemented in source, not active until the GitHub and Workload Identity setup is completed |
+| Langfuse export | implemented and disabled by default, not live-verified |
+| Live GCP configuration inspection | blocked until the intended Google account is active locally |
 
-The backend remains one replica because APScheduler jobs run in-process without
-a distributed lock. Its `Recreate` strategy deletes the old deployment Pod
-before creating its replacement, so planned upgrades have brief backend
-downtime instead of a rolling overlap. This is not a general singleton
-guarantee for node failure or manual Pod operations; do not scale the backend
-until scheduled work uses an external worker or a distributed lock.
+Configured source is not live evidence. A new account must complete every
+verification in this guide before its environment is described as deployed.
 
-## Manual gaps
+## The operating model
 
-The committed configuration does not complete these items:
+```mermaid
+flowchart LR
+    OP["Operator"] --> TF["Terraform plan and apply"]
+    TF --> INFRA["GKE, Cloud SQL, GCS,<br/>IAM, Model Armor and registry"]
+    DEV["Push to GitHub main"] --> CI["All CI gates"]
+    CI --> CD["Build SHA images,<br/>migrate and roll out"]
+    CD --> GKE["Existing GKE environment"]
+```
 
-1. GCP project selection, billing and API enablement
-2. Cloud SQL database, database user and connection URL
-3. secret values and the `agentcare-secrets` Kubernetes Secret
-4. GCS bucket, Model Armor template and project sentinels in the overlays
-5. image registry names and commit-addressed image tags in both overlays
-6. `FRONTEND_ORIGIN`
-7. optional Vertex API, IAM flag, profile and Google project/location
-8. public DNS and a real domain for the managed TLS certificate
-9. ordered migration, live health checks and workflow smoke tests
+Terraform owns infrastructure. It runs when infrastructure changes and always
+requires an operator-reviewed plan. GitHub Actions owns application releases.
+After one-time activation, a successful push to `main` updates GKE without a
+manual Terraform command.
 
-Runtime pods read one Kubernetes Secret. The runtime KSA, GSA annotation and
-KSA-to-GSA IAM binding are declarative.
+The repository configures:
 
-## Cost warning
+| Layer | Resource |
+|---|---|
+| Images | Artifact Registry |
+| Compute | regional GKE Autopilot |
+| Database | private-IP Cloud SQL for PostgreSQL 17 |
+| Documents | private GCS bucket |
+| Runtime identity | GKE Workload Identity |
+| Safety provider | Model Armor template with a regional private endpoint |
+| Metrics | Google Managed Service for Prometheus |
+| Public entry | HTTPS GCE Ingress with managed certificate |
+| Release | ordered migration Job followed by backend and frontend |
 
-GKE Autopilot workloads, Cloud SQL and a public GCE load balancer can accrue
-charges while idle. Pricing and trial credits change. Check the current GCP
-estimate and set a billing budget before applying.
+The backend stays at one replica because reminders run in-process without a
+distributed lock. Move scheduled work to a durable worker before scaling it
+horizontally.
 
-Delete the Ingress and workloads before destroying infrastructure. The
-documents bucket refuses destructive teardown while it contains objects.
+## Cost before deployment
 
-## 1. Set local deployment variables
+Set a budget alert before applying:
+
+```bash
+gcloud billing projects describe "$PROJECT_ID"
+```
+
+The committed demo requests 0.35 vCPU and 0.75 GiB across two long-running
+pods. It also creates a shared-core Cloud SQL instance, an HTTPS load balancer
+and a Private Service Connect endpoint.
+
+At public list prices checked on 2026-07-28, a quiet environment is roughly
+USD 50 to 60 per month when the billing account can use the USD 74.40 monthly
+GKE management credit. It is roughly USD 123 to 133 without that credit.
+Traffic, model calls, logs, stored data, backups and tax are additional. This
+is an estimate, not an invoice.
+
+Important recurring items are:
+
+- Autopilot pod requests, roughly USD 14 per month at the committed requests
+- Cloud SQL shared-core compute plus storage, roughly USD 9 to 12 per month
+- HTTPS forwarding rule, roughly USD 18 per month before traffic
+- Model Armor Private Service Connect forwarding rule, roughly USD 7 per month
+- GKE management, roughly USD 73 per month before the eligible credit
+
+Check actual spend:
+
+`Google Cloud Console → Billing → Reports`
+
+Official prices change. Use the
+[GKE pricing page](https://cloud.google.com/kubernetes-engine/pricing),
+[Cloud SQL pricing page](https://cloud.google.com/sql/pricing) and
+[VPC pricing page](https://cloud.google.com/vpc/pricing) before leaving the
+environment running.
+
+## 1. Select the intended account and project
 
 Run from the repository root:
 
 ```bash
-export PROJECT_ID="your-gcp-project-id"
-export REGION="europe-west3"
-export ENABLE_VERTEX_AI="false"
-export NETWORK_NAME="default"
-export SUBNETWORK_NAME="default"
+gcloud auth login
+gcloud auth application-default login
+gcloud config set project "YOUR_PROJECT_ID"
 ```
 
-Confirm the values before any mutating command:
+The CLI login and Application Default Credentials are separate. Terraform
+uses ADC.
 
 ```bash
-printf 'project=%s\nregion=%s\nvertex=%s\nnetwork=%s\nsubnetwork=%s\n' \
-  "$PROJECT_ID" "$REGION" "$ENABLE_VERTEX_AI" "$NETWORK_NAME" "$SUBNETWORK_NAME"
+gcloud auth list --filter=status:ACTIVE --format='value(account)'
+gcloud auth application-default print-access-token >/dev/null
+gcloud config get-value project
+gcloud billing projects describe "YOUR_PROJECT_ID"
+```
+
+Stop if the account, project or billing account is not the intended one.
+
+Set deployment values:
+
+```bash
+export PROJECT_ID="YOUR_PROJECT_ID"
+export REGION="europe-west3"
+export NETWORK_NAME="default"
+export SUBNETWORK_NAME="default"
+export ENABLE_VERTEX_AI="true"
+```
+
+Confirm them:
+
+```bash
+printf 'project=%s\nregion=%s\nnetwork=%s\nsubnetwork=%s\nvertex=%s\n' \
+  "$PROJECT_ID" "$REGION" "$NETWORK_NAME" "$SUBNETWORK_NAME" \
+  "$ENABLE_VERTEX_AI"
 ```
 
 ## 2. Check local tools
-
-Required tools:
 
 ```bash
 gcloud --version
@@ -93,74 +141,91 @@ curl --version
 openssl version
 ```
 
+## 3. Create the public GitHub repository
 
-## 3. Authenticate and confirm billing
-
-Authenticate the CLI and Application Default Credentials separately:
-
-```bash
-gcloud auth login
-gcloud auth application-default login
-gcloud config set project "$PROJECT_ID"
-```
-
-Verify both identities and the selected project:
+Create an empty public repository. Do not initialize it with another README.
 
 ```bash
-gcloud auth list --filter=status:ACTIVE --format='value(account)'
-gcloud auth application-default print-access-token >/dev/null
-gcloud config get-value project
-gcloud billing projects describe "$PROJECT_ID"
+git remote add origin https://github.com/OWNER/REPOSITORY.git
+git remote -v
+gh api repos/OWNER/REPOSITORY \
+  --jq '{repository_id: .id, owner_id: .owner.id}'
 ```
 
-The billing response must show an enabled billing account before provisioning.
-Terraform's Google provider reads ADC, not only the `gcloud` login.
+Keep the numeric repository ID and owner ID. The Google trust rule uses the
+immutable IDs plus `refs/heads/main`.
 
-## 4. Enable required APIs
+## 4. Apply the Terraform bootstrap
 
-API enablement is not managed by `infra/terraform`:
+The bootstrap creates:
+
+- the versioned GCS state bucket
+- all Google APIs used by the stack, including `aiplatform.googleapis.com`
+- a dedicated GitHub deployer service account
+- a Workload Identity pool and branch-restricted provider
+- only the roles needed to push images and update GKE
+
+Terraform needs Service Usage enabled before it can manage the remaining
+services:
 
 ```bash
-gcloud services enable serviceusage.googleapis.com
-
-gcloud services enable \
-  artifactregistry.googleapis.com \
-  cloudresourcemanager.googleapis.com \
-  compute.googleapis.com \
-  container.googleapis.com \
-  dns.googleapis.com \
-  iam.googleapis.com \
-  iamcredentials.googleapis.com \
-  logging.googleapis.com \
-  modelarmor.googleapis.com \
-  monitoring.googleapis.com \
-  networkconnectivity.googleapis.com \
-  servicenetworking.googleapis.com \
-  sqladmin.googleapis.com \
-  storage.googleapis.com \
-  sts.googleapis.com
+gcloud services enable serviceusage.googleapis.com --project="$PROJECT_ID"
 ```
 
-When `ENABLE_VERTEX_AI=true`, also enable Vertex AI:
+Set the GitHub IDs:
 
 ```bash
-gcloud services enable aiplatform.googleapis.com
+export GITHUB_REPOSITORY_ID="NUMERIC_REPOSITORY_ID"
+export GITHUB_OWNER_ID="NUMERIC_OWNER_ID"
 ```
 
-Confirm the relevant services are enabled:
+Plan and apply:
+
+```bash
+terraform -chdir=infra/bootstrap init
+terraform -chdir=infra/bootstrap fmt -check
+terraform -chdir=infra/bootstrap validate
+terraform -chdir=infra/bootstrap plan \
+  -out=/tmp/agentcare-bootstrap.tfplan \
+  -var="project_id=$PROJECT_ID" \
+  -var="region=$REGION" \
+  -var="github_repository_id=$GITHUB_REPOSITORY_ID" \
+  -var="github_repository_owner_id=$GITHUB_OWNER_ID"
+terraform -chdir=infra/bootstrap apply /tmp/agentcare-bootstrap.tfplan
+```
+
+Capture the non-secret outputs:
+
+```bash
+export TF_STATE_BUCKET="$(
+  terraform -chdir=infra/bootstrap output -raw terraform_state_bucket
+)"
+export GCP_WORKLOAD_IDENTITY_PROVIDER="$(
+  terraform -chdir=infra/bootstrap output -raw workload_identity_provider
+)"
+export GCP_DEPLOYER_SERVICE_ACCOUNT="$(
+  terraform -chdir=infra/bootstrap output -raw deployer_service_account_email
+)"
+```
+
+The bootstrap creates no service-account key. Keep its ignored local state
+encrypted and backed up because it is the trust root for remote state.
+
+Confirm the services Terraform now manages:
 
 ```bash
 gcloud services list --enabled \
-  --filter='NAME:(artifactregistry.googleapis.com cloudresourcemanager.googleapis.com container.googleapis.com dns.googleapis.com logging.googleapis.com monitoring.googleapis.com serviceusage.googleapis.com sqladmin.googleapis.com modelarmor.googleapis.com networkconnectivity.googleapis.com aiplatform.googleapis.com)'
+  --filter='NAME:(aiplatform.googleapis.com artifactregistry.googleapis.com cloudresourcemanager.googleapis.com compute.googleapis.com container.googleapis.com dns.googleapis.com iam.googleapis.com iamcredentials.googleapis.com logging.googleapis.com modelarmor.googleapis.com monitoring.googleapis.com networkconnectivity.googleapis.com servicenetworking.googleapis.com serviceusage.googleapis.com sqladmin.googleapis.com storage.googleapis.com sts.googleapis.com)'
 ```
 
-## 5. Initialize, validate and plan
+## 5. Initialize remote state and create infrastructure
 
-Terraform state is local unless the operator configures the commented GCS
-backend in `infra/terraform/backend.tf`.
+For a new account:
 
 ```bash
-terraform -chdir=infra/terraform init
+terraform -chdir=infra/terraform init \
+  -backend-config="bucket=$TF_STATE_BUCKET"
+terraform -chdir=infra/terraform fmt -check -recursive
 terraform -chdir=infra/terraform validate
 terraform -chdir=infra/terraform plan \
   -out=/tmp/agentcare.tfplan \
@@ -172,16 +237,28 @@ terraform -chdir=infra/terraform plan \
   -var="enable_vertex_ai=$ENABLE_VERTEX_AI"
 ```
 
-Review the plan. It should target only the intended project and region.
-
-## 6. Apply infrastructure and capture outputs
+Review the project, region, resources and estimated changes. Apply only that
+saved plan:
 
 ```bash
 terraform -chdir=infra/terraform apply /tmp/agentcare.tfplan
 terraform -chdir=infra/terraform output
 ```
 
-Capture values used below:
+If this checkout already has local state for an existing account, do not make
+a new remote state and apply over it. Back it up and migrate:
+
+```bash
+umask 077
+cp infra/terraform/terraform.tfstate \
+  /tmp/agentcare-terraform-state.backup
+terraform -chdir=infra/terraform init \
+  -migrate-state \
+  -backend-config="bucket=$TF_STATE_BUCKET"
+terraform -chdir=infra/terraform state list
+```
+
+## 6. Capture infrastructure outputs
 
 ```bash
 export IMAGE_REPO="$(
@@ -190,47 +267,52 @@ export IMAGE_REPO="$(
 export DOCUMENTS_BUCKET="$(
   terraform -chdir=infra/terraform output -raw documents_bucket_name
 )"
-export BACKEND_GSA="$(
-  terraform -chdir=infra/terraform output -raw backend_service_account_email
-)"
 export MODEL_ARMOR_TEMPLATE="$(
   terraform -chdir=infra/terraform output -raw model_armor_template_name
-)"
-export MODEL_ARMOR_ENDPOINT="$(
-  terraform -chdir=infra/terraform output -raw model_armor_endpoint_address
-)"
-export MODEL_ARMOR_HOST="$(
-  terraform -chdir=infra/terraform output -raw model_armor_endpoint_hostname
 )"
 export DB_HOST="$(
   terraform -chdir=infra/terraform output -raw cloud_sql_private_ip_address
 )"
+export GKE_CLUSTER="$(
+  terraform -chdir=infra/terraform output -raw gke_cluster_name
+)"
+export INGRESS_IP="$(
+  terraform -chdir=infra/terraform output -raw ingress_ip_address
+)"
 ```
-
-Inspect them without exposing credentials:
 
 ```bash
-printf 'images=%s\nbucket=%s\nbackend_identity=%s\nmodel_armor=%s\nmodel_armor_host=%s\nmodel_armor_ip=%s\ndb_host=%s\n' \
-  "$IMAGE_REPO" "$DOCUMENTS_BUCKET" "$BACKEND_GSA" "$MODEL_ARMOR_TEMPLATE" \
-  "$MODEL_ARMOR_HOST" "$MODEL_ARMOR_ENDPOINT" "$DB_HOST"
+printf 'images=%s\nbucket=%s\nmodel-armor=%s\ndb-host=%s\ncluster=%s\ningress-ip=%s\n' \
+  "$IMAGE_REPO" "$DOCUMENTS_BUCKET" "$MODEL_ARMOR_TEMPLATE" "$DB_HOST" \
+  "$GKE_CLUSTER" "$INGRESS_IP"
 ```
 
-These outputs confirm resource addresses, not runtime readiness.
+These are resource addresses, not secrets and not readiness evidence.
 
-## 7. Create the Cloud SQL database and user
+Terraform reserves `INGRESS_IP` before the application exists. Point the
+chosen domain's A record at this address now. DNS can propagate while the
+database and first release are prepared.
 
-The module creates the Cloud SQL instance and private networking. It does not
-create the application database or user.
+For a hackathon link without buying a domain, use the same `sslip.io` pattern
+as the existing demo:
+
+```bash
+export PUBLIC_HOST="agentcare.${INGRESS_IP//./-}.sslip.io"
+export PUBLIC_URL="https://${PUBLIC_HOST}"
+printf 'public-url=%s\n' "$PUBLIC_URL"
+```
+
+`sslip.io` resolves the embedded address. For a company-owned domain, create
+an A record and set `PUBLIC_URL` to that HTTPS origin instead.
+
+## 7. Create the database and runtime Secret
+
+Terraform creates the Cloud SQL instance. Create the application database and
+user once:
 
 ```bash
 gcloud sql databases create agentcare \
   --instance=agentcare-postgres
-```
-
-Create a strong database password outside the repository, then provide it to
-the CLI through a local environment variable:
-
-```bash
 read -s DB_PASSWORD
 export DB_PASSWORD
 gcloud sql users create agentcare \
@@ -238,54 +320,24 @@ gcloud sql users create agentcare \
   --password="$DB_PASSWORD"
 ```
 
-The `cloud_sql_private_ip_address` output captured in section 6 is the direct
-PostgreSQL host. Confirm it is non-empty before constructing the URL:
-
-```bash
-test -n "$DB_HOST"
-printf 'cloud-sql-private-ip=%s\n' "$DB_HOST"
-```
-
-Construct the SQLAlchemy URL locally:
+Construct the URL locally with a percent-encoded password:
 
 ```text
 postgresql+psycopg://agentcare:URL_ENCODED_PASSWORD@PRIVATE_IP:5432/agentcare?sslmode=require
 ```
 
-Percent-encode reserved characters in the password. Do not commit the URL.
-The current root Terraform outputs do not generate it.
-
-The instance sets `ssl_mode = "ENCRYPTED_ONLY"` and the client URL sets
-`sslmode=require`, so plaintext database connections are rejected. This mode
-encrypts transport but does not verify the server identity. A production
-identity-verifying design needs a trusted Cloud SQL CA with `verify-ca` or
-`verify-full`, or a reviewed Cloud SQL connector/proxy path.
-
-Before a migration against an environment that matters, create an on-demand
-Cloud SQL backup:
-
-```bash
-gcloud sql backups create --instance=agentcare-postgres
-gcloud sql backups list --instance=agentcare-postgres
-```
-
-## 8. Prepare secret material
-
-Generate a deployment-specific JWT signing secret and keep the output out of
-shell history:
+Create a deployment-specific signing secret:
 
 ```bash
 openssl rand -hex 32
 ```
 
-Prepare the runtime Kubernetes values in a temporary file:
+Prepare an ignored temporary file:
 
 ```bash
 umask 077
 "${EDITOR:-vi}" /tmp/agentcare-secrets.env
 ```
-
-The file needs these keys. Values stay local:
 
 ```dotenv
 LLM_API_KEY=
@@ -296,281 +348,136 @@ INTERNAL_TASK_TOKEN=
 LANGFUSE_SECRET_KEY=
 ```
 
-For the Groq profile, set `LLM_API_KEY`. For Vertex, leave that key empty and
-configure workload identity plus the non-secret Google variables in the next
-section. Paste the generated value into `JWT_SECRET`; do not reuse a local or
-different-environment secret.
-
-Fail before touching Kubernetes if the signing secret or database URL is
-missing:
+For Vertex, leave `LLM_API_KEY` empty. The backend pod uses Workload Identity.
+Validate the required values:
 
 ```bash
 grep -Eq '^JWT_SECRET=.{32,}$' /tmp/agentcare-secrets.env || {
   echo "JWT_SECRET must contain at least 32 characters" >&2
   exit 1
 }
-grep -Eq '^DATABASE_URL=postgresql\+psycopg://.+' /tmp/agentcare-secrets.env || {
+grep -Eq '^DATABASE_URL=postgresql\+psycopg://.+' \
+  /tmp/agentcare-secrets.env || {
   echo "DATABASE_URL must be a PostgreSQL psycopg URL" >&2
   exit 1
 }
 ```
 
-The backend independently refuses to boot outside development with a blank,
-default or short JWT secret.
-
-## 9. Connect kubectl
+Connect to GKE:
 
 ```bash
-gcloud container clusters get-credentials \
-  "$(terraform -chdir=infra/terraform output -raw gke_cluster_name)" \
-  --region "$(terraform -chdir=infra/terraform output -raw gke_cluster_location)"
-
-kubectl config current-context
+gcloud container clusters get-credentials "$GKE_CLUSTER" \
+  --region "$REGION" \
+  --project "$PROJECT_ID"
 kubectl get nodes
 ```
 
-Create or update the runtime Secret:
+Apply the Secret without saving a manifest:
 
 ```bash
 kubectl create secret generic agentcare-secrets \
   --from-env-file=/tmp/agentcare-secrets.env \
   --dry-run=client -o yaml |
   kubectl apply -f -
-
 rm /tmp/agentcare-secrets.env
 unset DB_PASSWORD
 ```
 
-The generated manifest output is piped directly to the cluster. Do not save it
-inside the repository.
+## 8. Make the first application release
 
-## 10. Confirm declarative Workload Identity
+The normal path is GitHub Actions. Complete every environment variable and
+secret in [CI/CD](ci-cd.md), then push `main`.
 
-Terraform grants `roles/iam.workloadIdentityUser` on the backend GSA to
-`default/agentcare-backend`. The base Deployment sets
-`serviceAccountName: agentcare-backend`. The GCP overlay adds the
-`iam.gke.io/gcp-service-account` annotation.
-
-Before rendering, replace the `PROJECT_ID` sentinel in
-`infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml`. Do not create,
-annotate, bind or patch the service account with imperative commands. Inspect
-the rendered relationship in section 13 and verify the running pod after
-rollout.
-
-## 11. Fill non-secret deployment configuration
-
-Before applying, replace the environment-specific values in the working copy:
-
-| File | Required value |
-|---|---|
-| `infra/k8s/base/configmap.yaml` | Real `FRONTEND_ORIGIN` when the public origin is known |
-| `infra/k8s/overlays/gcp/configmap-storage.yaml` | `GCS_BUCKET=$DOCUMENTS_BUCKET` |
-| `infra/k8s/overlays/gcp/configmap-model-armor.yaml` | `MODEL_ARMOR_TEMPLATE=$MODEL_ARMOR_TEMPLATE` and `MODEL_ARMOR_LOCATION=$REGION` |
-| `infra/k8s/overlays/gcp/serviceaccount-workload-identity.yaml` | Replace `PROJECT_ID` |
-| `infra/k8s/overlays/gcp/ingress.yaml` | Replace the sample domain |
-
-Do not scan the source tree for these values: template and comment files keep
-sentinels intentionally. The rendered-artifact gate in section 13 is the
-authoritative check before apply.
-
-### Local model and ADC truth
-
-For local Compose use, an OpenAI-compatible `LLM_BASE_URL` must be reachable
-from inside the backend container. Container `localhost` is not the host
-machine; use a container DNS name or a supported host gateway. Host ADC from
-`gcloud auth application-default login` is not automatically mounted by
-Compose. Direct local backend execution is the documented local Vertex path
-unless the operator explicitly mounts ADC.
-
-### Groq profile
-
-The YAML default is `groq`. The Kubernetes Secret must contain
-`LLM_API_KEY`. The base ConfigMap selects only `LLM_PROFILE=groq`; endpoint and
-model defaults remain in `backend/llm.yaml`.
-
-### Vertex profile
-
-Vertex uses ADC through the pod's Workload Identity, not a Google credential
-value in the Kubernetes Secret. Set `ENABLE_VERTEX_AI=true` before the
-Terraform plan, enable `aiplatform.googleapis.com` and add these non-secret
-values to `agentcare-config` before rollout:
-
-```yaml
-LLM_PROFILE: "vertex"
-GOOGLE_CLOUD_PROJECT: "your-gcp-project-id"
-GOOGLE_CLOUD_LOCATION: "europe-west3"
-```
-
-The Vertex profile is configured and construction is unit-tested. This
-procedure does not claim live authentication, quota or model response until
-the operator completes the workflow smoke test.
-
-## 12. Build and push commit-addressed images
-
-Configure Docker for the registry host:
+For a first manual release or CI/CD diagnosis, build commit-addressed images:
 
 ```bash
-gcloud auth configure-docker "${IMAGE_REPO%%/*}"
+gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 export IMAGE_TAG="$(git rev-parse HEAD)"
-```
-
-Build for the GKE node architecture:
-
-```bash
 docker buildx build \
   --platform linux/amd64 \
   -t "$IMAGE_REPO/backend:$IMAGE_TAG" \
   -f backend/Dockerfile \
   --push .
-
 docker buildx build \
   --platform linux/amd64 \
   -t "$IMAGE_REPO/frontend:$IMAGE_TAG" \
   --push ./frontend
 ```
 
-Point both overlays at those exact images:
+Set the public origin and model profile. Keep the `PUBLIC_URL` created above:
 
 ```bash
-cd infra/k8s/overlays/gcp-migration
-kustomize edit set image \
-  "agentcare-backend=$IMAGE_REPO/backend:$IMAGE_TAG"
-cd ../../../..
-
-cd infra/k8s/overlays/gcp
-kustomize edit set image \
-  "agentcare-backend=$IMAGE_REPO/backend:$IMAGE_TAG" \
-  "agentcare-frontend=$IMAGE_REPO/frontend:$IMAGE_TAG"
-cd ../../../..
+export LLM_PROFILE="vertex"
+export LANGFUSE_PUBLIC_KEY=""
+export LANGFUSE_BASE_URL="https://cloud.langfuse.com"
+export LANGFUSE_SAMPLE_RATE="0"
+export RENDERED_K8S="/tmp/agentcare-k8s-$IMAGE_TAG"
 ```
 
-Do not commit environment-specific image rewrites.
-
-## 13. Render and apply
-
-Render both stages before touching the cluster:
+Render a temporary copy. The source manifests remain unchanged:
 
 ```bash
-kubectl kustomize infra/k8s/overlays/gcp-migration \
+.venv/bin/python scripts/render_gcp_manifests.py \
+  --output "$RENDERED_K8S"
+kubectl kustomize "$RENDERED_K8S/overlays/gcp-migration" \
   >/tmp/agentcare-migration-rendered.yaml
-kubectl kustomize infra/k8s/overlays/gcp >/tmp/agentcare-rendered.yaml
-if grep -Eq 'REPLACE_ME|PLACEHOLDER|PROJECT_ID|REGION-docker|MODEL_ARMOR_LOCATION: REGION|/PROJECT/|:TAG|example\.com' \
-  /tmp/agentcare-migration-rendered.yaml /tmp/agentcare-rendered.yaml; then
-  echo "refusing apply: unresolved deployment sentinel" >&2
-  exit 1
-fi
-kubectl apply --dry-run=server -f /tmp/agentcare-rendered.yaml
+kubectl kustomize "$RENDERED_K8S/overlays/gcp" \
+  >/tmp/agentcare-rendered.yaml
 ```
 
-Inspect the application render for its declarative identity and the absence of
-a Job:
+Run the ordered release:
 
 ```bash
-grep -n 'kind: ServiceAccount\|serviceAccountName: agentcare-backend\|iam.gke.io/gcp-service-account' \
-  /tmp/agentcare-rendered.yaml
-if grep -q 'kind: Job' /tmp/agentcare-rendered.yaml; then
-  echo "application render unexpectedly contains a Job" >&2
-  exit 1
-fi
-```
-
-The migration Job spec is immutable. Delete any prior Job, server-dry-run the
-migration artifact, apply it and wait:
-
-```bash
-kubectl delete job backend-migrate --ignore-not-found
-kubectl apply --dry-run=server -f /tmp/agentcare-migration-rendered.yaml
-kubectl apply -f /tmp/agentcare-migration-rendered.yaml
+kubectl delete job backend-migrate --ignore-not-found=true --wait=true
+kubectl apply -k "$RENDERED_K8S/overlays/gcp-migration"
 kubectl wait \
   --for=condition=complete job/backend-migrate \
-  --timeout=300s
-kubectl logs job/backend-migrate
+  --timeout=600s
+kubectl logs job/backend-migrate --all-containers=true
+kubectl apply -k "$RENDERED_K8S/overlays/gcp"
+kubectl rollout status deployment/backend --timeout=600s
+kubectl rollout status deployment/frontend --timeout=600s
 ```
 
-Do not deploy the application if the Job fails. Only after success, apply the
-application artifact and wait for both workloads:
+Do not apply the application overlay if the migration fails.
+
+## 9. Verify DNS and HTTPS
+
+Confirm the Ingress uses the Terraform-reserved address:
 
 ```bash
-kubectl apply -f /tmp/agentcare-rendered.yaml
-kubectl rollout status deployment/backend --timeout=300s
-kubectl rollout status deployment/frontend --timeout=300s
-kubectl get pods
-```
-
-## 14. Configure public DNS and TLS
-
-`infra/k8s/overlays/gcp/ingress.yaml` carries a sample domain. Replace it with
-a domain the operator controls and point the domain's A record at the Ingress
-IP:
-
-```bash
-kubectl get ingress agentcare \
-  -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+test "$(
+  kubectl get ingress agentcare \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+)" = "$INGRESS_IP"
 kubectl describe managedcertificate agentcare-cert
 ```
 
-The certificate remains provisioning until DNS resolves to the load balancer.
-Public DNS and TLS have not been verified by the repository.
-
-After the certificate becomes active, verify both TLS and the configured 308
-redirect:
+Wait for the managed certificate to become active, then verify:
 
 ```bash
 curl -fsS --max-time 10 "https://YOUR_DOMAIN/api/health"
 curl -sSI --max-time 10 "http://YOUR_DOMAIN/" | head -n 1
 ```
 
-The second command must report `HTTP/1.1 308 Permanent Redirect`. The same
-`FrontendConfig` attaches the Terraform-managed `agentcare-modern-tls`
-policy, which requires TLS 1.2 or newer. An HTTP 200 on port 80 means the
-configuration has not reconciled; inspect the Ingress events before exposing
-the application.
-
-To test the frontend independently of public Ingress readiness, use port
-forwarding:
-
-```bash
-kubectl port-forward svc/frontend 3000:3000
-```
-
-## 15. Verify health, logs and workflow behavior
-
-### Health
-
-In one terminal:
-
-```bash
-kubectl port-forward svc/backend 8000:8000
-```
-
-In another:
-
-```bash
-curl -sf --max-time 10 http://localhost:8000/api/health
-```
-
-Expected shape:
+The health response must contain:
 
 ```json
 {"status":"ok","db":true}
 ```
 
-This verifies API and database reachability. It does not verify model access.
+The HTTP response must redirect to HTTPS. Health proves API and database
+reachability. It does not prove a model call, document storage or Model Armor.
 
-### Logs
+## 10. Verify real end-to-end behavior
+
+Port-forward the backend:
 
 ```bash
-kubectl logs job/backend-migrate
-kubectl logs deployment/backend --tail=200
-kubectl describe deployment backend
+kubectl port-forward svc/backend 8000:8000
 ```
 
-Look for database errors, identity failures, model configuration errors,
-`model_armor_unavailable` or `model_armor_failed`.
-
-### Deterministic workflow
-
-Log in with the seeded synthetic patient:
+Log in with a synthetic seeded patient:
 
 ```bash
 curl -sS -c /tmp/agentcare-cookies.txt \
@@ -579,12 +486,12 @@ curl -sS -c /tmp/agentcare-cookies.txt \
   -d '{"email":"patient@agentcare-demo.com","password":"demo1234"}'
 ```
 
-Submit an emergency test, which needs no model:
+Exercise deterministic safety plus a real GCS upload:
 
 ```bash
 export SMOKE_FILENAME="agentcare-smoke-$(date -u +%Y%m%dT%H%M%SZ).txt"
 printf 'synthetic AgentCare deployment smoke test\n' \
-  > "/tmp/${SMOKE_FILENAME}"
+  >"/tmp/${SMOKE_FILENAME}"
 curl -fsS -b /tmp/agentcare-cookies.txt \
   -X POST http://localhost:8000/api/requests \
   -F 'text=I have severe chest pain and cannot breathe' \
@@ -592,12 +499,7 @@ curl -fsS -b /tmp/agentcare-cookies.txt \
 gcloud storage ls "gs://${DOCUMENTS_BUCKET}/**${SMOKE_FILENAME}"
 ```
 
-Verify an escalated status, localized emergency guidance and an emergency row
-in the staff queue. The GCS listing must include a newly created object; that
-proves the backend pod's Workload Identity and bucket-scoped objectCreator
-grant handled a real upload.
-
-### Model-assisted workflow
+Exercise the selected LLM, graph, SQL tools and checkpointer:
 
 ```bash
 curl -sS -b /tmp/agentcare-cookies.txt \
@@ -605,217 +507,143 @@ curl -sS -b /tmp/agentcare-cookies.txt \
   -F 'text=Book me a cardiology appointment next week'
 ```
 
-Record the returned workflow identifier, then inspect:
+Inspect the returned workflow from the UI and the staff audit page. A model
+failure should create a staff escalation instead of invented output.
+
+Verify Model Armor and Workload Identity:
 
 ```bash
-curl -sS -b /tmp/agentcare-cookies.txt \
-  "http://localhost:8000/api/workflows/WORKFLOW_ID"
-```
-
-A completed run verifies the selected model profile, graph, SQL tools and
-checkpointer together. A staff escalation instead of guessed output is the
-expected failure mode for unavailable model access.
-
-### Model Armor
-
-Confirm the configured resource and pod identity:
-
-```bash
-terraform -chdir=infra/terraform output -raw model_armor_template_name
-terraform -chdir=infra/terraform output -raw model_armor_endpoint_hostname
-terraform -chdir=infra/terraform output -raw model_armor_endpoint_address
 kubectl get pod \
   -l app=backend \
   -o jsonpath='{.items[0].spec.serviceAccountName}'
 kubectl exec deployment/backend -- printenv MODEL_ARMOR_TEMPLATE
-kubectl exec deployment/backend -- python -c \
-  "import socket; print(socket.gethostbyname('modelarmor.${REGION}.rep.googleapis.com'))"
+kubectl logs deployment/backend --tail=200
 ```
 
-The in-pod lookup must return the Terraform endpoint address. Google requires
-this regional API hostname to resolve through a Private Service Connect
-endpoint when called from the VPC; the private Cloud DNS zone is part of this
-Terraform stack. Do not treat the template alone as a working integration.
+A controlled injection fixture should create
+`safety.injection_blocked` with `via: model_armor`. Provider-side evidence or
+that audit row is required before claiming a live Model Armor call.
 
-Then submit an operator-approved injection fixture that deterministic rules do
-not already match. A Model Armor block produces a safety escalation and
-`safety.injection_blocked` with `via: model_armor` in the staff audit view.
-
-A clean verdict produces no dedicated success audit event. Absence of an error
-log alone is not proof of a live call. Preserve provider-side evidence or the
-blocked audit row before claiming Model Armor verification.
-
-Remove the temporary local files:
+Remove local smoke files:
 
 ```bash
 rm /tmp/agentcare-cookies.txt "/tmp/${SMOKE_FILENAME}"
 ```
 
-## 16. Roll back
+## 11. Observe the deployment
 
-Inspect rollout history:
+Cloud logs:
 
-```bash
-kubectl rollout history deployment/backend
-kubectl rollout history deployment/frontend
+`Google Cloud Console → Logging → Logs Explorer`
+
+Use:
+
+```text
+resource.type="k8s_container"
+resource.labels.container_name="backend"
 ```
 
-Roll back application images:
+Prometheus metrics:
+
+`Google Cloud Console → Monitoring → Metrics Explorer → PromQL`
+
+Langfuse setup, masking and sampling are documented in
+[Observability](observability.md). AgentCare does not deploy a second Grafana
+instance into GCP because Cloud Monitoring reads the same managed Prometheus
+data.
+
+## 12. Activate automatic releases
+
+Complete [CI/CD](ci-cd.md) once. The required path is:
+
+```text
+push main → all CI gates → keyless Google auth → build SHA images
+→ migration Job → GKE rollout → public health check
+```
+
+Terraform does not run in this application release. A failed gate leaves the
+current release running.
+
+## 13. Roll back application code
+
+Prefer an auditable Git revert:
+
+```bash
+git log --oneline -n 10
+git revert BAD_COMMIT_SHA
+git push origin main
+```
+
+The new commit passes the same CI/CD flow. Kubernetes rollout undo is an
+emergency option:
 
 ```bash
 kubectl rollout undo deployment/backend
 kubectl rollout undo deployment/frontend
-kubectl rollout status deployment/backend --timeout=300s
-kubectl rollout status deployment/frontend --timeout=300s
+kubectl rollout status deployment/backend --timeout=600s
+kubectl rollout status deployment/frontend --timeout=600s
 ```
 
-Repeat the health and deterministic workflow checks after rollback.
-
-Application rollback does not reverse an Alembic migration. If a migration is
-not backward-compatible, stop writes and restore the pre-migration Cloud SQL
-backup according to the operator's recovery procedure. Confirm backup
-availability before rollout:
+An image rollback does not reverse an Alembic migration. Back up Cloud SQL
+before a schema change:
 
 ```bash
+gcloud sql backups create --instance=agentcare-postgres
 gcloud sql backups list --instance=agentcare-postgres
 ```
 
-## 17. Troubleshooting
+## 14. Destroy the environment
 
-### Terraform cannot find credentials
-
-Run the ADC login again and verify
-`gcloud auth application-default print-access-token`.
-
-### Terraform cannot find the selected VPC or subnetwork
-
-The defaults use an auto-mode network and regional subnetwork both named
-`default`. Set `NETWORK_NAME` and `SUBNETWORK_NAME` to existing resources and
-pass the matching Terraform variables when an organization disables default
-network creation. GKE, Cloud SQL private access and the Model Armor endpoint
-must share that VPC; the endpoint must share the GKE region.
-
-### Migration Job cannot connect
-
-Check `DATABASE_URL`, the created database/user, URL encoding and the private
-Cloud SQL address. Read `kubectl logs job/backend-migrate` first.
-
-### Pods report `CreateContainerConfigError`
-
-Confirm `agentcare-secrets` exists and contains every key consumed by
-`envFrom`:
+First remove Kubernetes resources so GCP can delete the load balancer:
 
 ```bash
-kubectl describe secret agentcare-secrets
-kubectl describe pod -l app=backend
-```
-
-The first command shows keys and sizes, not plaintext values.
-
-### Images cannot be pulled
-
-Inspect the exact image and events:
-
-```bash
-kubectl describe pod -l app=backend
-kubectl get deployment backend \
-  -o jsonpath='{.spec.template.spec.containers[0].image}'
-```
-
-Confirm the image exists in Artifact Registry and targets `linux/amd64`.
-
-### GCS or Model Armor returns permission denied
-
-Confirm the pod uses `agentcare-backend`, the Kubernetes service account has
-the annotation and the Google service account grants the expected role. The
-GCS grant is bucket-scoped `roles/storage.objectCreator`; the runtime cannot
-read, list, overwrite or delete objects.
-
-For Model Armor, also confirm the regional endpoint and private DNS resources:
-
-```bash
-gcloud network-connectivity regional-endpoints describe agentcare-model-armor \
-  --region "$REGION"
-gcloud dns managed-zones describe agentcare-model-armor-rep
-```
-
-### SSE stops behind the Ingress
-
-Confirm the backend Service references `backend-backendconfig` and its timeout
-is 3600 seconds:
-
-```bash
-kubectl get service backend -o yaml
-kubectl get backendconfig backend-backendconfig -o yaml
-```
-
-### Certificate remains provisioning
-
-Confirm the managed certificate domain is real, DNS resolves to the Ingress IP
-and the Ingress references `agentcare-cert`.
-
-## 18. Tear down
-
-Delete Kubernetes resources first so the load balancer is removed:
-
-```bash
-kubectl delete -k infra/k8s/overlays/gcp
+kubectl delete -k "$RENDERED_K8S/overlays/gcp"
 kubectl delete job backend-migrate --ignore-not-found
 kubectl delete secret agentcare-secrets
-```
-
-Confirm that no Ingress remains:
-
-```bash
 kubectl get ingress
 ```
 
-Destroy managed infrastructure:
+Create and review a destroy plan:
 
 ```bash
-terraform -chdir=infra/terraform destroy \
+terraform -chdir=infra/terraform plan -destroy \
+  -out=/tmp/agentcare-destroy.tfplan \
   -var="project_id=$PROJECT_ID" \
   -var="region=$REGION" \
   -var="gcs_location=$REGION" \
   -var="network_name=$NETWORK_NAME" \
   -var="subnetwork_name=$SUBNETWORK_NAME" \
   -var="enable_vertex_ai=$ENABLE_VERTEX_AI"
+terraform -chdir=infra/terraform apply \
+  /tmp/agentcare-destroy.tfplan
 ```
 
-If the documents bucket contains objects, destroy stops. Review the bucket,
-then delete its contents only when data retention permits. Re-read the output,
-require the exact project-derived bucket name and type the resolved target:
+The documents bucket refuses deletion while it contains objects. Review its
+contents and retention requirements. Only then remove the exact bucket:
 
 ```bash
 FRESH_DOCUMENTS_BUCKET="$(
   terraform -chdir=infra/terraform output -raw documents_bucket_name
 )"
 EXPECTED_DOCUMENTS_BUCKET="${PROJECT_ID}-agentcare-documents"
-
-test -n "$FRESH_DOCUMENTS_BUCKET" || {
-  echo "refusing purge: empty bucket output" >&2
-  exit 1
-}
-test "$FRESH_DOCUMENTS_BUCKET" = "$EXPECTED_DOCUMENTS_BUCKET" || {
-  echo "refusing purge: expected $EXPECTED_DOCUMENTS_BUCKET, got $FRESH_DOCUMENTS_BUCKET" >&2
-  exit 1
-}
-
+test "$FRESH_DOCUMENTS_BUCKET" = "$EXPECTED_DOCUMENTS_BUCKET"
 BUCKET_URI="gs://${FRESH_DOCUMENTS_BUCKET}"
 printf 'resolved purge target: %s\n' "$BUCKET_URI"
 gcloud storage ls "$BUCKET_URI"
 printf 'Type DELETE %s to continue: ' "$BUCKET_URI"
 read -r PURGE_CONFIRMATION
-test "$PURGE_CONFIRMATION" = "DELETE $BUCKET_URI" || {
-  echo "purge cancelled" >&2
-  exit 1
-}
+test "$PURGE_CONFIRMATION" = "DELETE $BUCKET_URI"
 gcloud storage rm --recursive "${BUCKET_URI}/**"
 ```
 
-Object deletion is irreversible. Run destroy again after the bucket is empty.
+Object deletion is irreversible. Re-run the saved destroy plan only if its
+configuration is still current. Otherwise create and review a new plan.
 
-Finally confirm the expensive resources are gone and inspect billing:
+Keep the bootstrap state bucket and GitHub identity if you will deploy again.
+Destroy `infra/bootstrap` only after the main stack is gone and its state
+history is no longer required.
+
+Confirm expensive resources are gone:
 
 ```bash
 gcloud container clusters list
@@ -824,6 +652,53 @@ gcloud compute forwarding-rules list
 gcloud billing projects describe "$PROJECT_ID"
 ```
 
-Keep the deployment evidence with the environment record. Do not update
-project documentation from configured to live-verified until these checks
-have actually run.
+## Troubleshooting
+
+### GitHub push runs CI but no deployment
+
+Confirm the push is on `main`, every gate passed and the workflow contains
+`deploy production`. Then check the `production` environment variables in
+[CI/CD](ci-cd.md).
+
+### GitHub cannot authenticate to Google
+
+Confirm the numeric repository ID, owner ID and `main` branch match the
+bootstrap values. Confirm `id-token: write` remains limited to the deployment
+job.
+
+### Migration fails
+
+Read:
+
+```bash
+kubectl logs job/backend-migrate --all-containers=true
+```
+
+Check the database, user, private IP and URL encoding in `DATABASE_URL`.
+
+### Pods report `CreateContainerConfigError`
+
+```bash
+kubectl get secret agentcare-secrets -o name
+kubectl describe pod -l app=backend
+```
+
+### Images cannot be pulled
+
+```bash
+kubectl describe pod -l app=backend
+kubectl get deployment backend \
+  -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+The image tag must be the full Git commit SHA, never `latest`.
+
+### Model calls become staff escalations
+
+Check `LLM_PROFILE`, Vertex API enablement, runtime Workload Identity, model
+quota and backend logs. Escalation is the intended safe failure mode.
+
+### Langfuse shows no traces
+
+Check that both keys exist, `LANGFUSE_SAMPLE_RATE` is above zero and the
+request was sampled. Tracing failure never stops workflow processing.

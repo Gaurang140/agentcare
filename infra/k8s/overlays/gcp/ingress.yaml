@@ -12,6 +12,7 @@ metadata:
   name: agentcare
   annotations:
     kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: "agentcare-ingress"
     # Domain placeholder - set to a real domain you control before this
     # Ingress can issue a certificate; ManagedCertificate provisioning fails
     # silently (stays "Provisioning") against a domain with no matching DNS.
@@ -42,4 +43,4 @@ metadata:
   name: agentcare-cert
 spec:
   domains:
-    - "agentcare.example.com" # REPLACE_ME with a real domain before applying
+    - "PUBLIC_HOST_PLACEHOLDER"

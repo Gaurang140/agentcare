@@ -15,7 +15,9 @@ data:
   LLM_FALLBACK_MODEL: ""
   CHECKPOINT_DB_PATH: "checkpoints.db"
   LANGFUSE_PUBLIC_KEY: ""
-  LANGFUSE_HOST: ""
+  LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
+  LANGFUSE_SAMPLE_RATE: "0"
+  APP_RELEASE: ""
   JWT_EXPIRE_MINUTES: "1440"
   STORAGE_BACKEND: "local"
   UPLOAD_DIR: "./uploads"
@@ -27,6 +29,6 @@ data:
   MODEL_ARMOR_LOCATION: "europe-west3"
   ENVIRONMENT: "prod"
   LOG_LEVEL: "INFO"
-  # Placeholder: the operator replaces this with the actual frontend origin
-  # before rendering. Leaving it in place makes browser API calls fail CORS.
-  FRONTEND_ORIGIN: "https://FRONTEND_ORIGIN_PLACEHOLDER"
+  # Reusable-base default. The GCP runtime patch supplies its public HTTPS
+  # origin in the rendered deployment copy.
+  FRONTEND_ORIGIN: "http://localhost:3000"

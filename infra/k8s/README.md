@@ -3,7 +3,8 @@
 This directory contains the application base, GCP application overlay and
 separate GCP migration overlay for AgentCare. Use the
 [GCP deployment runbook](../../docs/deployment-gcp.md) for provisioning,
-secrets, images, database setup, DNS, rollback and cost controls.
+secrets, database setup, DNS, rollback and cost controls. Use
+[CI/CD](../../docs/ci-cd.md) for automatic releases.
 
 ## Layout
 
@@ -20,6 +21,7 @@ overlays/gcp/
   backendconfig.yaml
   frontendconfig.yaml
   podmonitoring.yaml
+  configmap-runtime.yaml
   configmap-storage.yaml
   configmap-model-armor.yaml
   serviceaccount-workload-identity.yaml
@@ -37,23 +39,39 @@ overlay.
 Before applying:
 
 - `kubectl` must target the intended GKE cluster
-- `kustomize` must be installed for image rewrites
 - `agentcare-secrets` must exist in the namespace
 - the Cloud SQL database and user must exist
-- GCS, Model Armor template/region, frontend origin, project and image sentinels must be replaced
+- renderer environment values must name GCS, Model Armor, public origin, model profile and the commit SHA
 - Terraform must have created the backend Workload Identity binding
+- Terraform must have reserved the `agentcare-ingress` global address
 - Terraform must have created the Model Armor regional endpoint and private DNS when provider screening is enabled
 
 ## Render
 
+Do not edit source sentinels or run `kustomize edit`. The renderer validates
+one environment and copies the source to a temporary directory:
+
 ```bash
-kubectl kustomize infra/k8s/base
-kubectl kustomize infra/k8s/overlays/gcp-migration
-kubectl kustomize infra/k8s/overlays/gcp
-kubectl apply --dry-run=server -k infra/k8s/overlays/gcp
+export GCP_PROJECT_ID="YOUR_PROJECT_ID"
+export GCP_REGION="europe-west3"
+export IMAGE_TAG="$(git rev-parse HEAD)"
+export DOCUMENTS_BUCKET="YOUR_BUCKET"
+export MODEL_ARMOR_TEMPLATE="projects/YOUR_PROJECT_ID/locations/europe-west3/templates/agentcare-guard"
+export PUBLIC_URL="https://YOUR_DOMAIN"
+export LLM_PROFILE="vertex"
+export LANGFUSE_PUBLIC_KEY=""
+export LANGFUSE_BASE_URL="https://cloud.langfuse.com"
+export LANGFUSE_SAMPLE_RATE="0"
+export RENDERED_K8S="/tmp/agentcare-k8s-$IMAGE_TAG"
+.venv/bin/python scripts/render_gcp_manifests.py \
+  --output "$RENDERED_K8S"
+kubectl kustomize "$RENDERED_K8S/overlays/gcp-migration"
+kubectl kustomize "$RENDERED_K8S/overlays/gcp"
+kubectl apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp"
 ```
 
-Rendering does not prove that cloud resources or credentials exist.
+The output path must not already exist. Rendering never proves that cloud
+resources or credentials exist.
 
 ## Apply in order
 
@@ -62,11 +80,11 @@ overlay:
 
 ```bash
 kubectl delete job backend-migrate --ignore-not-found
-kubectl apply --dry-run=server -k infra/k8s/overlays/gcp-migration
-kubectl apply -k infra/k8s/overlays/gcp-migration
-kubectl wait --for=condition=complete job/backend-migrate --timeout=300s
+kubectl apply --dry-run=server -k "$RENDERED_K8S/overlays/gcp-migration"
+kubectl apply -k "$RENDERED_K8S/overlays/gcp-migration"
+kubectl wait --for=condition=complete job/backend-migrate --timeout=600s
 kubectl logs job/backend-migrate
-kubectl apply -k infra/k8s/overlays/gcp
+kubectl apply -k "$RENDERED_K8S/overlays/gcp"
 ```
 
 Do not apply the application overlay until the Job succeeds. The application
@@ -85,8 +103,8 @@ external worker or gains a distributed lock.
 ## Verify
 
 ```bash
-kubectl rollout status deployment/backend --timeout=300s
-kubectl rollout status deployment/frontend --timeout=300s
+kubectl rollout status deployment/backend --timeout=600s
+kubectl rollout status deployment/frontend --timeout=600s
 kubectl get pods,services,ingress
 curl -sSI --max-time 10 http://YOUR_DOMAIN/ | head -n 1
 ```
@@ -95,12 +113,12 @@ The public HTTP check must report a 308 redirect after the managed certificate
 and GKE load balancer finish reconciling.
 
 Continue with health, workflow and Model Armor checks in the
-[deployment runbook](../../docs/deployment-gcp.md#15-verify-health-logs-and-workflow-behavior).
+[deployment runbook](../../docs/deployment-gcp.md#10-verify-real-end-to-end-behavior).
 
 ## Teardown
 
 ```bash
-kubectl delete -k infra/k8s/overlays/gcp
+kubectl delete -k "$RENDERED_K8S/overlays/gcp"
 kubectl delete job backend-migrate --ignore-not-found
 ```
 

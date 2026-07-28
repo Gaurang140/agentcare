@@ -27,10 +27,10 @@ from app.agents.graph import build_graph, open_checkpointer
 from app.agents.responses import emergency_response, medical_refusal_response
 from app.agents.state import AgentState
 from app.agents.support import redact_text_for_agent
-from app.config import settings
 from app.exceptions import NotFoundError, ValidationError
 from app.logging_setup import get_logger
 from app.models import Escalation, User, WorkflowRun
+from app.observability.tracing import observe_workflow
 from app.safety.guardrails import ScreenResult, screen_request
 from app.safety.injection_guard import InjectionResult, screen_injection
 from app.tools.audit_tools import write_audit
@@ -49,9 +49,6 @@ INJECTION_BLOCKED_RESPONSE = (
 _graph_stack: contextlib.ExitStack | None = None
 _graph: Any | None = None
 
-_langfuse_client_ready = False
-
-
 def get_graph() -> Any:
     """Lazily build the compiled graph once and cache it for reuse."""
     global _graph_stack, _graph
@@ -66,55 +63,11 @@ def close_graph() -> None:
     """Close the cached graph's checkpointer and clear the cache. Safe to
     call when nothing is cached. Used by the FastAPI lifespan on shutdown
     and by tests to force a fresh checkpoint file on the next get_graph()."""
-    global _graph_stack, _graph, _langfuse_client_ready
+    global _graph_stack, _graph
     if _graph_stack is not None:
         _graph_stack.close()
     _graph_stack = None
     _graph = None
-    _langfuse_client_ready = False
-
-
-def _ensure_langfuse_client() -> None:
-    global _langfuse_client_ready
-    if _langfuse_client_ready:
-        return
-    from langfuse import Langfuse  # deferred: only needed when keys are set
-
-    Langfuse(
-        public_key=settings.langfuse_public_key,
-        secret_key=settings.langfuse_secret_key,
-        host=settings.langfuse_host or None,
-    )
-    _langfuse_client_ready = True
-
-
-@contextlib.contextmanager
-def _observability(config: dict[str, Any], workflow_id: int):
-    """Attach Langfuse tracing to this graph invocation when both
-    settings.langfuse_public_key/secret_key are set; a no-op otherwise.
-    The Langfuse LangChain callback is imported only on the keys-set path, so
-    the default/CI path never touches tracing infrastructure.
-
-    Tracing is optional infrastructure, so an import failure downgrades the
-    run to untraced instead of failing it. The import is attempted before
-    anything else on this path, and its failure leaves both the Langfuse
-    client and callback out of the invocation."""
-    if not (settings.langfuse_public_key and settings.langfuse_secret_key):
-        yield
-        return
-
-    try:
-        from langfuse import propagate_attributes
-        from langfuse.langchain import CallbackHandler
-    except ImportError as exc:
-        logger.warning("langfuse_disabled_missing_dependency", error=str(exc))
-        yield
-        return
-
-    _ensure_langfuse_client()
-    config.setdefault("callbacks", []).append(CallbackHandler())
-    with propagate_attributes(metadata={"workflow_id": workflow_id}):
-        yield
 
 
 # The key LangGraph adds to invoke()'s result when the run stopped on an
@@ -297,7 +250,7 @@ def _invoke_graph(
     }
 
     try:
-        with _observability(config, workflow_run.id):
+        with observe_workflow(config):
             # Persist each checkpoint before the next super-step runs. The
             # default mode writes asynchronously, which leaves a window where a
             # crash loses the step that just finished. A booking that already

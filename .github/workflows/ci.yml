@@ -22,10 +22,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: ruff check
-        run: ruff check backend evals
+        run: ruff check backend evals scripts
 
       - name: compile check
-        run: python -m compileall backend evals -q
+        run: python -m compileall backend evals scripts -q
 
       - name: run tests
         run: PYTHONPATH=backend python -m pytest -q backend evals/test_evidence_safety.py
@@ -113,10 +113,22 @@ jobs:
       - name: check formatting
         run: terraform fmt -check -recursive
 
+      - name: check bootstrap formatting
+        working-directory: infra/bootstrap
+        run: terraform fmt -check
+
       - name: initialize providers without remote state
         run: terraform init -backend=false -input=false
 
       - name: validate configuration
+        run: terraform validate -no-color
+
+      - name: initialize bootstrap providers without local state
+        working-directory: infra/bootstrap
+        run: terraform init -backend=false -input=false
+
+      - name: validate bootstrap configuration
+        working-directory: infra/bootstrap
         run: terraform validate -no-color
 
   manifests:
@@ -179,3 +191,150 @@ jobs:
           # This one is personal, so the empty value is expected and the scan
           # runs either way.
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  deploy-production:
+    name: deploy production
+    needs:
+      - test
+      - frontend
+      - migrations
+      - infrastructure
+      - manifests
+      - secret-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: production
+      url: ${{ vars.PUBLIC_URL }}
+    concurrency:
+      group: agentcare-production
+      cancel-in-progress: false
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      GCP_DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+      GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}
+      DOCUMENTS_BUCKET: ${{ vars.DOCUMENTS_BUCKET }}
+      MODEL_ARMOR_TEMPLATE: ${{ vars.MODEL_ARMOR_TEMPLATE }}
+      PUBLIC_URL: ${{ vars.PUBLIC_URL }}
+      LLM_PROFILE: ${{ vars.LLM_PROFILE }}
+      LANGFUSE_PUBLIC_KEY: ${{ vars.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_BASE_URL: ${{ vars.LANGFUSE_BASE_URL }}
+      LANGFUSE_SAMPLE_RATE: ${{ vars.LANGFUSE_SAMPLE_RATE }}
+      IMAGE_TAG: ${{ github.sha }}
+      REGISTRY_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
+      IMAGE_REPOSITORY: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/agentcare
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: validate deployment configuration
+        shell: bash
+        run: |
+          required=(
+            GCP_PROJECT_ID
+            GCP_REGION
+            GCP_WORKLOAD_IDENTITY_PROVIDER
+            GCP_DEPLOYER_SERVICE_ACCOUNT
+            GKE_CLUSTER
+            DOCUMENTS_BUCKET
+            MODEL_ARMOR_TEMPLATE
+            PUBLIC_URL
+            LLM_PROFILE
+          )
+          for variable in "${required[@]}"; do
+            if [ -z "${!variable}" ]; then
+              echo "::error::GitHub production variable $variable is missing"
+              exit 1
+            fi
+          done
+
+      - name: authenticate to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - name: set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+        with:
+          version: "577.0.0"
+          install_components: "gke-gcloud-auth-plugin,kubectl"
+
+      - name: authenticate Docker to Artifact Registry
+        run: gcloud auth configure-docker "$REGISTRY_HOST" --quiet
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: build and push backend
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}/backend:${{ github.sha }}
+          cache-from: type=gha,scope=agentcare-backend
+          cache-to: type=gha,mode=max,scope=agentcare-backend
+
+      - name: build and push frontend
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}/frontend:${{ github.sha }}
+          build-args: BACKEND_URL=http://backend:8000
+          cache-from: type=gha,scope=agentcare-frontend
+          cache-to: type=gha,mode=max,scope=agentcare-frontend
+
+      - name: get GKE credentials
+        uses: google-github-actions/get-gke-credentials@3da1e46a907576cefaa90c484278bb5b259dd395 # v3
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+          cluster_name: ${{ vars.GKE_CLUSTER }}
+          location: ${{ vars.GCP_REGION }}
+
+      - name: render release manifests
+        run: >-
+          python scripts/render_gcp_manifests.py
+          --output "$RUNNER_TEMP/agentcare-k8s"
+
+      - name: verify runtime secret exists
+        run: kubectl get secret agentcare-secrets -o name
+
+      - name: run database migration
+        shell: bash
+        run: |
+          kubectl delete job backend-migrate --ignore-not-found=true --wait=true
+          kubectl apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp-migration"
+          if ! kubectl wait --for=condition=complete job/backend-migrate --timeout=600s; then
+            kubectl logs job/backend-migrate --all-containers=true || true
+            exit 1
+          fi
+          kubectl logs job/backend-migrate --all-containers=true
+
+      - name: deploy application
+        run: |
+          kubectl apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp"
+          kubectl rollout status deployment/backend --timeout=600s
+          kubectl rollout status deployment/frontend --timeout=600s
+
+      - name: smoke test public health
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if curl -fsS --max-time 10 "${PUBLIC_URL}/api/health" >/dev/null; then
+              exit 0
+            fi
+            echo "health check attempt $attempt failed; retrying"
+            sleep 10
+          done
+          kubectl get pods,services,ingress
+          exit 1

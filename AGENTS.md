@@ -2,7 +2,8 @@
 
 AgentCare is an agentic hospital-administration system: FastAPI + LangGraph backend
 (six coordinated agents), Next.js 16 frontend and persistent SQL. It has a
-reviewed GCP deployment path but has not been deployed to a live GCP project.
+reviewed GCP deployment path and an existing live health endpoint. Automatic
+GitHub deployment still requires the documented one-time activation.
 It handles administration only: registration, department routing, appointment
 booking, document coordination, reminders and follow-up. It never diagnoses,
 prescribes or doses. Keep that boundary in every line you write, including
@@ -19,13 +20,13 @@ backend/app/
   safety/    # deterministic guardrails (pre-LLM screen + output sanitizer)
   tools/     # ~10 real DB tools; every mutation writes an AuditEvent
   agents/    # llm.py (only LLM entry point), state.py, prompts.py, six agent nodes
+  observability/ # optional privacy-masked Langfuse tracing
   services/  # workflow_service (start/resume), storage adapter (local | gcs)
   api/       # routers; RBAC enforced here, never in the frontend
 frontend/    # Next.js 16 App Router, Tailwind v4, shadcn; proxy.ts (not middleware.ts)
-infra/       # Terraform HCL, GCP resources + k8s/
-             #   (kustomize base + gcp overlay)
-scripts/     # seed_demo.py and helpers
-docs/        # architecture, security, demo and GCP deployment guides
+infra/       # Terraform bootstrap/main stacks + k8s base and GCP overlays
+scripts/     # seed_demo.py, manifest renderer and helpers
+docs/        # architecture, security, operations, demo and GCP guides
 ```
 
 ## Hard rules
@@ -72,18 +73,20 @@ docs/        # architecture, security, demo and GCP deployment guides
 (cd backend && ../.venv/bin/python -m uvicorn app.main:app --reload)
 PYTHONPATH=backend .venv/bin/python -m pytest -q backend evals/test_evidence_safety.py
 .venv/bin/python evals/phase2_score.py --selftest
-.venv/bin/ruff check backend evals                  # must stay clean
-.venv/bin/python -m compileall backend evals -q     # must stay clean
+.venv/bin/ruff check backend evals scripts          # must stay clean
+.venv/bin/python -m compileall backend evals scripts -q # must stay clean
 # frontend
 npm --prefix frontend ci
 npm --prefix frontend audit --omit=dev --audit-level=high
 npm --prefix frontend run lint
 npm --prefix frontend run build
 # infrastructure
-terraform -chdir=infra/terraform fmt -check -recursive
+terraform fmt -check -recursive infra/bootstrap infra/terraform
+terraform -chdir=infra/bootstrap init -backend=false -input=false
+terraform -chdir=infra/bootstrap validate
 terraform -chdir=infra/terraform init -backend=false -input=false
 terraform -chdir=infra/terraform validate
-kubectl kustomize infra/k8s/overlays/gcp
+kubectl kustomize infra/k8s/base
 # full stack
 docker compose up --build
 ```

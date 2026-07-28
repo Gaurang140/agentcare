@@ -47,3 +47,8 @@ output "cloud_sql_private_ip_address" {
   description = "Private IP address used by the direct PostgreSQL connection; null while enable_cloud_sql is false."
   value       = module.cloud_sql.private_ip_address
 }
+
+output "ingress_ip_address" {
+  description = "Reserved public IP for DNS before the first GKE application release."
+  value       = google_compute_global_address.ingress.address
+}

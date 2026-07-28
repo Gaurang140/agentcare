@@ -138,8 +138,11 @@ def test_gcp_migration_overlay_owns_job_and_backend_image():
     assert overlay["images"] == [
         {
             "name": "agentcare-backend",
-            "newName": "REGION-docker.pkg.dev/PROJECT/agentcare/backend",
-            "newTag": "TAG",
+            "newName": (
+                "REGION_PLACEHOLDER-docker.pkg.dev/"
+                "PROJECT_ID_PLACEHOLDER/agentcare/backend"
+            ),
+            "newTag": "IMAGE_TAG_PLACEHOLDER",
         }
     ]
 
@@ -226,7 +229,10 @@ def test_model_armor_location_is_an_operator_substitution_not_a_second_default()
     model_armor_config = _load_yaml(
         REPO_ROOT / "infra/k8s/overlays/gcp/configmap-model-armor.yaml"
     )
-    assert model_armor_config["data"]["MODEL_ARMOR_LOCATION"] == "REGION"
+    assert (
+        model_armor_config["data"]["MODEL_ARMOR_LOCATION"]
+        == "REGION_PLACEHOLDER"
+    )
 
 
 def test_gke_uses_a_dedicated_node_identity_with_explicit_pull_permissions():
@@ -304,6 +310,42 @@ def test_gcp_overlay_declares_managed_prometheus_collection():
     ]
 
 
+def test_kubernetes_workload_sources_never_default_to_latest():
+    manifests = (
+        REPO_ROOT / "infra/k8s/base/backend.yaml",
+        REPO_ROOT / "infra/k8s/base/frontend.yaml",
+        REPO_ROOT / "infra/k8s/overlays/gcp-migration/migration-job.yaml",
+    )
+
+    for manifest in manifests:
+        assert ":latest" not in manifest.read_text(encoding="utf-8")
+
+
+def test_terraform_reserves_the_ingress_ip_used_by_the_gcp_overlay():
+    root = (REPO_ROOT / "infra/terraform/main.tf").read_text(encoding="utf-8")
+    outputs = (REPO_ROOT / "infra/terraform/outputs.tf").read_text(
+        encoding="utf-8"
+    )
+    ingress_documents = list(
+        yaml.safe_load_all(
+            (
+                REPO_ROOT / "infra/k8s/overlays/gcp/ingress.yaml"
+            ).read_text(encoding="utf-8")
+        )
+    )
+    ingress = ingress_documents[0]
+
+    assert 'resource "google_compute_global_address" "ingress"' in root
+    assert 'name    = "agentcare-ingress"' in root
+    assert 'output "ingress_ip_address"' in outputs
+    assert (
+        ingress["metadata"]["annotations"][
+            "kubernetes.io/ingress.global-static-ip-name"
+        ]
+        == "agentcare-ingress"
+    )
+
+
 def test_gcp_runbook_checks_required_plugins_and_exercises_gcs_upload_path():
     runbook = (REPO_ROOT / "docs/deployment-gcp.md").read_text(encoding="utf-8")
 
@@ -364,6 +406,26 @@ def test_ci_validates_terraform_with_pinned_hashicorp_setup():
     assert "terraform validate -no-color" in commands
 
 
+def test_ci_validates_the_bootstrap_and_main_terraform_stacks():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    steps = workflow["jobs"]["infrastructure"]["steps"]
+
+    bootstrap_steps = [
+        step
+        for step in steps
+        if step.get("working-directory") == "infra/bootstrap"
+    ]
+    bootstrap_commands = "\n".join(
+        step["run"]
+        for step in bootstrap_steps
+        if isinstance(step.get("run"), str)
+    )
+
+    assert "terraform fmt -check" in bootstrap_commands
+    assert "terraform init -backend=false -input=false" in bootstrap_commands
+    assert "terraform validate -no-color" in bootstrap_commands
+
+
 def test_ci_pins_first_party_actions_to_full_release_commits():
     expected = {
         "actions/checkout": (
@@ -414,6 +476,108 @@ def test_ci_gates_eval_evidence_and_production_frontend_advisories():
     assert "npm audit --omit=dev --audit-level=high" in frontend_commands
 
 
+def test_ci_deploys_main_only_after_every_release_gate():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    deploy = workflow["jobs"].get("deploy-production")
+
+    assert deploy is not None, "CI has no production deployment job"
+    assert deploy["needs"] == [
+        "test",
+        "frontend",
+        "migrations",
+        "infrastructure",
+        "manifests",
+        "secret-scan",
+    ]
+    assert deploy["if"] == (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    )
+    assert deploy["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+    }
+    assert deploy["environment"] == {
+        "name": "production",
+        "url": "${{ vars.PUBLIC_URL }}",
+    }
+    assert deploy["concurrency"] == {
+        "group": "agentcare-production",
+        "cancel-in-progress": False,
+    }
+
+
+def test_ci_release_uses_keyless_gcp_auth_and_pinned_deployment_actions():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    steps = workflow["jobs"]["deploy-production"]["steps"]
+    used_actions = {
+        step["uses"].split("@", maxsplit=1)[0]: step["uses"]
+        for step in steps
+        if "uses" in step
+    }
+
+    assert used_actions["google-github-actions/auth"] == (
+        "google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093"
+    )
+    assert used_actions["google-github-actions/setup-gcloud"] == (
+        "google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db"
+    )
+    assert used_actions["google-github-actions/get-gke-credentials"] == (
+        "google-github-actions/get-gke-credentials@"
+        "3da1e46a907576cefaa90c484278bb5b259dd395"
+    )
+    assert used_actions["docker/setup-buildx-action"] == (
+        "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"
+    )
+    assert used_actions["docker/build-push-action"] == (
+        "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a"
+    )
+
+    auth = next(
+        step
+        for step in steps
+        if step.get("uses", "").startswith("google-github-actions/auth@")
+    )
+    assert auth["with"] == {
+        "project_id": "${{ vars.GCP_PROJECT_ID }}",
+        "workload_identity_provider": (
+            "${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+        ),
+        "service_account": "${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}",
+    }
+    assert "credentials_json" not in auth["with"]
+
+
+def test_ci_release_migrates_before_rollout_and_smoke_tests_public_health():
+    workflow = _load_yaml(REPO_ROOT / ".github/workflows/ci.yml")
+    deploy = workflow["jobs"]["deploy-production"]
+    steps = deploy["steps"]
+    commands = "\n".join(
+        step["run"] for step in steps if isinstance(step.get("run"), str)
+    )
+    step_names = [step.get("name") for step in steps]
+
+    assert step_names.index("run database migration") < step_names.index(
+        "deploy application"
+    )
+    assert "kubectl wait --for=condition=complete job/backend-migrate" in commands
+    assert "kubectl rollout status deployment/backend" in commands
+    assert "kubectl rollout status deployment/frontend" in commands
+    assert '"${PUBLIC_URL}/api/health"' in commands
+    assert "terraform apply" not in commands
+    assert "terraform destroy" not in commands
+
+    build_steps = [
+        step for step in steps if step.get("uses", "").startswith(
+            "docker/build-push-action@"
+        )
+    ]
+    assert len(build_steps) == 2
+    for step in build_steps:
+        assert step["with"]["push"] is True
+        assert "${{ github.sha }}" in step["with"]["tags"]
+        assert ":latest" not in step["with"]["tags"]
+
+
 def test_frontend_pins_patched_next_runtime_transitives():
     package = _load_yaml(REPO_ROOT / "frontend/package.json")
 
@@ -423,3 +587,102 @@ def test_frontend_pins_patched_next_runtime_transitives():
         "postcss": "8.5.22",
         "sharp": "0.35.3",
     }
+
+
+def test_terraform_bootstrap_protects_remote_state_and_uses_no_key_file():
+    bootstrap = REPO_ROOT / "infra/bootstrap/main.tf"
+    assert bootstrap.is_file(), "the keyless CI/CD bootstrap stack is missing"
+    source = bootstrap.read_text(encoding="utf-8")
+
+    assert 'resource "google_storage_bucket" "terraform_state"' in source
+    assert "uniform_bucket_level_access = true" in source
+    assert 'public_access_prevention    = "enforced"' in source
+    assert re.search(
+        r"versioning\s*{\s*enabled\s*=\s*true\s*}",
+        source,
+        re.DOTALL,
+    )
+    assert "force_destroy               = false" in source
+    assert "google_service_account_key" not in source
+
+    backend = (REPO_ROOT / "infra/terraform/backend.tf").read_text(
+        encoding="utf-8"
+    )
+    assert 'backend "gcs"' in backend
+    assert 'prefix = "agentcare/production"' in backend
+    assert 'backend "local"' not in backend
+    assert "bucket =" not in backend
+
+
+def test_terraform_bootstrap_enables_every_service_used_by_the_gcp_stack():
+    source = (
+        REPO_ROOT / "infra/bootstrap/main.tf"
+    ).read_text(encoding="utf-8")
+
+    for service in (
+        "aiplatform.googleapis.com",
+        "artifactregistry.googleapis.com",
+        "cloudresourcemanager.googleapis.com",
+        "compute.googleapis.com",
+        "container.googleapis.com",
+        "dns.googleapis.com",
+        "iam.googleapis.com",
+        "iamcredentials.googleapis.com",
+        "logging.googleapis.com",
+        "modelarmor.googleapis.com",
+        "monitoring.googleapis.com",
+        "networkconnectivity.googleapis.com",
+        "servicenetworking.googleapis.com",
+        "serviceusage.googleapis.com",
+        "sqladmin.googleapis.com",
+        "storage.googleapis.com",
+        "sts.googleapis.com",
+    ):
+        assert f'"{service}"' in source
+
+
+def test_terraform_bootstrap_restricts_github_identity_to_repo_id_and_main():
+    source = (
+        REPO_ROOT / "infra/bootstrap/main.tf"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        'resource "google_iam_workload_identity_pool_provider" "github"'
+        in source
+    )
+    assert '"attribute.repository_id"       = "assertion.repository_id"' in source
+    assert (
+        '"attribute.repository_owner_id" = "assertion.repository_owner_id"'
+        in source
+    )
+    assert '"attribute.ref"                 = "assertion.ref"' in source
+    assert "assertion.repository_id == '${var.github_repository_id}'" in source
+    assert (
+        "assertion.repository_owner_id == "
+        "'${var.github_repository_owner_id}'"
+        in source
+    )
+    assert "assertion.ref == 'refs/heads/${var.deploy_branch}'" in source
+    assert "attribute.repository_id/${var.github_repository_id}" in source
+
+
+def test_terraform_bootstrap_grants_only_application_deployment_roles():
+    source = (
+        REPO_ROOT / "infra/bootstrap/main.tf"
+    ).read_text(encoding="utf-8")
+
+    for role in (
+        "roles/artifactregistry.writer",
+        "roles/container.clusterViewer",
+        "roles/container.developer",
+        "roles/serviceusage.serviceUsageConsumer",
+    ):
+        assert f'"{role}"' in source
+
+    for excessive_role in (
+        "roles/owner",
+        "roles/editor",
+        "roles/resourcemanager.projectIamAdmin",
+        "roles/iam.serviceAccountAdmin",
+    ):
+        assert excessive_role not in source

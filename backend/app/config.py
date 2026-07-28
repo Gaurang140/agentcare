@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root .env, resolved independent of the process working directory.
@@ -10,7 +10,11 @@ _ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=_ENV_FILE, extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE,
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     # LLM (OpenAI-compatible)
     llm_base_url: str = "https://api.groq.com/openai/v1"
@@ -59,7 +63,12 @@ class Settings(BaseSettings):
     # moved onto the langchain chat-model layer.
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
-    langfuse_host: str = ""
+    langfuse_base_url: str = Field(
+        default="https://cloud.langfuse.com",
+        validation_alias=AliasChoices("LANGFUSE_BASE_URL", "LANGFUSE_HOST"),
+    )
+    langfuse_sample_rate: float = Field(default=0.0, ge=0, le=1)
+    app_release: str = ""
 
     # Auth
     jwt_secret: str = "change_me_generate_a_long_random_string"

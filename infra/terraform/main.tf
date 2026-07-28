@@ -17,6 +17,11 @@ resource "google_compute_ssl_policy" "frontend" {
   min_tls_version = "TLS_1_2"
 }
 
+resource "google_compute_global_address" "ingress" {
+  project = var.project_id
+  name    = "agentcare-ingress"
+}
+
 module "artifact_registry" {
   source = "./modules/artifact-registry"
 
