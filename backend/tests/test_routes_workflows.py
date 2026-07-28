@@ -47,7 +47,7 @@ def _isolated_checkpointer(tmp_path, monkeypatch):
     workflow_service.close_graph()
 
 
-def _cardiology_slot(db_session) -> int:
+def _cardiology_slot(db_session, patient_id: int) -> int:
     """A free Cardiology slot that has never had any Appointment (confirmed
     or cancelled) against it.
 
@@ -56,14 +56,20 @@ def _cardiology_slot(db_session) -> int:
     test_cancelled_slot_can_be_rebooked), so this is no longer a workaround
     for a model bug. It stays because these tests assert on the appointment
     rows a workflow produces: picking a slot with no history keeps those
-    assertions independent of whatever test_routes_patient.py's
-    cancel/reschedule tests did to the shared session db first.
+    assertions independent of whatever earlier route tests did to the shared
+    session db. Patient-aware availability also keeps an untouched slot at
+    the same time as the caller's active appointment out of the fake script.
     """
     seed(db_session)
     dept = db_session.query(Department).filter_by(name="Cardiology").first()
     today = date.today()
     slots = get_available_slots(
-        db_session, dept.id, today, today + timedelta(days=_SLOT_WINDOW_DAYS), limit=200
+        db_session,
+        dept.id,
+        today,
+        today + timedelta(days=_SLOT_WINDOW_DAYS),
+        limit=200,
+        patient_id=patient_id,
     )
     ever_used = {row[0] for row in db_session.query(Appointment.slot_id).all()}
     for slot in slots:
@@ -93,7 +99,8 @@ def _full_booking_script(slot_id: int) -> list[dict]:
 def test_request_creates_running_workflow_then_background_completes_it(
     patient_client, db_session, fake_llm
 ):
-    slot_id = _cardiology_slot(db_session)
+    user = db_session.query(User).filter_by(email="patient@example.com").first()
+    slot_id = _cardiology_slot(db_session, user.id)
     script = _full_booking_script(slot_id)
     llm = fake_llm(script)
 
@@ -321,11 +328,11 @@ def test_get_workflow_missing_id_is_404(patient_client):
 def test_resume_route_returns_status_and_writes_audit_with_real_actor(
     patient_client, db_session, fake_llm
 ):
-    slot_id = _cardiology_slot(db_session)
+    user = db_session.query(User).filter_by(email="patient@example.com").first()
+    slot_id = _cardiology_slot(db_session, user.id)
     script = _full_booking_script(slot_id)
     fake_llm(script)
 
-    user = db_session.query(User).filter_by(email="patient@example.com").first()
     run = workflow_service.start_workflow(
         db_session, user, "I need a cardiology appointment next week", []
     )

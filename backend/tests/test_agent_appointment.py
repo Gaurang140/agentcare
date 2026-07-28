@@ -7,7 +7,7 @@ from __future__ import annotations
 from app.agents import appointment
 from app.exceptions import ConflictError
 from app.models import Appointment, AppointmentSlot, AuditEvent, Department, Escalation
-from app.tools.appointment_tools import book_appointment
+from app.tools.appointment_tools import book_appointment, get_available_slots
 
 
 def _cardiology_id(db) -> int:
@@ -24,6 +24,20 @@ def _free_slots(db, limit=5):
         .limit(limit)
         .all()
     )
+
+
+def _next_non_overlapping_slot(db, slot: AppointmentSlot) -> AppointmentSlot:
+    candidate = (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.start_time >= slot.end_time,
+        )
+        .order_by(AppointmentSlot.start_time)
+        .first()
+    )
+    assert candidate is not None
+    return candidate
 
 
 def _state(**overrides) -> dict:
@@ -178,10 +192,132 @@ def test_reschedule_intent_moves_to_new_slot(db, seeded, fake_llm):
     assert old_slot.status == "free"
 
 
-def test_irrelevant_intent_is_a_no_op(db, seeded, fake_llm):
+def test_new_workflow_filters_booking_created_by_previous_workflow(db, seeded, fake_llm):
+    dept_id = _cardiology_id(db)
+    first_slot = _free_slots(db)[0]
+    second_slot = _next_non_overlapping_slot(db, first_slot)
+    client = fake_llm(
+        [
+            {"slot_id": first_slot.id, "reason": "first workflow"},
+            {"slot_id": second_slot.id, "reason": "second workflow"},
+        ]
+    )
+
+    first = appointment.run(_state(workflow_id=1, department_id=dept_id), db)
+    second = appointment.run(_state(workflow_id=2, department_id=dept_id), db)
+
+    assert first["appointment"]["start_time"] == first_slot.start_time.isoformat()
+    assert second["appointment"]["start_time"] == second_slot.start_time.isoformat()
+    second_candidate_list = client.chat.completions.calls[1]["messages"][1]["content"]
+    assert first_slot.start_time.isoformat() not in second_candidate_list
+
+
+def test_reschedule_excludes_appointment_being_moved_from_conflict_filter(
+    db, seeded, fake_llm, monkeypatch
+):
+    dept_id = _cardiology_id(db)
+    old_slot = _free_slots(db)[0]
+    same_time_slot = (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.id != old_slot.id,
+            AppointmentSlot.start_time == old_slot.start_time,
+            AppointmentSlot.doctor.has(department_id=dept_id),
+        )
+        .one()
+    )
+    booking = book_appointment(db, patient_id=1, slot_id=old_slot.id, reason="checkup")
+    fake_llm([{"slot_id": same_time_slot.id, "reason": "different doctor"}])
+    availability_context: list[tuple[int | None, int | None]] = []
+
+    def _capturing_slots(
+        db_,
+        department_id,
+        date_from,
+        date_to,
+        limit=10,
+        patient_id=None,
+        exclude_appointment_id=None,
+    ):
+        availability_context.append((patient_id, exclude_appointment_id))
+        return get_available_slots(
+            db_,
+            department_id,
+            date_from,
+            date_to,
+            limit,
+            patient_id,
+            exclude_appointment_id,
+        )
+
+    monkeypatch.setattr(appointment, "get_available_slots", _capturing_slots)
+
+    result = appointment.run(_state(intent="reschedule", department_id=dept_id), db)
+
+    assert result["appointment"]["start_time"] == same_time_slot.start_time.isoformat()
+    assert availability_context == [(1, booking["id"])]
+
+
+def test_cancel_with_multiple_active_appointments_escalates_for_clarification(
+    db, seeded, fake_llm
+):
+    first_slot = _free_slots(db)[0]
+    second_slot = _next_non_overlapping_slot(db, first_slot)
+    first = book_appointment(db, patient_id=1, slot_id=first_slot.id, reason="first")
+    second = book_appointment(db, patient_id=1, slot_id=second_slot.id, reason="second")
+
+    result = appointment.run(_state(intent="cancel"), db)
+
+    assert result.get("appointment") is None
+    escalation = db.get(Escalation, result["escalation_id"])
+    assert escalation.severity == "uncertainty"
+    assert "multiple active appointments" in escalation.reason
+    assert db.get(Appointment, first["id"]).status == "confirmed"
+    assert db.get(Appointment, second["id"]).status == "confirmed"
+
+
+def test_reschedule_with_multiple_active_appointments_escalates_for_clarification(
+    db, seeded, fake_llm
+):
+    dept_id = _cardiology_id(db)
+    first_slot = _free_slots(db)[0]
+    second_slot = _next_non_overlapping_slot(db, first_slot)
+    first = book_appointment(db, patient_id=1, slot_id=first_slot.id, reason="first")
+    second = book_appointment(db, patient_id=1, slot_id=second_slot.id, reason="second")
+    client = fake_llm(
+        [{"slot_id": _next_non_overlapping_slot(db, second_slot).id, "reason": "move"}]
+    )
+
+    result = appointment.run(_state(intent="reschedule", department_id=dept_id), db)
+
+    assert result.get("appointment") is None
+    escalation = db.get(Escalation, result["escalation_id"])
+    assert escalation.severity == "uncertainty"
+    assert "multiple active appointments" in escalation.reason
+    assert db.get(Appointment, first["id"]).status == "confirmed"
+    assert db.get(Appointment, second["id"]).status == "confirmed"
+    assert len(client.chat.completions.calls) == 0
+
+
+def test_status_intent_returns_current_sql_backed_appointments_without_llm_call(
+    db, seeded, fake_llm
+):
+    slot = _free_slots(db)[0]
+    booking = book_appointment(db, patient_id=1, slot_id=slot.id, reason="private symptom")
+    client = fake_llm([])
+
     result = appointment.run(_state(intent="status"), db)
 
-    assert result == {"completed_steps": ["appointment"]}
+    assert result["appointment"] == {
+        "id": booking["id"],
+        "doctor": booking["doctor"],
+        "department": booking["department"],
+        "start_time": booking["start_time"],
+        "status": "confirmed",
+    }
+    assert result["completed_steps"] == ["appointment"]
+    assert len(client.chat.completions.calls) == 0
 
 
 # --- Redaction language ------------------------------------------------------

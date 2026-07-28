@@ -160,7 +160,7 @@ def departments(
 @router.get("/departments/{department_id}/slots", response_model=list[SlotOut])
 def department_slots(
     department_id: int,
-    _current_user: Annotated[User, Depends(get_current_user)],
+    current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
     date_from: date | None = None,
     date_to: date | None = None,
@@ -168,7 +168,17 @@ def department_slots(
 ) -> list[SlotOut]:
     start = date_from or date.today()
     end = date_to or (start + timedelta(days=_DEFAULT_SLOT_WINDOW_DAYS))
-    return [SlotOut(**row) for row in get_available_slots(db, department_id, start, end, limit)]
+    return [
+        SlotOut(**row)
+        for row in get_available_slots(
+            db,
+            department_id,
+            start,
+            end,
+            limit,
+            patient_id=current_user.id,
+        )
+    ]
 
 
 @router.get("/reminders", response_model=list[ReminderOut])

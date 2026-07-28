@@ -27,6 +27,7 @@ from app.tools.appointment_tools import (
     cancel_appointment,
     cancelled_summary,
     get_available_slots,
+    list_active_patient_appointments,
     reschedule_appointment,
 )
 from app.tools.audit_tools import write_audit
@@ -71,15 +72,6 @@ def _pick_valid_slot(system: str, llm_request_text: str, slots: list[dict]) -> i
     return None
 
 
-def _latest_active_appointment(db: Session, patient_id: int) -> Appointment | None:
-    return (
-        db.query(Appointment)
-        .filter(Appointment.patient_id == patient_id, Appointment.status.in_(["pending", "confirmed"]))
-        .order_by(Appointment.created_at.desc())
-        .first()
-    )
-
-
 def _escalate_agent_failure(
     db: Session, workflow_id: int | None, patient_id: int | None, reason: str
 ) -> dict:
@@ -91,6 +83,40 @@ def _escalate_agent_failure(
     }
     record_agent_exit(db, "appointment", workflow_id, {"escalated": True, "reason": reason})
     return update
+
+
+def _escalate_for_clarification(
+    db: Session,
+    workflow_id: int | None,
+    patient_id: int,
+    intent: str,
+) -> dict:
+    reason = f"multiple active appointments require clarification before {intent}"
+    escalation = create_escalation(db, workflow_id, reason=reason, severity="uncertainty")
+    update = {
+        "escalation_id": escalation["id"],
+        "final_response": staff_review_response(db, patient_id),
+        "completed_steps": ["appointment"],
+    }
+    record_agent_exit(db, "appointment", workflow_id, {"escalated": True, "reason": reason})
+    return update
+
+
+def _active_appointment_for_action(
+    db: Session,
+    workflow_id: int | None,
+    patient_id: int,
+    intent: str,
+) -> tuple[dict | None, dict | None]:
+    active = list_active_patient_appointments(db, patient_id)
+    if len(active) > 1:
+        return None, _escalate_for_clarification(
+            db,
+            workflow_id,
+            patient_id,
+            intent,
+        )
+    return (active[0] if active else None), None
 
 
 def _book_or_reschedule(
@@ -174,10 +200,17 @@ def _handle_cancel(db: Session, workflow_id: int | None, patient_id: int) -> dic
             db, workflow_id, already_cancelled, "cancel", cancelled_summary(already_cancelled)
         )
 
-    existing = _latest_active_appointment(db, patient_id)
+    existing, escalation = _active_appointment_for_action(
+        db,
+        workflow_id,
+        patient_id,
+        "cancellation",
+    )
+    if escalation is not None:
+        return escalation
     if existing is None:
         raise NotFoundError("no active appointment to cancel")
-    result = cancel_appointment(db, existing.id, workflow_run_id=workflow_id)
+    result = cancel_appointment(db, existing["id"], workflow_run_id=workflow_id)
     update = {"appointment": result, "completed_steps": ["appointment"]}
     record_agent_exit(db, "appointment", workflow_id, {"action": "cancel", "appointment_id": result["id"]})
     return update
@@ -200,10 +233,17 @@ def _handle_book_or_reschedule(
 
     existing_id: int | None = None
     if intent == "reschedule":
-        existing = _latest_active_appointment(db, patient_id)
+        existing, escalation = _active_appointment_for_action(
+            db,
+            workflow_id,
+            patient_id,
+            "rescheduling",
+        )
+        if escalation is not None:
+            return escalation
         if existing is None:
             raise NotFoundError("no active appointment to reschedule")
-        existing_id = existing.id
+        existing_id = existing["id"]
 
     system = build_system_prompt(db, "appointment", APPOINTMENT)
 
@@ -229,7 +269,14 @@ def _handle_book_or_reschedule(
         )
 
     today = date.today()
-    slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
+    slots = get_available_slots(
+        db,
+        department_id,
+        today,
+        today + timedelta(days=_SLOT_WINDOW_DAYS),
+        patient_id=patient_id,
+        exclude_appointment_id=existing_id,
+    )
     slot_id = _pick_valid_slot(system, llm_request_text, slots)
     if slot_id is None:
         return _escalate_agent_failure(
@@ -244,7 +291,14 @@ def _handle_book_or_reschedule(
             db, intent, patient_id, slot_id, request_text, existing_id, workflow_id
         )
     except ConflictError:
-        slots = get_available_slots(db, department_id, today, today + timedelta(days=_SLOT_WINDOW_DAYS))
+        slots = get_available_slots(
+            db,
+            department_id,
+            today,
+            today + timedelta(days=_SLOT_WINDOW_DAYS),
+            patient_id=patient_id,
+            exclude_appointment_id=existing_id,
+        )
         slot_id = _pick_valid_slot(system, llm_request_text, slots)
         if slot_id is None:
             return _escalate_agent_failure(
@@ -268,10 +322,39 @@ def run(state: AgentState, db: Session) -> dict:
     """Book, reschedule, or cancel - a no-op for any other intent."""
     workflow_id = state.get("workflow_id")
     intent = state.get("intent")
-    if intent not in ("book", "reschedule", "cancel"):
+    if intent not in ("book", "reschedule", "cancel", "status"):
         return {"completed_steps": ["appointment"]}
 
     try:
+        if intent == "status":
+            active, escalation = _active_appointment_for_action(
+                db,
+                workflow_id,
+                state["patient_id"],
+                "reporting appointment status",
+            )
+            if escalation is not None:
+                return escalation
+            appointment_context = (
+                {key: value for key, value in active.items() if key != "reason"}
+                if active is not None
+                else None
+            )
+            record_agent_exit(
+                db,
+                "appointment",
+                workflow_id,
+                {
+                    "action": "status",
+                    "appointment_id": (
+                        appointment_context["id"] if appointment_context is not None else None
+                    ),
+                },
+            )
+            return {
+                "appointment": appointment_context,
+                "completed_steps": ["appointment"],
+            }
         if intent == "cancel":
             return _handle_cancel(db, workflow_id, state["patient_id"])
         return _handle_book_or_reschedule(db, workflow_id, state, intent)

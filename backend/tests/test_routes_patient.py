@@ -12,7 +12,11 @@ from app.auth.security import hash_password
 from app.db.seed import seed
 from app.main import app
 from app.models import Appointment, AppointmentSlot, Department, Reminder, User
-from app.tools.appointment_tools import book_appointment, get_available_slots
+from app.tools.appointment_tools import (
+    book_appointment,
+    cancel_appointment,
+    get_available_slots,
+)
 
 _SLOT_WINDOW_DAYS = 14
 
@@ -41,6 +45,34 @@ def test_department_slots_lists_free_slots(patient_client, db_session):
     slots = resp.json()
     assert len(slots) > 0
     assert slots[0]["doctor"]
+
+
+def test_patient_slot_endpoint_filters_callers_existing_times(patient_client, db_session):
+    dept_id = _cardiology_id(db_session)
+    user = db_session.query(User).filter_by(email="patient@example.com").first()
+    today = date.today()
+    available = get_available_slots(
+        db_session,
+        dept_id,
+        today,
+        today + timedelta(days=_SLOT_WINDOW_DAYS),
+        limit=100,
+        patient_id=user.id,
+    )
+    slots_by_start: dict[str, list[dict]] = {}
+    for slot in available:
+        slots_by_start.setdefault(slot["start_time"], []).append(slot)
+    same_time_slots = next(slots for slots in slots_by_start.values() if len(slots) >= 2)
+    booked_slot, conflicting_slot = same_time_slots[:2]
+    booking = book_appointment(db_session, user.id, booked_slot["slot_id"], "checkup")
+    try:
+        resp = patient_client.get(f"/api/departments/{dept_id}/slots?limit=100")
+    finally:
+        cancel_appointment(db_session, booking["id"])
+
+    assert resp.status_code == 200
+    returned_ids = {slot["slot_id"] for slot in resp.json()}
+    assert conflicting_slot["slot_id"] not in returned_ids
 
 
 def test_reminders_list_scoped_to_current_patient(patient_client, db_session):
