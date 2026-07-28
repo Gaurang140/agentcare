@@ -50,7 +50,7 @@ def get_current_user(
     updated_at = user.updated_at
     if updated_at.tzinfo is None:
         updated_at = updated_at.replace(tzinfo=timezone.utc)
-    if int(issued_at) < int(updated_at.timestamp()):
+    if float(issued_at) <= updated_at.timestamp():
         raise PermissionDeniedError("Not authenticated")
     return user
 

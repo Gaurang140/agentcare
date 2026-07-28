@@ -31,7 +31,9 @@ def create_token(user_id: int, role: str) -> str:
     payload = {
         "sub": str(user_id),
         "role": role,
-        "iat": now,
+        # Keep sub-second precision so a token minted immediately after a
+        # credential rotation is distinguishable from one minted just before.
+        "iat": now.timestamp(),
         "exp": now + timedelta(minutes=settings.jwt_expire_minutes),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")

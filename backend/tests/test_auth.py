@@ -1,11 +1,12 @@
 """Register / login / me happy path, and the RBAC-adjacent negative cases
 that make sure staff can actually reach the routes patients are denied."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
 from app.db.session import get_db
+from app.auth.security import decode_token
 from app.main import (
     EXPECTED_DATABASE_REVISION,
     _require_current_database_revision,
@@ -132,9 +133,12 @@ def test_staff_token_issued_before_credential_rotation_is_rejected(
     staff = db_session.query(User).filter_by(email="staff@example.com").one()
     original_updated_at = staff.updated_at
     try:
-        staff.updated_at = (
-            datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=2)
-        )
+        token = staff_client.cookies.get("access_token")
+        assert token is not None
+        issued_at = float(decode_token(token)["iat"])
+        staff.updated_at = datetime.fromtimestamp(
+            issued_at, tz=timezone.utc
+        ).replace(tzinfo=None)
         db_session.commit()
 
         response = staff_client.get("/api/auth/me")
