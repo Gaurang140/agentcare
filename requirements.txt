@@ -4,6 +4,7 @@ sqlalchemy==2.0.51
 alembic==1.18.5
 pydantic==2.13.4
 pydantic-settings==2.14.2
+dateparser==1.4.1
 openai==2.47.0
 # LangChain chat-model layer for agents/llm.py: init_chat_model factory,
 # message types, runnable retry. langchain-openai reaches Groq (or any

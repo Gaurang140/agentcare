@@ -24,8 +24,11 @@ class AppointmentOut(BaseModel):
     doctor: str
     department: str
     start_time: str | None
+    end_time: str | None
     status: str
     reason: str | None = None
+    created_at: str
+    workflow_id: int | None = None
 
 
 class RescheduleRequest(BaseModel):

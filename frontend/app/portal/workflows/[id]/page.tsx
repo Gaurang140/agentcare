@@ -15,6 +15,7 @@ interface AppointmentSummary {
   doctor?: string;
   department?: string;
   start_time?: string | null;
+  end_time?: string | null;
   status?: string;
 }
 
@@ -58,6 +59,8 @@ export default function WorkflowDetailPage() {
 
   const isTerminal = detail ? TERMINAL_STATUSES.has(detail.status) : false;
   const finalResponse = (detail?.state?.final_response as string | undefined) ?? null;
+  const schedulingIssue =
+    (detail?.state?.scheduling_issue as string | undefined) ?? null;
   const appointment = (detail?.appointment ?? null) as AppointmentSummary | null;
   const escalation = (detail?.escalation ?? null) as EscalationSummary | null;
 
@@ -111,6 +114,12 @@ export default function WorkflowDetailPage() {
           </CardHeader>
           <CardContent className="flex flex-col gap-3 text-sm">
             <p>{finalResponse ?? "This request has finished, but left no final message."}</p>
+            {schedulingIssue ? (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-amber-950">
+                <p className="font-medium">Scheduling constraint</p>
+                <p>{schedulingIssue}</p>
+              </div>
+            ) : null}
             {appointment ? (
               <div className="rounded-lg border bg-background p-3">
                 <p className="text-xs font-medium text-muted-foreground">Appointment</p>
@@ -118,7 +127,13 @@ export default function WorkflowDetailPage() {
                   {appointment.doctor ?? "—"} · {appointment.department ?? "—"}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  {appointment.start_time ? new Date(appointment.start_time).toLocaleString() : "—"}
+                  {appointment.start_time
+                    ? `${new Date(appointment.start_time).toLocaleString()}${
+                        appointment.end_time
+                          ? ` – ${new Date(appointment.end_time).toLocaleTimeString()}`
+                          : ""
+                      }`
+                    : "—"}
                   {appointment.status ? ` · ${appointment.status}` : ""}
                 </p>
               </div>

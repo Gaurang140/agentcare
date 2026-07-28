@@ -11,3 +11,8 @@ data:
   LANGFUSE_PUBLIC_KEY: "LANGFUSE_PUBLIC_KEY_PLACEHOLDER"
   LANGFUSE_SAMPLE_RATE: "LANGFUSE_SAMPLE_RATE_PLACEHOLDER"
   LLM_PROFILE: "LLM_PROFILE_PLACEHOLDER"
+  # Model Armor owns the production classifier layer. An empty model keeps
+  # the Groq-only prompt guard out of the active Vertex path.
+  INJECTION_GUARD_MODEL: ""
+  # Kubernetes CronJobs own recurring work when two API replicas run.
+  SCHEDULER_ENABLED: "false"

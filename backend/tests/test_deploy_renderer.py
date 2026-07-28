@@ -97,6 +97,8 @@ def test_renderer_replaces_environment_values_without_editing_sources(tmp_path):
         "LANGFUSE_PUBLIC_KEY": "pk-lf-example",
         "LANGFUSE_SAMPLE_RATE": "0.1",
         "LLM_PROFILE": "vertex",
+        "INJECTION_GUARD_MODEL": "",
+        "SCHEDULER_ENABLED": "false",
     }
 
     rendered_text = "\n".join(

@@ -23,6 +23,8 @@ class AgentState(TypedDict, total=False):
     department_id: int | None
     department_name: str | None
     routing_confidence: float
+    requested_window: dict | None
+    scheduling_issue: str | None
     appointment: dict | None
     documents_result: dict | None
     reminders: Annotated[list[dict], operator.add]

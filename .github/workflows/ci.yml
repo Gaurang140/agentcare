@@ -20,7 +20,7 @@ jobs:
       POSTGRES_TEST_URL: postgresql+psycopg://agentcare_test:agentcare_test@localhost:5432/agentcare_test
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_DB: agentcare_test
           POSTGRES_USER: agentcare_test
@@ -95,10 +95,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # Sqlite needs no service container. The revisions are written to run on
-      # both backends (backend/alembic/env.py sets render_as_batch), and that
-      # env.py reads this variable through app.config.settings.
-      DATABASE_URL: sqlite:///./ci-migrations.db
+      DATABASE_URL: postgresql+psycopg://agentcare_migrations:agentcare_migrations@localhost:5432/agentcare_migrations
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: agentcare_migrations
+          POSTGRES_USER: agentcare_migrations
+          POSTGRES_PASSWORD: agentcare_migrations
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -118,7 +129,7 @@ jobs:
         run: cd backend && alembic upgrade head
 
       - name: report the revision reached
-        run: cd backend && alembic current
+        run: cd backend && alembic current | grep -F "(head)"
 
   infrastructure:
     runs-on: ubuntu-latest
@@ -288,6 +299,10 @@ jobs:
               exit 1
             fi
           done
+          if [ "$LLM_PROFILE" != "vertex" ]; then
+            echo "::error::production LLM_PROFILE must be vertex"
+            exit 1
+          fi
 
       - name: authenticate to Google Cloud
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
@@ -404,6 +419,8 @@ jobs:
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i patch deployments --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create jobs --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i delete jobs --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create cronjobs --quiet; then exit 1; fi
+          if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create poddisruptionbudgets.policy --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i list events --quiet; then exit 1; fi
           if ! kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i create managedcertificates.networking.gke.io --quiet; then exit 1; fi
           if kubectl --namespace="$KUBERNETES_NAMESPACE" auth can-i get secrets --quiet; then exit 1; fi
@@ -447,6 +464,14 @@ jobs:
         id: deploy
         run: |
           kubectl --namespace="$KUBERNETES_NAMESPACE" apply -k "$RUNNER_TEMP/agentcare-k8s/overlays/gcp"
+          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/backend --timeout=600s
+          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/frontend --timeout=600s
+
+      - name: roll back failed rollout
+        if: failure() && steps.deploy.outcome == 'failure'
+        run: |
+          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout undo deployment/backend
+          kubectl --namespace="$KUBERNETES_NAMESPACE" rollout undo deployment/frontend
           kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/backend --timeout=600s
           kubectl --namespace="$KUBERNETES_NAMESPACE" rollout status deployment/frontend --timeout=600s
 
@@ -499,8 +524,17 @@ jobs:
         shell: bash
         run: |
           for attempt in {1..30}; do
-            if curl -fsS --max-time 10 "${PUBLIC_URL}/api/health" >/dev/null; then
-              exit 0
+            if health="$(curl -fsS --max-time 10 "${PUBLIC_URL}/api/health")"; then
+              if jq -e --arg release "$IMAGE_TAG" '
+                .status == "ok"
+                and .db == true
+                and .database_dialect == "postgresql"
+                and (.database_revision | type == "string" and length > 0)
+                and .database_revision != "unmanaged"
+                and .release == $release
+              ' <<<"$health" >/dev/null; then
+                exit 0
+              fi
             fi
             echo "health check attempt $attempt failed; retrying"
             sleep 10

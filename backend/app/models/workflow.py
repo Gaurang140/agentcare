@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -15,12 +15,23 @@ class WorkflowRun(Base):
     """
 
     __tablename__ = "workflow_runs"
+    __table_args__ = (
+        Index(
+            "uq_workflow_runs_patient_idempotency",
+            "patient_id",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL"),
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     patient_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     thread_id: Mapped[str] = mapped_column(String(255), nullable=False)
     request_text: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     current_step: Mapped[str | None] = mapped_column(String(50), nullable=True)
     state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="running", nullable=False)

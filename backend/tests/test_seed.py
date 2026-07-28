@@ -8,12 +8,15 @@ elsewhere in the same pytest session.
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
+from app.db.provision_staff import provision_staff
 from app.db.seed import seed
-from app.models import AGENT_NAMES, AgentRule, Department, Doctor, RequiredDocument
+from app.auth.security import verify_password
+from app.models import AGENT_NAMES, AgentRule, Department, Doctor, RequiredDocument, User
 
 
 def _fresh_session() -> Session:
@@ -35,7 +38,8 @@ def test_seed_is_idempotent_and_meets_minimum_counts() -> None:
         assert first["departments"] >= 5
         assert first["doctors"] == 10
         assert first["slots"] >= 1000
-        assert first["users"] == 3
+        assert first["users"] == 2
+        assert db.query(User).filter_by(role="staff").count() == 0
         assert first["agent_rules"] == 12  # 6 agents x 2 starter rules each
 
         for name in AGENT_NAMES:
@@ -52,6 +56,45 @@ def test_seed_is_idempotent_and_meets_minimum_counts() -> None:
         assert required_by_dept["Cardiology"] == ["blood_test", "ecg_report"]
         assert required_by_dept["Radiology"] == ["referral_letter"]
         assert required_by_dept["Orthopedics"] == ["imaging_report"]
+    finally:
+        db.close()
+
+
+def test_staff_is_provisioned_privately_and_can_be_rotated() -> None:
+    db = _fresh_session()
+    try:
+        user = provision_staff(
+            db,
+            email="reviewer@example.test",
+            password="a-strong-private-password",
+        )
+        assert user.role == "staff"
+        assert verify_password("a-strong-private-password", user.password_hash)
+
+        rotated = provision_staff(
+            db,
+            email="reviewer@example.test",
+            password="a-different-private-password",
+            full_name="Private reviewer",
+        )
+        assert rotated.id == user.id
+        assert rotated.full_name == "Private reviewer"
+        assert verify_password("a-different-private-password", rotated.password_hash)
+        assert not verify_password("a-strong-private-password", rotated.password_hash)
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("password", ["demo1234", "too-short"])
+def test_staff_provisioning_rejects_public_or_weak_password(password) -> None:
+    db = _fresh_session()
+    try:
+        with pytest.raises(ValueError, match="at least"):
+            provision_staff(
+                db,
+                email="reviewer@example.test",
+                password=password,
+            )
     finally:
         db.close()
 

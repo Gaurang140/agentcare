@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,8 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   ApiError,
   cancelAppointment,
@@ -37,6 +40,25 @@ function formatSlot(slot: SlotOut): string {
   return `${start.toLocaleString()} · ${slot.doctor}`;
 }
 
+function isoDate(value: Date): string {
+  return value.toISOString().slice(0, 10);
+}
+
+function initialDateRange(): { from: string; to: string } {
+  const from = new Date();
+  const to = new Date();
+  to.setDate(to.getDate() + 14);
+  return { from: isoDate(from), to: isoDate(to) };
+}
+
+function formatAppointmentTime(appt: AppointmentOut): string {
+  if (!appt.start_time) return "Not scheduled";
+  const start = new Date(appt.start_time);
+  if (!appt.end_time) return start.toLocaleString();
+  const end = new Date(appt.end_time);
+  return `${start.toLocaleString()} – ${end.toLocaleTimeString()}`;
+}
+
 export default function AppointmentsPage() {
   const [appointments, setAppointments] = useState<AppointmentOut[]>([]);
   const [departments, setDepartments] = useState<DepartmentOut[]>([]);
@@ -50,6 +72,7 @@ export default function AppointmentsPage() {
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [selectedSlotId, setSelectedSlotId] = useState<string>("");
   const [rescheduling, setRescheduling] = useState(false);
+  const [rescheduleDates, setRescheduleDates] = useState(initialDateRange);
 
   // No synchronous setLoading(true) here: `loading` already starts true, and
   // a post-mutation reload (called from the confirm handlers below, not an
@@ -85,13 +108,17 @@ export default function AppointmentsPage() {
     const department = departments.find((d) => d.name === rescheduleTarget.department);
     if (!department) return;
 
-    listSlots(department.id)
+    listSlots(department.id, {
+      date_from: rescheduleDates.from,
+      date_to: rescheduleDates.to,
+      limit: 100,
+    })
       .then(setSlots)
       .catch((err: unknown) => {
         toast.error(err instanceof ApiError ? err.message : "Could not load open slots");
       })
       .finally(() => setSlotsLoading(false));
-  }, [rescheduleTarget, departments]);
+  }, [rescheduleTarget, departments, rescheduleDates]);
 
   function openRescheduleDialog(appt: AppointmentOut) {
     setSelectedSlotId("");
@@ -137,6 +164,78 @@ export default function AppointmentsPage() {
 
   const rescheduleDepartmentFound =
     !rescheduleTarget || departments.some((d) => d.name === rescheduleTarget.department);
+  const activeAppointments = appointments.filter((appointment) =>
+    ["pending", "confirmed"].includes(appointment.status),
+  );
+  const appointmentHistory = appointments.filter(
+    (appointment) => !["pending", "confirmed"].includes(appointment.status),
+  );
+
+  function appointmentRows(rows: AppointmentOut[], actions: boolean) {
+    return (
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Appointment</TableHead>
+            <TableHead>Schedule</TableHead>
+            <TableHead>Status</TableHead>
+            <TableHead>Request details</TableHead>
+            {actions ? <TableHead className="text-right">Actions</TableHead> : null}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((appt) => (
+            <TableRow key={appt.id}>
+              <TableCell>
+                <p className="font-medium">{appt.doctor}</p>
+                <p className="text-xs text-muted-foreground">{appt.department}</p>
+              </TableCell>
+              <TableCell>
+                <p>{formatAppointmentTime(appt)}</p>
+                <p className="text-xs text-muted-foreground">
+                  Booked {new Date(appt.created_at).toLocaleString()}
+                </p>
+              </TableCell>
+              <TableCell>
+                <StatusBadge status={appt.status} />
+              </TableCell>
+              <TableCell className="max-w-md whitespace-normal">
+                <p>{appt.reason ?? "No reason recorded"}</p>
+                {appt.workflow_id ? (
+                  <Link
+                    href={`/portal/workflows/${appt.workflow_id}`}
+                    className="text-xs font-medium underline underline-offset-4"
+                  >
+                    View request #{appt.workflow_id}
+                  </Link>
+                ) : null}
+              </TableCell>
+              {actions ? (
+                <TableCell className="text-right">
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openRescheduleDialog(appt)}
+                    >
+                      Reschedule
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => setCancelTarget(appt)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </TableCell>
+              ) : null}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -148,62 +247,25 @@ export default function AppointmentsPage() {
         <CardContent>
           {loading ? (
             <p className="text-sm text-muted-foreground">Loading...</p>
-          ) : appointments.length === 0 ? (
+          ) : activeAppointments.length === 0 ? (
             <p className="text-sm text-muted-foreground">No appointments yet.</p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Doctor</TableHead>
-                  <TableHead>Department</TableHead>
-                  <TableHead>Time</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Reason</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {appointments.map((appt) => {
-                  const cancellable = appt.status !== "cancelled";
-                  return (
-                    <TableRow key={appt.id}>
-                      <TableCell>{appt.doctor}</TableCell>
-                      <TableCell>{appt.department}</TableCell>
-                      <TableCell>
-                        {appt.start_time ? new Date(appt.start_time).toLocaleString() : "—"}
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={appt.status} />
-                      </TableCell>
-                      <TableCell className="max-w-48 truncate">{appt.reason ?? "—"}</TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={!cancellable}
-                            onClick={() => openRescheduleDialog(appt)}
-                          >
-                            Reschedule
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            disabled={!cancellable}
-                            onClick={() => setCancelTarget(appt)}
-                          >
-                            Cancel
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+            appointmentRows(activeAppointments, true)
           )}
         </CardContent>
       </Card>
+
+      {appointmentHistory.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Appointment history</CardTitle>
+            <CardDescription>
+              Cancelled and completed appointments remain visible for context.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>{appointmentRows(appointmentHistory, false)}</CardContent>
+        </Card>
+      ) : null}
 
       <Dialog open={cancelTarget !== null} onOpenChange={(open) => !open && setCancelTarget(null)}>
         <DialogContent>
@@ -215,6 +277,40 @@ export default function AppointmentsPage() {
                 : ""}
             </DialogDescription>
           </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label htmlFor="reschedule-from">From</Label>
+              <Input
+                id="reschedule-from"
+                type="date"
+                value={rescheduleDates.from}
+                onChange={(event) => {
+                  setSelectedSlotId("");
+                  setSlotsLoading(true);
+                  setRescheduleDates((current) => ({
+                    ...current,
+                    from: event.target.value,
+                  }));
+                }}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label htmlFor="reschedule-to">To</Label>
+              <Input
+                id="reschedule-to"
+                type="date"
+                value={rescheduleDates.to}
+                onChange={(event) => {
+                  setSelectedSlotId("");
+                  setSlotsLoading(true);
+                  setRescheduleDates((current) => ({
+                    ...current,
+                    to: event.target.value,
+                  }));
+                }}
+              />
+            </div>
+          </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCancelTarget(null)} disabled={cancelling}>
               Keep appointment

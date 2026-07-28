@@ -127,8 +127,15 @@ export function me(): Promise<UserSummary> {
 /** POST /api/requests is multipart: a `text` field plus zero or more
  * `files`. Build the FormData in the caller so the page controls exactly
  * which fields/files go in. */
-export function submitRequest(formData: FormData): Promise<CreateRequestResponse> {
-  return apiFetch("/api/requests", { method: "POST", body: formData });
+export function submitRequest(
+  formData: FormData,
+  idempotencyKey: string,
+): Promise<CreateRequestResponse> {
+  return apiFetch("/api/requests", {
+    method: "POST",
+    body: formData,
+    headers: { "Idempotency-Key": idempotencyKey },
+  });
 }
 
 /** Ownership-filtered: always the caller's own runs, most recent first. */

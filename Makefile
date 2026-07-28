@@ -11,14 +11,14 @@ NETWORK_NAME ?= default
 SUBNETWORK_NAME ?= default
 ENABLE_CLOUD_SQL ?= true
 ENABLE_MODEL_ARMOR ?= true
-ENABLE_VERTEX_AI ?= false
+ENABLE_VERTEX_AI ?= true
 # Variable sync defaults to keeping delivery disabled. A release must opt in
 # with ENABLE_DELIVERY=true in the same command that dispatches it.
 ENABLE_DELIVERY ?= false
 TF_STATE_BUCKET ?= $(PROJECT_ID)-agentcare-tfstate
 
 PUBLIC_URL ?=
-LLM_PROFILE ?= groq
+LLM_PROFILE ?= vertex
 LANGFUSE_PUBLIC_KEY ?=
 LANGFUSE_BASE_URL ?= https://cloud.langfuse.com
 LANGFUSE_SAMPLE_RATE ?= 0
@@ -202,6 +202,10 @@ gcp-release:
 	if [ "$(ENABLE_MODEL_ARMOR)" != "true" ]; then \
 		echo "error: gcp-release requires ENABLE_MODEL_ARMOR=true before reading the Model Armor Terraform output" >&2; \
 		exit 1; \
+	fi; \
+	if [ "$(ENABLE_VERTEX_AI)" != "true" ] || [ "$(LLM_PROFILE)" != "vertex" ]; then \
+		echo "error: production release requires ENABLE_VERTEX_AI=true and LLM_PROFILE=vertex" >&2; \
+		exit 1; \
 	fi
 	@$(MAKE) --no-print-directory gcp-github-vars ENABLE_DELIVERY="$(ENABLE_DELIVERY)"
 	@set -euo pipefail; \
@@ -214,6 +218,14 @@ gcp-release:
 		echo "error: agentcare-secrets is missing. Follow docs/deployment-gcp.md before release." >&2; \
 		exit 1; \
 	}; \
+	for key in DATABASE_URL JWT_SECRET AGENTCARE_STAFF_EMAIL AGENTCARE_STAFF_PASSWORD; do \
+		value="$$(kubectl --context "$$context" --namespace=agentcare get secret agentcare-secrets \
+			-o "jsonpath={.data.$${key}}")"; \
+		if [ -z "$$value" ]; then \
+			echo "error: agentcare-secrets is missing required key $$key" >&2; \
+			exit 1; \
+		fi; \
+	done; \
 	local_sha="$$(git rev-parse main)"; \
 	remote_sha="$$(git ls-remote origin refs/heads/main | awk '{print $$1}')"; \
 	if [ "$$local_sha" != "$$remote_sha" ]; then \

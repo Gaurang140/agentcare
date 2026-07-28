@@ -6,7 +6,8 @@ Owns app.tools.appointment_tools plus the shared escalation/audit tools.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+import re
+from datetime import datetime
 
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,6 +18,7 @@ from app.agents.memory import build_system_prompt
 from app.agents.responses import patient_language, staff_review_response
 from app.agents.state import AgentState
 from app.agents.support import record_agent_exit
+from app.agents.time_window import RequestedWindow, parse_requested_window
 from app.exceptions import ConflictError, NotFoundError
 from app.logging_setup import get_logger
 from app.models import Appointment
@@ -26,6 +28,7 @@ from app.tools.appointment_tools import (
     book_appointment,
     cancel_appointment,
     cancelled_summary,
+    find_active_patient_appointment_in_window,
     get_available_slots,
     list_active_patient_appointments,
     reschedule_appointment,
@@ -35,8 +38,12 @@ from app.tools.escalation_tools import create_escalation
 
 logger = get_logger(__name__)
 
-_SLOT_WINDOW_DAYS = 14
 _SLOT_PICK_ATTEMPTS = 2
+_SLOT_CANDIDATE_LIMIT = 50
+_ADDITIONAL_APPOINTMENT = re.compile(
+    r"\b(?:another|additional|second|extra|weiteren?|zweiten?|zus[aä]tzlichen?)\b",
+    re.IGNORECASE,
+)
 
 
 class AppointmentOutput(BaseModel):
@@ -47,7 +54,11 @@ class AppointmentOutput(BaseModel):
     reason: str
 
 
-def _slot_prompt(llm_request_text: str, slots: list[dict]) -> str:
+def _slot_prompt(
+    llm_request_text: str,
+    slots: list[dict],
+    window: RequestedWindow,
+) -> str:
     """`llm_request_text` must already be PII-redacted (see
     _handle_book_or_reschedule) - this string goes to the LLM provider."""
     if not slots:
@@ -56,17 +67,32 @@ def _slot_prompt(llm_request_text: str, slots: list[dict]) -> str:
         listing = "\n".join(
             f"slot_id={s['slot_id']} doctor={s['doctor']} start={s['start_time']}" for s in slots
         )
-    return f"Patient timing preference: {llm_request_text}\nAvailable slots:\n{listing}"
+    return (
+        f"Today: {datetime.now().date().isoformat()}\n"
+        f"Required scheduling window: {window.start.isoformat()} through "
+        f"{window.end.isoformat()}\n"
+        f"Patient timing preference: {llm_request_text}\n"
+        f"Available slots (all already inside the required window):\n{listing}"
+    )
 
 
-def _pick_valid_slot(system: str, llm_request_text: str, slots: list[dict]) -> int | None:
+def _pick_valid_slot(
+    system: str,
+    llm_request_text: str,
+    slots: list[dict],
+    window: RequestedWindow,
+) -> int | None:
     """Ask the LLM for a slot id, attempting at most _SLOT_PICK_ATTEMPTS
     validated selections and never trusting an id it was not given. `system`
     is built once per run() call (see _handle_book_or_reschedule) and reused
     across every retry so a rules lookup does not repeat per attempt."""
     valid_ids = {s["slot_id"] for s in slots}
     for _ in range(_SLOT_PICK_ATTEMPTS):
-        picked = invoke_structured(system, _slot_prompt(llm_request_text, slots), AppointmentOutput)
+        picked = invoke_structured(
+            system,
+            _slot_prompt(llm_request_text, slots, window),
+            AppointmentOutput,
+        )
         if picked.slot_id in valid_ids:
             return picked.slot_id
     return None
@@ -127,12 +153,66 @@ def _book_or_reschedule(
     request_text: str,
     existing_id: int | None,
     workflow_id: int | None,
+    booking_window_key: str | None,
 ) -> dict:
     if intent == "book":
         return book_appointment(
-            db, patient_id, slot_id, reason=request_text, workflow_run_id=workflow_id
+            db,
+            patient_id,
+            slot_id,
+            reason=request_text,
+            workflow_run_id=workflow_id,
+            booking_window_key=booking_window_key,
         )
     return reschedule_appointment(db, existing_id, slot_id, workflow_run_id=workflow_id)
+
+
+def _window_booking_key(
+    department_id: int,
+    window: RequestedWindow,
+    request_text: str,
+    workflow_id: int | None,
+) -> str:
+    key = (
+        f"department:{department_id}:"
+        f"{window.start.date().isoformat()}:{window.end.date().isoformat()}"
+    )
+    if _ADDITIONAL_APPOINTMENT.search(request_text):
+        return f"{key}:additional:{workflow_id or 'direct'}"
+    return key
+
+
+def _reuse_window_booking(
+    db: Session,
+    workflow_id: int | None,
+    appointment: Appointment,
+    window: RequestedWindow,
+) -> dict:
+    result = appointment_summary(appointment)
+    result["reused_existing"] = True
+    write_audit(
+        db,
+        None,
+        "appointment.duplicate_intent_reused",
+        "appointment",
+        appointment.id,
+        {"workflow_run_id": workflow_id},
+    )
+    record_agent_exit(
+        db,
+        "appointment",
+        workflow_id,
+        {"action": "book", "appointment_id": appointment.id, "reused": True},
+    )
+    return {
+        "appointment": result,
+        "requested_window": window.as_state(),
+        "scheduling_issue": (
+            "An active appointment already satisfies this department and "
+            "requested time window."
+        ),
+        "completed_steps": ["appointment"],
+    }
 
 
 # --- Replay guards -----------------------------------------------------------
@@ -254,6 +334,25 @@ def _handle_book_or_reschedule(
     # and the patient's stored preference breaks the tie for a short booking
     # request that carries none.
     request_text = state.get("request_text", "")
+    window = parse_requested_window(request_text)
+    booking_window_key = _window_booking_key(
+        department_id,
+        window,
+        request_text,
+        workflow_id,
+    )
+
+    if intent == "book" and not _ADDITIONAL_APPOINTMENT.search(request_text):
+        duplicate = find_active_patient_appointment_in_window(
+            db,
+            patient_id,
+            department_id,
+            window.start,
+            window.end,
+        )
+        if duplicate is not None:
+            return _reuse_window_booking(db, workflow_id, duplicate, window)
+
     llm_request_text, pii_counts = redact_for_llm(
         request_text,
         language=resolve_language(request_text, patient_language(db, patient_id)),
@@ -268,16 +367,36 @@ def _handle_book_or_reschedule(
             {"node": "appointment", "counts": pii_counts},
         )
 
-    today = date.today()
     slots = get_available_slots(
         db,
         department_id,
-        today,
-        today + timedelta(days=_SLOT_WINDOW_DAYS),
+        window.start.date(),
+        window.end.date(),
+        limit=_SLOT_CANDIDATE_LIMIT,
         patient_id=patient_id,
         exclude_appointment_id=existing_id,
+        not_before=window.start,
     )
-    slot_id = _pick_valid_slot(system, llm_request_text, slots)
+    if not slots:
+        issue = f"No open slots are available in the requested {window.label} window."
+        result = {
+            "status": "unavailable",
+            "requested_window": window.as_state(),
+        }
+        record_agent_exit(
+            db,
+            "appointment",
+            workflow_id,
+            {"action": intent, "available": False, "window": window.as_state()},
+        )
+        return {
+            "appointment": result,
+            "requested_window": window.as_state(),
+            "scheduling_issue": issue,
+            "completed_steps": ["appointment"],
+        }
+
+    slot_id = _pick_valid_slot(system, llm_request_text, slots, window)
     if slot_id is None:
         return _escalate_agent_failure(
             db,
@@ -288,32 +407,62 @@ def _handle_book_or_reschedule(
 
     try:
         result = _book_or_reschedule(
-            db, intent, patient_id, slot_id, request_text, existing_id, workflow_id
+            db,
+            intent,
+            patient_id,
+            slot_id,
+            request_text,
+            existing_id,
+            workflow_id,
+            booking_window_key,
         )
     except ConflictError:
+        if intent == "book":
+            duplicate = find_active_patient_appointment_in_window(
+                db,
+                patient_id,
+                department_id,
+                window.start,
+                window.end,
+            )
+            if duplicate is not None:
+                return _reuse_window_booking(db, workflow_id, duplicate, window)
         slots = get_available_slots(
             db,
             department_id,
-            today,
-            today + timedelta(days=_SLOT_WINDOW_DAYS),
+            window.start.date(),
+            window.end.date(),
+            limit=_SLOT_CANDIDATE_LIMIT,
             patient_id=patient_id,
             exclude_appointment_id=existing_id,
+            not_before=window.start,
         )
-        slot_id = _pick_valid_slot(system, llm_request_text, slots)
+        slot_id = _pick_valid_slot(system, llm_request_text, slots, window)
         if slot_id is None:
             return _escalate_agent_failure(
                 db, workflow_id, patient_id, "no valid slot left after a booking conflict"
             )
         try:
             result = _book_or_reschedule(
-                db, intent, patient_id, slot_id, request_text, existing_id, workflow_id
+                db,
+                intent,
+                patient_id,
+                slot_id,
+                request_text,
+                existing_id,
+                workflow_id,
+                booking_window_key,
             )
         except ConflictError:
             return _escalate_agent_failure(
                 db, workflow_id, patient_id, "repeated booking conflict on the same request"
             )
 
-    update = {"appointment": result, "completed_steps": ["appointment"]}
+    update = {
+        "appointment": result,
+        "requested_window": window.as_state(),
+        "completed_steps": ["appointment"],
+    }
     record_agent_exit(db, "appointment", workflow_id, {"action": intent, "appointment_id": result["id"]})
     return update
 

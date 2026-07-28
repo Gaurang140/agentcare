@@ -223,7 +223,7 @@ sts.googleapis.com
 
 ## 6. Create the main infrastructure
 
-For Groq plus Model Armor:
+Production uses Vertex plus Model Armor:
 
 ```bash
 make gcp-up \
@@ -232,12 +232,10 @@ make gcp-up \
   GCS_LOCATION="$REGION" \
   ENABLE_CLOUD_SQL=true \
   ENABLE_MODEL_ARMOR=true \
-  ENABLE_VERTEX_AI=false
+  ENABLE_VERTEX_AI=true
 ```
 
-For the configured Vertex profile, use `ENABLE_VERTEX_AI=true`. Groq is the
-lower-cost default and uses `openai/gpt-oss-120b` through the OpenAI-compatible
-LangChain adapter in `backend/llm.yaml`.
+Groq remains an optional local profile. It is not in the active GCP path.
 
 `gcp-up` always passes the same complete variable set used by destroy:
 
@@ -301,10 +299,11 @@ gcloud container clusters get-credentials "$GKE_CLUSTER" \
 kubectl --context "$GKE_CONTEXT" get namespace agentcare
 ```
 
-Read model and optional tracing secrets without echo:
+Read the private reviewer identity and optional tracing secret without echo:
 
 ```bash
-read -s LLM_API_KEY
+read -r AGENTCARE_STAFF_EMAIL
+read -s AGENTCARE_STAFF_PASSWORD
 printf '\n'
 read -s LANGFUSE_SECRET_KEY
 printf '\n'
@@ -323,12 +322,15 @@ DATABASE_URL="postgresql+psycopg://agentcare:${DB_PASSWORD}@${DB_HOST}:5432/agen
 
 ```bash
 {
-  printf 'LLM_API_KEY=%s\n' "$LLM_API_KEY"
+  printf 'LLM_API_KEY=\n'
   printf 'LLM_FALLBACK_API_KEY=\n'
   printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
   printf 'DATABASE_URL=%s\n' "$DATABASE_URL"
   printf 'INTERNAL_TASK_TOKEN=%s\n' "$INTERNAL_TASK_TOKEN"
   printf 'LANGFUSE_SECRET_KEY=%s\n' "$LANGFUSE_SECRET_KEY"
+  printf 'AGENTCARE_STAFF_EMAIL=%s\n' "$AGENTCARE_STAFF_EMAIL"
+  printf 'AGENTCARE_STAFF_PASSWORD=%s\n' "$AGENTCARE_STAFF_PASSWORD"
+  printf 'AGENTCARE_STAFF_NAME=AgentCare reviewer\n'
 } >"$SECRET_ENV"
 ```
 
@@ -339,7 +341,7 @@ kubectl --context "$GKE_CONTEXT" --namespace=agentcare create secret generic age
   | kubectl --context "$GKE_CONTEXT" --namespace=agentcare apply -f -
 rm -f "$SECRET_ENV"
 unset DB_PASSWORD DATABASE_URL JWT_SECRET INTERNAL_TASK_TOKEN
-unset LLM_API_KEY LANGFUSE_SECRET_KEY
+unset AGENTCARE_STAFF_EMAIL AGENTCARE_STAFF_PASSWORD LANGFUSE_SECRET_KEY
 ```
 
 Verify only the Secret name and keys, not values:
@@ -417,7 +419,8 @@ make gcp-release \
   REGION="$REGION" \
   PUBLIC_URL="$PUBLIC_URL" \
   ENABLE_DELIVERY=true \
-  LLM_PROFILE=groq \
+  ENABLE_VERTEX_AI=true \
+  LLM_PROFILE=vertex \
   LANGFUSE_PUBLIC_KEY="$LANGFUSE_PUBLIC_KEY" \
   LANGFUSE_BASE_URL="$LANGFUSE_BASE_URL" \
   LANGFUSE_SAMPLE_RATE="$LANGFUSE_SAMPLE_RATE"
@@ -426,7 +429,8 @@ make gcp-release \
 The local, operator-side command:
 
 1. synchronizes non-secret GitHub production variables
-2. checks only that `agentcare/agentcare-secrets` exists
+2. checks that the Secret has database, JWT and private staff keys without
+   printing their values
 3. confirms local `main` equals `origin/main`
 4. arms `DEPLOY_ENABLED` only immediately before dispatching `ci.yml`
 5. waits for the workflow result and disables delivery if a post-arm release
@@ -575,7 +579,7 @@ make gcp-down \
   GCS_LOCATION="$REGION" \
   ENABLE_CLOUD_SQL=true \
   ENABLE_MODEL_ARMOR=true \
-  ENABLE_VERTEX_AI=false
+  ENABLE_VERTEX_AI=true
 ```
 
 Document objects and Cloud SQL data are permanently deleted.
@@ -590,7 +594,7 @@ make gcp-cleanup \
   GCS_LOCATION="$REGION" \
   ENABLE_CLOUD_SQL=true \
   ENABLE_MODEL_ARMOR=true \
-  ENABLE_VERTEX_AI=false
+  ENABLE_VERTEX_AI=true
 ```
 
 What remains after `gcp-down`:

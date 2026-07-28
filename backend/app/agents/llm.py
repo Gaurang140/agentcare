@@ -41,6 +41,7 @@ Call sequence for one `invoke_structured(...)`:
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from typing import TypeVar
 
 import httpx
@@ -50,6 +51,7 @@ from google.genai.errors import ServerError as GoogleServerError
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, ValidationError
@@ -76,6 +78,19 @@ _DIRECT_RETRYABLE_EXCEPTIONS: tuple[type[Exception], ...] = (
 
 _override = None
 _override_fallback = None
+
+
+@lru_cache(maxsize=16)
+def _rate_limiter(
+    requests_per_second: float,
+    burst_size: int,
+) -> InMemoryRateLimiter:
+    """One thread-safe token bucket shared by identical model profiles."""
+    return InMemoryRateLimiter(
+        requests_per_second=requests_per_second,
+        check_every_n_seconds=0.1,
+        max_bucket_size=burst_size,
+    )
 
 
 class LLMOutputError(Exception):
@@ -134,6 +149,10 @@ def _build_chat_model(profile: ModelProfile, *, model_name: str | None = None) -
     credentials, and the endpoint answers 401 at call time either way."""
     name = model_name or profile.model
     kwargs: dict = dict(profile.params)
+    kwargs["rate_limiter"] = _rate_limiter(
+        profile.requests_per_second,
+        profile.burst_size,
+    )
     if profile.provider == "openai":
         kwargs["base_url"] = profile.base_url
         kwargs["api_key"] = settings.llm_api_key or "missing-key"

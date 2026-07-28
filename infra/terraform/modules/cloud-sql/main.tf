@@ -45,8 +45,26 @@ resource "google_sql_database_instance" "postgres" {
     # Smallest tier available. ENTERPRISE (not the newer default
     # ENTERPRISE_PLUS) is required for shared-core machine types like
     # db-f1-micro. This is a small dev/demo tier with no SLA.
-    tier    = "db-f1-micro"
-    edition = "ENTERPRISE"
+    tier            = "db-f1-micro"
+    edition         = "ENTERPRISE"
+    disk_autoresize = true
+
+    backup_configuration {
+      enabled                        = true
+      point_in_time_recovery_enabled = true
+      start_time                     = "02:00"
+
+      backup_retention_settings {
+        retained_backups = 7
+        retention_unit   = "COUNT"
+      }
+    }
+
+    maintenance_window {
+      day          = 7
+      hour         = 3
+      update_track = "stable"
+    }
 
     ip_configuration {
       ipv4_enabled    = false

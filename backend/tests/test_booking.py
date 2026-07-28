@@ -521,6 +521,51 @@ def test_one_run_cannot_hold_two_confirmed_bookings(db, seeded):
     assert other.status == "free"
 
 
+def test_booking_window_key_prevents_concurrent_duplicate_intent(db, seeded):
+    first_slot = (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.start_time >= datetime.now(),
+        )
+        .order_by(AppointmentSlot.start_time)
+        .first()
+    )
+    assert first_slot is not None
+    second_slot = (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.start_time >= first_slot.end_time,
+        )
+        .order_by(AppointmentSlot.start_time)
+        .first()
+    )
+    assert second_slot is not None
+    key = "department:1:2026-08-03:2026-08-09"
+
+    first = book_appointment(
+        db,
+        patient_id=1,
+        slot_id=first_slot.id,
+        reason="first request",
+        booking_window_key=key,
+    )
+
+    with pytest.raises(ConflictError, match="conflicts"):
+        book_appointment(
+            db,
+            patient_id=1,
+            slot_id=second_slot.id,
+            reason="concurrent duplicate request",
+            booking_window_key=key,
+        )
+
+    assert db.get(Appointment, first["id"]).status == "confirmed"
+    db.refresh(second_slot)
+    assert second_slot.status == "free"
+
+
 def test_rescheduling_into_a_second_confirmed_booking_for_one_run_conflicts(db, seeded):
     """The one-booking-per-run index fires inside the flush, and rescheduling
     stamps the run onto the row it moves. So moving a second appointment into
@@ -701,6 +746,9 @@ def test_list_patient_appointments_reflects_bookings(db, seeded):
     assert len(appts) == 1
     assert appts[0]["id"] == booking["id"]
     assert appts[0]["status"] == "confirmed"
+    assert appts[0]["end_time"] == booking["end_time"]
+    assert appts[0]["created_at"]
+    assert appts[0]["workflow_id"] is None
 
 
 def test_find_department_fuzzy_match(db, seeded):

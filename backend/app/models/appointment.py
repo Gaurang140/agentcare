@@ -73,6 +73,18 @@ class Appointment(Base):
             sqlite_where=text(_ONE_CONFIRMED_PER_RUN),
             postgresql_where=text(_ONE_CONFIRMED_PER_RUN),
         ),
+        Index(
+            "uq_appointments_patient_booking_window",
+            "patient_id",
+            "booking_window_key",
+            unique=True,
+            sqlite_where=text(
+                "booking_window_key IS NOT NULL AND status IN ('pending', 'confirmed')"
+            ),
+            postgresql_where=text(
+                "booking_window_key IS NOT NULL AND status IN ('pending', 'confirmed')"
+            ),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -87,6 +99,7 @@ class Appointment(Base):
     workflow_run_id: Mapped[int | None] = mapped_column(
         ForeignKey("workflow_runs.id"), nullable=True
     )
+    booking_window_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     scheduled_start: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     scheduled_end: Mapped[datetime] = mapped_column(DateTime, nullable=False)

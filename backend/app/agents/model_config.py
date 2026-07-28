@@ -32,7 +32,15 @@ _DEFAULT_PATH = Path(__file__).resolve().parents[2] / "llm.yaml"
 # passed through to init_chat_model untouched (e.g. google-genai's
 # `vertexai`, `location`, or `project`), so provider-specific knobs need no
 # code change.
-_KNOWN_KEYS = {"provider", "model", "base_url", "timeout", "max_retries"}
+_KNOWN_KEYS = {
+    "provider",
+    "model",
+    "base_url",
+    "timeout",
+    "max_retries",
+    "requests_per_second",
+    "burst_size",
+}
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,8 @@ class ModelProfile:
     base_url: str | None = None
     timeout: float = 30.0
     max_retries: int = 3
+    requests_per_second: float = 2.0
+    burst_size: int = 2
     params: dict = field(default_factory=dict)
 
 
@@ -66,12 +76,22 @@ def _profile_from_mapping(raw: dict) -> ModelProfile | None:
     with a warning instead of turning every request into a 500."""
     try:
         params = {k: v for k, v in raw.items() if k not in _KNOWN_KEYS}
+        timeout = float(raw.get("timeout", 30.0))
+        max_retries = int(raw.get("max_retries", 3))
+        requests_per_second = float(raw.get("requests_per_second", 2.0))
+        burst_size = int(raw.get("burst_size", 2))
+        if timeout <= 0 or max_retries < 1:
+            raise ValueError("timeout and max_retries must be positive")
+        if requests_per_second <= 0 or burst_size < 1:
+            raise ValueError("rate-limit values must be positive")
         return ModelProfile(
             provider=str(raw.get("provider", "openai")),
             model=str(raw.get("model", "")),
             base_url=raw.get("base_url"),
-            timeout=float(raw.get("timeout", 30.0)),
-            max_retries=int(raw.get("max_retries", 3)),
+            timeout=timeout,
+            max_retries=max_retries,
+            requests_per_second=requests_per_second,
+            burst_size=burst_size,
             params=params,
         )
     except (TypeError, ValueError) as exc:
@@ -145,6 +165,8 @@ def load_llm_profiles(
             base_url=overrides.get("base_url", primary.base_url),
             timeout=primary.timeout,
             max_retries=primary.max_retries,
+            requests_per_second=primary.requests_per_second,
+            burst_size=primary.burst_size,
             params=primary.params,
         )
 

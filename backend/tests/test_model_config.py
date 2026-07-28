@@ -57,7 +57,16 @@ def test_committed_yaml_provides_vertex_profile(monkeypatch):
 
     assert profiles.primary.provider == "google_genai"
     assert profiles.primary.model == "gemini-2.5-flash"
-    assert profiles.primary.params == {"vertexai": True}
+    assert profiles.primary.timeout == 30
+    assert profiles.primary.max_retries == 3
+    assert profiles.primary.requests_per_second == 2
+    assert profiles.primary.burst_size == 2
+    assert profiles.primary.params == {
+        "vertexai": True,
+        "location": "global",
+        "temperature": 0,
+        "max_output_tokens": 1024,
+    }
 
 
 def test_env_model_overrides_yaml(monkeypatch):

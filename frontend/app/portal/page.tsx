@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
@@ -33,6 +33,7 @@ export default function PortalHomePage() {
   const [text, setText] = useState("");
   const [files, setFiles] = useState<File[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const pendingIdempotencyKey = useRef<string | null>(null);
 
   const [runs, setRuns] = useState<WorkflowRunSummary[]>([]);
   const [runsLoading, setRunsLoading] = useState(true);
@@ -110,7 +111,9 @@ export default function PortalHomePage() {
       formData.append("text", text);
       for (const file of files) formData.append("files", file);
 
-      const result = await submitRequest(formData);
+      pendingIdempotencyKey.current ??= crypto.randomUUID();
+      const result = await submitRequest(formData, pendingIdempotencyKey.current);
+      pendingIdempotencyKey.current = null;
       toast.success("Request submitted");
       router.push(`/portal/workflows/${result.workflow_id}`);
     } catch (err) {

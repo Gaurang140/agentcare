@@ -5,15 +5,15 @@ agents use, with its own audit event carrying the real actor_id.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import ensure_owner_or_staff, get_current_user
 from app.db.session import get_db
-from app.exceptions import NotFoundError
+from app.exceptions import NotFoundError, ValidationError
 from app.models import Appointment, PatientProfile, Reminder, User
 from app.schemas.appointment import (
     AppointmentOut,
@@ -143,9 +143,12 @@ def cancel(
         id=result["id"],
         doctor=appt.doctor.name,
         department=appt.doctor.department.name,
-        start_time=appt.slot.start_time.isoformat() if appt.slot else None,
+        start_time=appt.scheduled_start.isoformat(),
+        end_time=appt.scheduled_end.isoformat(),
         status=result["status"],
         reason=appt.reason,
+        created_at=appt.created_at.isoformat(),
+        workflow_id=appt.workflow_run_id,
     )
 
 
@@ -164,10 +167,14 @@ def department_slots(
     db: Annotated[Session, Depends(get_db)],
     date_from: date | None = None,
     date_to: date | None = None,
-    limit: int = 20,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> list[SlotOut]:
     start = date_from or date.today()
     end = date_to or (start + timedelta(days=_DEFAULT_SLOT_WINDOW_DAYS))
+    if end < start:
+        raise ValidationError("date_to must be on or after date_from")
+    if (end - start).days > 90:
+        raise ValidationError("slot search window cannot exceed 90 days")
     return [
         SlotOut(**row)
         for row in get_available_slots(
@@ -177,6 +184,7 @@ def department_slots(
             end,
             limit,
             patient_id=current_user.id,
+            not_before=datetime.now(),
         )
     ]
 

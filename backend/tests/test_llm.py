@@ -574,18 +574,24 @@ def test_build_chat_model_passes_vertex_params_to_langchain_factory(monkeypatch)
         model="gemini-2.5-flash",
         params={"vertexai": True},
         timeout=45,
+        requests_per_second=2,
+        burst_size=2,
     )
 
     result = llm_module._build_chat_model(profile)
+    second = llm_module._build_chat_model(profile)
 
     assert result is sentinel
+    assert second is sentinel
     assert captured["args"] == ("gemini-2.5-flash",)
-    assert captured["kwargs"] == {
-        "model_provider": "google_genai",
-        "vertexai": True,
-        "timeout": 45,
-        "max_retries": 1,
-    }
+    assert captured["kwargs"]["model_provider"] == "google_genai"
+    assert captured["kwargs"]["vertexai"] is True
+    assert captured["kwargs"]["timeout"] == 45
+    assert captured["kwargs"]["max_retries"] == 1
+    assert (
+        captured["kwargs"]["rate_limiter"]
+        is llm_module._rate_limiter(2, 2)
+    )
 
 
 def test_build_chat_model_missing_provider_package_raises_helpful_error():

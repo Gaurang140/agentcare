@@ -157,7 +157,9 @@ Official reference:
 
 ## Langfuse
 
-Langfuse traces LangGraph and LangChain execution. AgentCare keeps it instead
+Langfuse traces sampled in-graph LangGraph and LangChain execution. It does
+not trace pre-graph gates, Model Armor calls or every SQL operation. AgentCare
+keeps it instead
 of adding LangSmith because a second callback backend would duplicate traces,
 configuration, privacy review and cost.
 
@@ -167,7 +169,7 @@ When enabled, Langfuse shows:
 - agent and model call timing
 - model name and parameters
 - input and output token counts
-- provider-reported cost details
+- token usage and cost estimates when available
 - observation type, level and error type
 - release SHA and environment
 
@@ -179,10 +181,11 @@ It intentionally does not show:
 - workflow, patient, user or session identifiers
 - metadata or exception messages
 
-`backend/app/observability/tracing.py` applies an export allowlist through the
-Langfuse SDK's `mask_otel_spans` hook. Unknown attributes are deleted. This is
-safer than trying to predict every content field introduced by future
-LangChain versions.
+`backend/app/observability/tracing.py` applies an export allowlist to span
+attributes through the Langfuse SDK's `mask_otel_spans` hook. Unknown
+attributes are deleted. This is defense in depth, not proof that future
+instrumentation cannot place content in span names, events, resources or
+links. Use synthetic data only.
 
 Official references:
 [Langfuse masking](https://langfuse.com/docs/observability/features/masking)
@@ -229,7 +232,7 @@ Check the keys directly without printing them:
    `agentcare/agentcare-secrets` Kubernetes Secret.
 2. Add `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_BASE_URL` and
    `LANGFUSE_SAMPLE_RATE` to the GitHub `production` environment.
-3. Push a commit to `main`.
+3. Confirm `DEPLOY_ENABLED=true`, then push to `main` or dispatch `ci.yml`.
 4. Submit a synthetic request and inspect the Langfuse trace.
 
 The next automatic release renders the public settings into the ConfigMap.
@@ -279,3 +282,7 @@ Before real patient use, an operator must review data residency, retention,
 access control, contractual terms and regulatory requirements for every
 external observability provider. The hackathon deployment should use synthetic
 data only.
+
+No custom Cloud Monitoring dashboard or alert policy is provisioned. GCP
+metrics are inspected in Metrics Explorer; the committed Grafana dashboard is
+for local Compose.

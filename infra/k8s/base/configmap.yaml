@@ -18,6 +18,7 @@ data:
   LANGFUSE_BASE_URL: "https://cloud.langfuse.com"
   LANGFUSE_SAMPLE_RATE: "0"
   APP_RELEASE: ""
+  SCHEDULER_ENABLED: "true"
   JWT_EXPIRE_MINUTES: "1440"
   STORAGE_BACKEND: "local"
   UPLOAD_DIR: "./uploads"

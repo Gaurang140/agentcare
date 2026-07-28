@@ -122,7 +122,8 @@ After Terraform, DNS and bootstrap are ready:
 make gcp-github-vars \
   PROJECT_ID=your-project \
   PUBLIC_URL=https://your-new-host \
-  LLM_PROFILE=groq
+  ENABLE_VERTEX_AI=true \
+  LLM_PROFILE=vertex
 ```
 
 The target creates the `production` environment if needed and synchronizes
@@ -172,6 +173,8 @@ DNS. Follow [GCP deployment](deployment-gcp.md), then:
 make gcp-release \
   PROJECT_ID=your-project \
   PUBLIC_URL=https://your-new-host \
+  ENABLE_VERTEX_AI=true \
+  LLM_PROFILE=vertex \
   ENABLE_DELIVERY=true
 ```
 
@@ -201,7 +204,7 @@ gh run watch
 
 | Secret | Location |
 |---|---|
-| Groq or compatible model key | local `.env`; operator-created `agentcare/agentcare-secrets` |
+| Groq or compatible model key | optional local `.env`; inactive on the Vertex production path |
 | `JWT_SECRET` | local `.env`; operator-created `agentcare/agentcare-secrets` |
 | `DATABASE_URL` | operator-created `agentcare/agentcare-secrets` |
 | Langfuse secret key | local `.env`; operator-created `agentcare/agentcare-secrets` |

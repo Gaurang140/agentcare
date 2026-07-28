@@ -127,7 +127,13 @@ def test_staff_can_read_any_patients_document(staff_client, other_patient_doc):
 def test_health_endpoint(client):
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok", "db": True}
+    assert r.json() == {
+        "status": "ok",
+        "db": True,
+        "database_dialect": "sqlite",
+        "database_revision": "unmanaged",
+        "release": "dev",
+    }
 
 
 def test_live_endpoint_does_not_require_database(client):

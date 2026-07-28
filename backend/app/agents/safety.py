@@ -36,8 +36,6 @@ from app.tools.audit_tools import write_audit
 
 logger = get_logger(__name__)
 
-_REMINDER_LOOKBACK = 10
-
 # Only these two are supported; anything else (missing profile, an
 # unrecognized code) falls back to English.
 _DEFAULT_LANGUAGE = "en"
@@ -113,14 +111,10 @@ def _summary_appointment_rows(
 
 
 def _appointment_line(appt_row: Appointment, language: str) -> str:
-    if appt_row.slot:
-        when = appt_row.slot.start_time.isoformat()
-    else:
-        when = (
-            "einen noch nicht festgelegten Zeitpunkt"
-            if language == "de"
-            else "an unscheduled time"
-        )
+    when = (
+        f"{appt_row.scheduled_start.isoformat()}–"
+        f"{appt_row.scheduled_end.isoformat()}"
+    )
     if language == "de":
         status = _APPOINTMENT_STATUS_DE.get(appt_row.status, appt_row.status)
         return (
@@ -159,13 +153,18 @@ def _compose_draft(db: Session, patient_id: int, appointment_ref: dict | None, l
         line = f"Vorliegende Dokumente: {types}." if language == "de" else f"Documents on file: {types}."
         lines.append(line)
 
-    reminders = (
-        db.query(Reminder)
-        .filter_by(patient_id=patient_id)
-        .order_by(Reminder.id.desc())
-        .limit(_REMINDER_LOOKBACK)
-        .all()
-    )
+    appointment_ids = [row.id for row in appointment_rows]
+    reminders = []
+    if appointment_ids:
+        reminders = (
+            db.query(Reminder)
+            .filter(
+                Reminder.patient_id == patient_id,
+                Reminder.appointment_id.in_(appointment_ids),
+            )
+            .order_by(Reminder.id)
+            .all()
+        )
     if reminders:
         summary = ", ".join(
             f"{r.reminder_type} on {r.scheduled_at.date().isoformat()}" for r in reminders
@@ -231,8 +230,9 @@ def run(state: AgentState, db: Session) -> dict:
             system = build_system_prompt(db, "safety", SAFETY)
             user_content = f"{draft}\n\n{_LANGUAGE_INSTRUCTIONS[language]}"
             llm_result = invoke_structured(system, user_content, SafetyOutput)
-            candidate = llm_result.rewritten or draft
             violations = list(llm_result.violations)
+            if not llm_result.safe:
+                candidate = SANITIZED_SENTENCE
         except Exception as exc:  # noqa: BLE001 - MOSAIC fallback: never block finalize on an LLM error
             llm_ok = False
             logger.warning("safety_llm_failed_using_deterministic_only", error=str(exc))

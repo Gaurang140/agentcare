@@ -10,6 +10,7 @@ from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.routes_auth import router as auth_router
@@ -94,4 +95,31 @@ def live() -> dict[str, str]:
 @app.get("/api/health")
 def health(db: Annotated[Session, Depends(get_db)]) -> dict:
     db.execute(text("SELECT 1"))
-    return {"status": "ok", "db": True}
+    dialect = db.get_bind().dialect.name
+    try:
+        revision = db.execute(
+            text("SELECT version_num FROM alembic_version")
+        ).scalar_one_or_none()
+    except SQLAlchemyError:
+        if settings.environment.strip().lower() not in {
+            "dev",
+            "development",
+            "test",
+        }:
+            raise
+        revision = "unmanaged"
+    if not revision:
+        if settings.environment.strip().lower() not in {
+            "dev",
+            "development",
+            "test",
+        }:
+            raise RuntimeError("database has no Alembic revision")
+        revision = "unmanaged"
+    return {
+        "status": "ok",
+        "db": True,
+        "database_dialect": dialect,
+        "database_revision": revision,
+        "release": settings.app_release or "dev",
+    }

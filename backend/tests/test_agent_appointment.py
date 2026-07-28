@@ -4,6 +4,8 @@ real available-slots list, plus conflict retry/escalate behavior.
 
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta
+
 from app.agents import appointment
 from app.exceptions import ConflictError
 from app.models import Appointment, AppointmentSlot, AuditEvent, Department, Escalation
@@ -19,7 +21,10 @@ def _cardiology_id(db) -> int:
 def _free_slots(db, limit=5):
     return (
         db.query(AppointmentSlot)
-        .filter_by(status="free")
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.start_time >= datetime.now(),
+        )
         .order_by(AppointmentSlot.start_time)
         .limit(limit)
         .all()
@@ -63,6 +68,79 @@ def test_book_picks_valid_slot_and_confirms(db, seeded, fake_llm):
     db.refresh(target)
     assert target.status == "booked"
     assert result["completed_steps"] == ["appointment"]
+
+
+def test_next_week_only_offers_and_books_slots_in_next_week(db, seeded, fake_llm):
+    dept_id = _cardiology_id(db)
+    today = date.today()
+    next_monday = today + timedelta(days=(7 - today.weekday()))
+    target = (
+        db.query(AppointmentSlot)
+        .filter(
+            AppointmentSlot.status == "free",
+            AppointmentSlot.start_time >= datetime.combine(next_monday, time.min),
+            AppointmentSlot.start_time
+            < datetime.combine(next_monday + timedelta(days=7), time.min),
+        )
+        .order_by(AppointmentSlot.start_time)
+        .first()
+    )
+    assert target is not None
+    client = fake_llm([{"slot_id": target.id, "reason": "inside requested week"}])
+
+    result = appointment.run(
+        _state(
+            department_id=dept_id,
+            request_text="Book a cardiology appointment next week",
+        ),
+        db,
+    )
+
+    booked = datetime.fromisoformat(result["appointment"]["start_time"])
+    assert next_monday <= booked.date() <= next_monday + timedelta(days=6)
+    prompt = client.chat.completions.calls[0]["messages"][-1]["content"]
+    candidate_listing = prompt.split("Available slots", maxsplit=1)[1]
+    assert today.isoformat() not in candidate_listing
+
+
+def test_explicit_window_with_no_slots_does_not_fall_back_or_call_llm(
+    db, seeded, fake_llm
+):
+    client = fake_llm([])
+
+    result = appointment.run(
+        _state(
+            department_id=_cardiology_id(db),
+            request_text="Book a cardiology appointment on 30 September 2030",
+        ),
+        db,
+    )
+
+    assert result["appointment"]["status"] == "unavailable"
+    assert result["scheduling_issue"]
+    assert client.chat.completions.calls == []
+
+
+def test_repeated_booking_intent_reuses_active_department_window_booking(
+    db, seeded, fake_llm
+):
+    dept_id = _cardiology_id(db)
+    target = _free_slots(db)[0]
+    client = fake_llm([{"slot_id": target.id, "reason": "first booking"}])
+
+    first = appointment.run(
+        _state(workflow_id=101, department_id=dept_id),
+        db,
+    )
+    second = appointment.run(
+        _state(workflow_id=102, department_id=dept_id),
+        db,
+    )
+
+    assert second["appointment"]["id"] == first["appointment"]["id"]
+    assert second["appointment"]["reused_existing"] is True
+    assert db.query(Appointment).count() == 1
+    assert len(client.chat.completions.calls) == 1
 
 
 def test_re_running_the_node_reuses_the_booking_instead_of_booking_twice(db, seeded, fake_llm):
@@ -130,11 +208,25 @@ def test_conflict_retries_with_refreshed_slots_then_books(db, seeded, fake_llm, 
     real_book = appointment.book_appointment
     calls = {"n": 0}
 
-    def _flaky_book(db_, patient_id, slot_id, reason, workflow_run_id=None):
+    def _flaky_book(
+        db_,
+        patient_id,
+        slot_id,
+        reason,
+        workflow_run_id=None,
+        booking_window_key=None,
+    ):
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConflictError("slot taken by someone else")
-        return real_book(db_, patient_id, slot_id, reason, workflow_run_id)
+        return real_book(
+            db_,
+            patient_id,
+            slot_id,
+            reason,
+            workflow_run_id,
+            booking_window_key,
+        )
 
     monkeypatch.setattr(appointment, "book_appointment", _flaky_book)
 
@@ -154,7 +246,14 @@ def test_repeated_conflict_escalates_agent_failure(db, seeded, fake_llm, monkeyp
         ]
     )
 
-    def _always_conflict(db_, patient_id, slot_id, reason, workflow_run_id=None):
+    def _always_conflict(
+        db_,
+        patient_id,
+        slot_id,
+        reason,
+        workflow_run_id=None,
+        booking_window_key=None,
+    ):
         raise ConflictError("always taken")
 
     monkeypatch.setattr(appointment, "book_appointment", _always_conflict)
@@ -192,7 +291,9 @@ def test_reschedule_intent_moves_to_new_slot(db, seeded, fake_llm):
     assert old_slot.status == "free"
 
 
-def test_new_workflow_filters_booking_created_by_previous_workflow(db, seeded, fake_llm):
+def test_explicit_additional_request_can_book_after_previous_workflow(
+    db, seeded, fake_llm
+):
     dept_id = _cardiology_id(db)
     first_slot = _free_slots(db)[0]
     second_slot = _next_non_overlapping_slot(db, first_slot)
@@ -204,7 +305,14 @@ def test_new_workflow_filters_booking_created_by_previous_workflow(db, seeded, f
     )
 
     first = appointment.run(_state(workflow_id=1, department_id=dept_id), db)
-    second = appointment.run(_state(workflow_id=2, department_id=dept_id), db)
+    second = appointment.run(
+        _state(
+            workflow_id=2,
+            department_id=dept_id,
+            request_text="Book another cardiology appointment",
+        ),
+        db,
+    )
 
     assert first["appointment"]["start_time"] == first_slot.start_time.isoformat()
     assert second["appointment"]["start_time"] == second_slot.start_time.isoformat()
@@ -239,6 +347,7 @@ def test_reschedule_excludes_appointment_being_moved_from_conflict_filter(
         limit=10,
         patient_id=None,
         exclude_appointment_id=None,
+        not_before=None,
     ):
         availability_context.append((patient_id, exclude_appointment_id))
         return get_available_slots(
@@ -249,6 +358,7 @@ def test_reschedule_excludes_appointment_being_moved_from_conflict_filter(
             limit,
             patient_id,
             exclude_appointment_id,
+            not_before,
         )
 
     monkeypatch.setattr(appointment, "get_available_slots", _capturing_slots)
@@ -315,9 +425,10 @@ def test_status_intent_returns_current_sql_backed_appointments_without_llm_call(
             {
                 "id": booking["id"],
                 "doctor": booking["doctor"],
-                "department": booking["department"],
-                "start_time": booking["start_time"],
-                "status": "confirmed",
+                    "department": booking["department"],
+                    "start_time": booking["start_time"],
+                    "end_time": booking["end_time"],
+                    "status": "confirmed",
             }
         ],
     }
@@ -344,16 +455,18 @@ def test_status_with_multiple_active_appointments_returns_all_without_clarificat
         first["id"]: {
             "id": first["id"],
             "doctor": first["doctor"],
-            "department": first["department"],
-            "start_time": first["start_time"],
-            "status": "confirmed",
+                "department": first["department"],
+                "start_time": first["start_time"],
+                "end_time": first["end_time"],
+                "status": "confirmed",
         },
         second["id"]: {
             "id": second["id"],
             "doctor": second["doctor"],
-            "department": second["department"],
-            "start_time": second["start_time"],
-            "status": "confirmed",
+                "department": second["department"],
+                "start_time": second["start_time"],
+                "end_time": second["end_time"],
+                "status": "confirmed",
         },
     }
     assert result.get("escalation_id") is None
